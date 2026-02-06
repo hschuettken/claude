@@ -18,11 +18,13 @@ This file provides guidance for AI assistants working with this repository.
 ├── CLAUDE.md                                # This file
 ├── README.md                                # Project readme
 ├── docker-compose.yml                       # Orchestrates all services
+├── docker-compose.override.example.yml      # Dev mode template (live code + debugger)
 ├── .env.example                             # Template for secrets (copy to .env)
 ├── .gitignore
+├── .vscode/launch.json                      # VS Code debugger attach configs
 ├── base/                                    # Shared Docker base image
 │   ├── Dockerfile                           #   Python 3.12-slim + common deps
-│   └── requirements.txt                     #   Pinned shared dependencies
+│   └── requirements.txt                     #   Pinned shared dependencies (incl. debugpy)
 ├── shared/                                  # Shared Python library (mounted into every container)
 │   ├── __init__.py
 │   ├── config.py                            #   Pydantic settings from env vars
@@ -30,7 +32,7 @@ This file provides guidance for AI assistants working with this repository.
 │   ├── ha_client.py                         #   Home Assistant async REST client
 │   ├── influx_client.py                     #   InfluxDB v2 query wrapper
 │   ├── mqtt_client.py                       #   MQTT pub/sub wrapper
-│   └── service.py                           #   BaseService class (inherit this)
+│   └── service.py                           #   BaseService class (heartbeat, debugger, shutdown)
 ├── services/                                # One directory per microservice
 │   ├── pv-forecast/                         #   AI solar production forecast
 │   │   ├── Dockerfile
@@ -41,7 +43,8 @@ This file provides guidance for AI assistants working with this repository.
 │   │   ├── data.py                          #   InfluxDB data collector
 │   │   ├── model.py                         #   Gradient Boosting ML model
 │   │   ├── forecast.py                      #   Forecast orchestrator
-│   │   └── ha_sensors.py                    #   Push forecasts to HA sensors
+│   │   ├── ha_sensors.py                    #   Push forecasts to HA sensors
+│   │   └── diagnose.py                      #   Step-by-step connectivity/data diagnostic
 │   └── example-service/                     #   Template service
 │       ├── Dockerfile
 │       ├── requirements.txt                 #   Service-specific deps only
@@ -61,6 +64,42 @@ This file provides guidance for AI assistants working with this repository.
 cp .env.example .env           # Fill in your HA token, InfluxDB creds, etc.
 ./scripts/build-base.sh        # Build the shared base Docker image
 docker compose up --build      # Start everything
+```
+
+### Dev mode (recommended for development)
+
+```bash
+cp docker-compose.override.example.yml docker-compose.override.yml
+```
+
+This mounts source code directly into containers — edit code, restart, no rebuild:
+
+```bash
+docker compose up pv-forecast            # start service
+# edit code...
+docker compose restart pv-forecast       # picks up changes in ~2 seconds
+docker compose logs -f pv-forecast       # watch output
+```
+
+### Diagnosing issues
+
+```bash
+docker compose run --rm pv-forecast python diagnose.py            # test everything
+docker compose run --rm pv-forecast python diagnose.py --step ha  # test just HA
+```
+
+Steps: `config`, `ha`, `influx`, `mqtt`, `weather`, `forecast`, `all`
+
+### Debugging with VS Code
+
+1. Ensure `DEBUG_SERVICE=pv-forecast` is set in `docker-compose.override.yml`
+2. `docker compose up pv-forecast` — service pauses, waiting for debugger
+3. In VS Code: press F5 → "Attach to pv-forecast"
+4. Set breakpoints, inspect variables, step through code
+
+For quick debugging without VS Code, add `breakpoint()` anywhere in the code and run:
+```bash
+docker compose run --rm pv-forecast python main.py
 ```
 
 ### Creating a new service
@@ -97,7 +136,17 @@ Every service inherits from `shared.service.BaseService`. This gives you:
 - `self.mqtt` — MQTT pub/sub client
 - `self.publish(event, data)` — Publish to `homelab/{service-name}/{event}`
 - `self.wait_for_shutdown()` — Block until SIGTERM/SIGINT
+- Automatic MQTT heartbeat (every 60s, configurable)
+- VS Code debugger support (via `DEBUG_SERVICE` env var)
 - Graceful shutdown with resource cleanup
+
+### MQTT heartbeat
+
+All services automatically publish to `homelab/{service-name}/heartbeat` every 60s:
+```json
+{"status": "online", "service": "pv-forecast", "uptime_seconds": 3661.2, "memory_mb": 42.3}
+```
+Override `health_check()` to add custom status. Publishes `"offline"` on graceful shutdown. Configure interval via `HEARTBEAT_INTERVAL_SECONDS` (0 to disable).
 
 ### MQTT topic convention
 
@@ -127,7 +176,7 @@ Environment variables map to field names: `MY_CUSTOM_VAR` env var → `my_custom
 Predicts PV output (kWh) for east and west arrays using a Gradient Boosting model
 trained on historical production data (InfluxDB) correlated with weather features (Open-Meteo).
 
-**Data flow**: InfluxDB (actual production) + Open-Meteo (radiation/clouds/temp) → ML model → HA sensors
+**Data flow**: InfluxDB (actual production) + Open-Meteo (radiation/clouds/temp) + Forecast.Solar (optional) → ML model → HA sensors
 
 **Falls back** to radiation-based estimation when <14 days of training data exist.
 
@@ -145,7 +194,7 @@ Each sensor includes an `hourly` attribute with per-hour breakdown.
 
 **MQTT events**: `homelab/pv-forecast/updated`, `homelab/pv-forecast/model-trained`
 
-**Config** (env vars): `PV_EAST_ENERGY_ENTITY_ID`, `PV_EAST_CAPACITY_KWP`, `PV_EAST_AZIMUTH`, `PV_EAST_TILT` (same for west). Location auto-detected from HA if not set.
+**Config** (env vars): `PV_EAST_ENERGY_ENTITY_ID`, `PV_EAST_CAPACITY_KWP`, `PV_EAST_AZIMUTH`, `PV_EAST_TILT` (same for west). `FORECAST_SOLAR_EAST_ENTITY_ID` / `WEST` (optional — used as ML feature). Location auto-detected from HA if not set.
 
 ## Code Conventions
 
