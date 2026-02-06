@@ -112,19 +112,79 @@ class PVDataCollector:
         )
         return result
 
+    def get_forecast_solar_history(
+        self,
+        entity_id: str,
+        days_back: int = 90,
+    ) -> pd.DataFrame:
+        """Get historical Forecast.Solar predictions from InfluxDB.
+
+        The Forecast.Solar integration in HA typically stores daily kWh
+        predictions. We query these and align them by date so the model
+        can learn the bias of Forecast.Solar predictions.
+
+        Returns a DataFrame with columns: [time, forecast_solar_kwh].
+        """
+        if not entity_id:
+            return pd.DataFrame(columns=["time", "forecast_solar_kwh"])
+
+        range_start = f"-{days_back}d"
+
+        records = self.influx.query_records(
+            bucket=self.settings.influxdb_bucket,
+            entity_id=entity_id,
+            range_start=range_start,
+        )
+
+        if not records:
+            logger.info("no_forecast_solar_data", entity_id=entity_id)
+            return pd.DataFrame(columns=["time", "forecast_solar_kwh"])
+
+        df = pd.DataFrame(records)
+        if "_time" not in df.columns or "_value" not in df.columns:
+            return pd.DataFrame(columns=["time", "forecast_solar_kwh"])
+
+        df = df.rename(columns={"_time": "time", "_value": "forecast_solar_kwh"})
+        df["time"] = pd.to_datetime(df["time"], utc=True)
+        df["forecast_solar_kwh"] = pd.to_numeric(df["forecast_solar_kwh"], errors="coerce")
+        df = df.dropna(subset=["forecast_solar_kwh"])
+        df = df[["time", "forecast_solar_kwh"]]
+
+        # Forecast.Solar values are daily totals — spread them across
+        # daylight hours so they align with hourly training rows.
+        # We assign the daily value to every hour of that day; the model
+        # learns the per-hour contribution from the other features.
+        df["date"] = df["time"].dt.date
+
+        # Take the last reported value per day (most up-to-date forecast)
+        daily = df.sort_values("time").groupby("date")["forecast_solar_kwh"].last()
+        daily = daily.reset_index()
+        daily.columns = ["date", "forecast_solar_kwh"]
+
+        logger.info(
+            "forecast_solar_data_loaded",
+            entity_id=entity_id,
+            days=len(daily),
+        )
+        return daily
+
     async def get_training_data(
         self,
         entity_id: str,
         capacity_kwp: float,
         days_back: int = 90,
+        forecast_solar_entity_id: str = "",
     ) -> pd.DataFrame:
         """Build a training dataset: weather features + actual hourly production.
+
+        Optionally includes Forecast.Solar predictions as an extra feature
+        when forecast_solar_entity_id is provided.
 
         Returns a DataFrame with columns:
             time, kwh, hour, day_of_year, month,
             shortwave_radiation, direct_radiation, diffuse_radiation,
             cloud_cover, temperature_2m, wind_speed_10m, ...
-            capacity_kwp
+            capacity_kwp, forecast_solar_kwh (if available)
         """
         # Get production history from InfluxDB
         production = self.get_production_history(entity_id, days_back)
@@ -174,7 +234,24 @@ class PVDataCollector:
         merged["month"] = merged["time"].dt.month
         merged["capacity_kwp"] = capacity_kwp
 
-        # Only keep daylight hours (6-21) — no point training on nighttime
+        # Merge Forecast.Solar predictions (daily value joined by date)
+        if forecast_solar_entity_id:
+            fs_daily = self.get_forecast_solar_history(
+                forecast_solar_entity_id, days_back
+            )
+            if not fs_daily.empty:
+                merged["date"] = merged["time"].dt.date
+                merged = merged.merge(fs_daily, on="date", how="left")
+                # Fill missing days with 0 — model handles it gracefully
+                merged["forecast_solar_kwh"] = merged["forecast_solar_kwh"].fillna(0)
+                merged = merged.drop(columns=["date"])
+                logger.info(
+                    "forecast_solar_merged",
+                    matched_rows=int((merged["forecast_solar_kwh"] > 0).sum()),
+                    total_rows=len(merged),
+                )
+
+        # Only keep daylight hours (5-21) — no point training on nighttime
         merged = merged[(merged["hour"] >= 5) & (merged["hour"] <= 21)]
 
         logger.info(
@@ -182,6 +259,7 @@ class PVDataCollector:
             entity_id=entity_id,
             samples=len(merged),
             date_range=f"{start_date} to {end_date}",
+            has_forecast_solar="forecast_solar_kwh" in merged.columns,
         )
         return merged
 

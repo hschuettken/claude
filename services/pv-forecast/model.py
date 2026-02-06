@@ -9,6 +9,11 @@ Two modes:
 The model learns array-specific factors like shading patterns, inverter
 efficiency curves, and panel degradation — things a generic forecast
 (like Forecast.Solar) can't account for.
+
+When Forecast.Solar predictions are available as a feature, the model
+learns to correct its biases (e.g., "Forecast.Solar overestimates by
+20% on cloudy days for this array"). This ensemble approach typically
+outperforms either source alone.
 """
 
 from __future__ import annotations
@@ -44,6 +49,7 @@ FEATURE_COLS = [
     "wind_speed_10m",
     "sunshine_duration",
     "capacity_kwp",
+    "forecast_solar_kwh",  # Forecast.Solar prediction (daily total for this array)
 ]
 
 
