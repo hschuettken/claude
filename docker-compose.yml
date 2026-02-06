@@ -54,6 +54,20 @@ services:
   # Application services — add your services below
   # =============================================================
 
+  pv-forecast:
+    build:
+      context: .
+      dockerfile: services/pv-forecast/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./shared:/app/shared:ro
+      - pv_forecast_data:/app/data
+    depends_on:
+      - mqtt
+    networks:
+      - homelab
+
   example-service:
     build:
       context: .
@@ -86,6 +100,7 @@ services:
 # =============================================================
 
 volumes:
+  pv_forecast_data:
   mosquitto_data:
   # influxdb_data:
   # ollama_data:

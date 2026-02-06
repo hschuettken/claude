@@ -1,0 +1,5 @@
+# ML and data processing
+scikit-learn>=1.4,<2
+numpy>=1.26,<3
+pandas>=2.2,<3
+joblib>=1.3,<2

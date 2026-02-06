@@ -32,6 +32,16 @@ This file provides guidance for AI assistants working with this repository.
 │   ├── mqtt_client.py                       #   MQTT pub/sub wrapper
 │   └── service.py                           #   BaseService class (inherit this)
 ├── services/                                # One directory per microservice
+│   ├── pv-forecast/                         #   AI solar production forecast
+│   │   ├── Dockerfile
+│   │   ├── requirements.txt                 #   scikit-learn, pandas, numpy
+│   │   ├── main.py                          #   Entry point + scheduler
+│   │   ├── config.py                        #   PV-specific settings
+│   │   ├── weather.py                       #   Open-Meteo API client
+│   │   ├── data.py                          #   InfluxDB data collector
+│   │   ├── model.py                         #   Gradient Boosting ML model
+│   │   ├── forecast.py                      #   Forecast orchestrator
+│   │   └── ha_sensors.py                    #   Push forecasts to HA sensors
 │   └── example-service/                     #   Template service
 │       ├── Dockerfile
 │       ├── requirements.txt                 #   Service-specific deps only
@@ -109,6 +119,33 @@ class MySettings(BaseSettings):
 ```
 
 Environment variables map to field names: `MY_CUSTOM_VAR` env var → `my_custom_var` field.
+
+## Services
+
+### pv-forecast — AI Solar Production Forecast
+
+Predicts PV output (kWh) for east and west arrays using a Gradient Boosting model
+trained on historical production data (InfluxDB) correlated with weather features (Open-Meteo).
+
+**Data flow**: InfluxDB (actual production) + Open-Meteo (radiation/clouds/temp) → ML model → HA sensors
+
+**Falls back** to radiation-based estimation when <14 days of training data exist.
+
+**Schedule**: Forecast every hour, model retrain at 1 AM UTC daily.
+
+**HA output sensors** (prefix configurable via `HA_SENSOR_PREFIX`):
+- `sensor.pv_ai_forecast_today_kwh` — total both arrays
+- `sensor.pv_ai_forecast_today_remaining_kwh` — remaining from current hour
+- `sensor.pv_ai_forecast_tomorrow_kwh`
+- `sensor.pv_ai_forecast_day_after_tomorrow_kwh`
+- `sensor.pv_ai_forecast_east_today_kwh` / `west_today_kwh`
+- `sensor.pv_ai_forecast_east_tomorrow_kwh` / `west_tomorrow_kwh`
+
+Each sensor includes an `hourly` attribute with per-hour breakdown.
+
+**MQTT events**: `homelab/pv-forecast/updated`, `homelab/pv-forecast/model-trained`
+
+**Config** (env vars): `PV_EAST_ENERGY_ENTITY_ID`, `PV_EAST_CAPACITY_KWP`, `PV_EAST_AZIMUTH`, `PV_EAST_TILT` (same for west). Location auto-detected from HA if not set.
 
 ## Code Conventions
 
