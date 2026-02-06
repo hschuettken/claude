@@ -1,0 +1,95 @@
+services:
+  # =============================================================
+  # Infrastructure services
+  # =============================================================
+
+  mqtt:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./infrastructure/mosquitto/config:/mosquitto/config
+      - mosquitto_data:/mosquitto/data
+    networks:
+      - homelab
+
+  # Uncomment if you want to run InfluxDB locally (skip if external)
+  # influxdb:
+  #   image: influxdb:2
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8086:8086"
+  #   volumes:
+  #     - influxdb_data:/var/lib/influxdb2
+  #   environment:
+  #     DOCKER_INFLUXDB_INIT_MODE: setup
+  #     DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUXDB_INIT_USER:-admin}
+  #     DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUXDB_INIT_PASSWORD:-changeme}
+  #     DOCKER_INFLUXDB_INIT_ORG: ${INFLUXDB_ORG:-homelab}
+  #     DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUXDB_BUCKET:-homeassistant}
+  #   networks:
+  #     - homelab
+
+  # Uncomment to enable local AI with Ollama
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   restart: unless-stopped
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   # Uncomment for GPU passthrough (NVIDIA):
+  #   # deploy:
+  #   #   resources:
+  #   #     reservations:
+  #   #       devices:
+  #   #         - driver: nvidia
+  #   #           count: all
+  #   #           capabilities: [gpu]
+  #   networks:
+  #     - homelab
+
+  # =============================================================
+  # Application services — add your services below
+  # =============================================================
+
+  example-service:
+    build:
+      context: .
+      dockerfile: services/example-service/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./shared:/app/shared:ro
+    depends_on:
+      - mqtt
+    networks:
+      - homelab
+
+  # --- Template for new services ---
+  # my-new-service:
+  #   build:
+  #     context: .
+  #     dockerfile: services/my-new-service/Dockerfile
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   volumes:
+  #     - ./shared:/app/shared:ro
+  #   depends_on:
+  #     - mqtt
+  #   networks:
+  #     - homelab
+
+# =============================================================
+# Volumes & Networks
+# =============================================================
+
+volumes:
+  mosquitto_data:
+  # influxdb_data:
+  # ollama_data:
+
+networks:
+  homelab:
+    driver: bridge
