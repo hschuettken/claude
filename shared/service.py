@@ -76,6 +76,8 @@ class BaseService:
 
     async def start(self) -> None:
         """Start the service with graceful shutdown handling."""
+        self._maybe_start_debugger()
+
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, self._handle_shutdown)
@@ -124,6 +126,33 @@ class BaseService:
         """Publish an event on the service's MQTT topic."""
         topic = f"homelab/{self.name}/{event_type}"
         self.mqtt.publish(topic, data)
+
+    # --- Debugger ---
+
+    def _maybe_start_debugger(self) -> None:
+        """Start debugpy if DEBUG_SERVICE env var matches this service.
+
+        Set DEBUG_SERVICE=<service-name> to enable. The service will
+        pause at startup until VS Code connects on port 5678.
+        """
+        debug_service = os.environ.get("DEBUG_SERVICE", "")
+        if debug_service != self.name:
+            return
+
+        try:
+            import debugpy
+            debugpy.listen(("0.0.0.0", 5678))
+            self.logger.info(
+                "debugger_waiting",
+                port=5678,
+                hint="Attach VS Code debugger now (F5)",
+            )
+            debugpy.wait_for_client()
+            self.logger.info("debugger_attached")
+        except ImportError:
+            self.logger.warning("debugpy_not_installed")
+        except Exception:
+            self.logger.exception("debugger_start_failed")
 
     # --- Heartbeat ---
 

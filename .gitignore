@@ -16,7 +16,8 @@ docker-compose.override.yml
 
 # IDE
 .idea/
-.vscode/
+.vscode/*
+!.vscode/launch.json
 *.swp
 *.swo
 *~

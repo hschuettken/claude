@@ -21,3 +21,6 @@ httpx>=0.27,<1                   # Modern async HTTP client
 
 # === Scheduling ===
 apscheduler>=3.10,<4             # Task scheduling for periodic jobs
+
+# === Debugging ===
+debugpy>=1.8,<2                  # VS Code remote debugger
