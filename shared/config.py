@@ -49,3 +49,4 @@ class Settings(BaseSettings):
     # --- General ---
     log_level: str = "INFO"
     timezone: str = "Europe/Berlin"
+    heartbeat_interval_seconds: int = 60  # MQTT heartbeat interval (0 to disable)
