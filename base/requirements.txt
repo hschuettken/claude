@@ -1,0 +1,26 @@
+# === Home Assistant integration ===
+homeassistant-api==4.2.0         # REST API client
+websockets>=12.0,<14.0           # WebSocket API for real-time events
+
+# === InfluxDB ===
+influxdb-client[async]>=1.40,<2  # InfluxDB v2 client (includes async support)
+
+# === MQTT ===
+paho-mqtt>=2.0,<3                # MQTT client for inter-service messaging
+
+# === Configuration & utilities ===
+pydantic>=2.5,<3                 # Settings validation and parsing
+pydantic-settings>=2.1,<3        # .env file loading
+python-dotenv>=1.0,<2            # Fallback .env loading
+
+# === Logging & observability ===
+structlog>=24.1,<26              # Structured logging
+
+# === HTTP ===
+httpx>=0.27,<1                   # Modern async HTTP client
+
+# === Scheduling ===
+apscheduler>=3.10,<4             # Task scheduling for periodic jobs
+
+# === Debugging ===
+debugpy>=1.8,<2                  # VS Code remote debugger

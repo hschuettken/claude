@@ -1,0 +1,42 @@
+# docker-compose.override.yml — DEV MODE
+#
+# Docker Compose auto-loads this file alongside docker-compose.yml.
+# It mounts your source code directly into containers, so you can
+# edit code and just restart the container — no rebuild needed.
+#
+# Usage:
+#   docker compose up pv-forecast        # start with live code
+#   # edit code...
+#   docker compose restart pv-forecast   # pick up changes instantly
+#
+# This file is in .gitignore — it's your personal dev config.
+# To run in "production mode" without this, use:
+#   docker compose -f docker-compose.yml up
+#
+# === VS Code Debugging ===
+# To debug a service:
+#   1. Set DEBUG_SERVICE=pv-forecast (or whichever service)
+#   2. docker compose up pv-forecast
+#   3. In VS Code: Run → "Attach to pv-forecast" (F5)
+#   4. Set breakpoints in VS Code — they work!
+#
+# To disable debugging, comment out the DEBUG_SERVICE line.
+#
+services:
+  pv-forecast:
+    volumes:
+      - ./services/pv-forecast:/app          # live mount service code
+      - ./shared:/app/shared:ro              # already in base, but ensure latest
+      - pv_forecast_data:/app/data
+    environment:
+      - LOG_LEVEL=DEBUG                      # verbose logging in dev
+      - DEBUG_SERVICE=pv-forecast            # enables debugpy, waits for VS Code
+    ports:
+      - "5678:5678"                          # VS Code debugger port
+
+  example-service:
+    volumes:
+      - ./services/example-service:/app
+      - ./shared:/app/shared:ro
+    environment:
+      - LOG_LEVEL=DEBUG

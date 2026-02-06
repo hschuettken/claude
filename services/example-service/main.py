@@ -1,0 +1,55 @@
+"""Example service — use this as a template for new services.
+
+This service demonstrates:
+  - Inheriting from BaseService for automatic setup
+  - Subscribing to MQTT topics
+  - Querying Home Assistant
+  - Publishing MQTT events
+  - Graceful shutdown
+"""
+
+import asyncio
+
+from shared.service import BaseService
+
+
+class ExampleService(BaseService):
+    name = "example-service"
+
+    async def run(self) -> None:
+        self.logger.info("example_service_started")
+
+        # Connect MQTT in background thread
+        self.mqtt.connect_background()
+
+        # Subscribe to a topic
+        self.mqtt.subscribe(
+            "homelab/#",
+            lambda topic, payload: self.logger.info(
+                "mqtt_message", topic=topic, payload=payload
+            ),
+        )
+
+        # Example: read a HA sensor on startup
+        # state = await self.ha.get_state("sensor.temperature_living_room")
+        # self.logger.info("sensor_state", state=state["state"])
+
+        # Example: query InfluxDB for the last hour
+        # records = self.influx.query_records(
+        #     bucket=self.settings.influxdb_bucket,
+        #     entity_id="sensor.temperature_living_room",
+        #     range_start="-1h",
+        # )
+        # for r in records:
+        #     self.logger.info("influx_record", time=r["_time"], value=r["_value"])
+
+        # Example: publish an event
+        self.publish("started", {"status": "ok"})
+
+        # Keep running until shutdown signal
+        await self.wait_for_shutdown()
+
+
+if __name__ == "__main__":
+    service = ExampleService()
+    asyncio.run(service.start())
