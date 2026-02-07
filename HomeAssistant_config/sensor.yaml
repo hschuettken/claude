@@ -1,0 +1,112 @@
+
+    - name: "Feuchte Bad OG (rel)"
+      state_address: "7/4/160"
+      type: humidity
+      state_class: measurement
+      device_class: humidity
+
+    - name: "Feuchte Bad OG (abs)"
+      state_address: "7/4/161"
+      type: absolute_humidity
+      state_class: measurement
+      device_class: humidity
+
+    - name: "Lux Bad OG"
+      state_address: "8/5/160"
+      type: illuminance
+      state_class: measurement
+      device_class: illuminance
+
+    - name: "Lux Flur OG"
+      state_address: "8/5/150"
+      type: illuminance
+      state_class: measurement
+      device_class: illuminance
+      
+    - name: "Lux Wohnzimmer"
+      state_address: "8/5/90"
+      type: illuminance
+      state_class: measurement
+      device_class: illuminance      
+
+    - name: "Feuchte Wohnzimmer (rel)"
+      state_address: "7/4/110"
+      type: humidity
+      state_class: measurement
+      device_class: humidity
+
+    - name: "Bad EG Diagnosetext"
+      state_address: "3/5/71"
+      type: latin_1
+      #state_class: measurement
+      #device_class: illuminance
+
+    - name: "Feuchte Bad EG (rel)"
+      state_address: "7/4/50"
+      type: humidity
+      state_class: measurement
+      device_class: humidity
+
+    - name: "Bus Strommesswert"
+      state_address: "9/0/6"
+      type: current
+      state_class: measurement
+      device_class: current
+
+    - name: "Bus Spannungsmesswert"
+      state_address: "9/0/7"
+      type: voltage
+      state_class: measurement
+      device_class: voltage
+
+    - name: "Busverkehr"
+      state_address: "9/0/8"
+      type: percent
+      state_class: measurement
+
+    - name: "Bus Statusausgabe"
+      state_address: "9/0/10"
+      type: latin_1
+      #state_class: measurement
+      #device_class: voltage
+
+    - name: "Bus Statustext"
+      state_address: "9/0/11"
+      type: latin_1
+      #state_class: measurement
+      #device_class: voltage
+
+
+    - name: "Büro test Heizen Ventilstellwert"
+      state_address: "3/5/182"
+      type: percent
+      state_class: measurement
+
+    - name: "Bad OG Heizen Ventilstellwert"
+      state_address: "3/5/164"
+      type: percent
+      state_class: measurement
+    - name: "Bad OG Radiator Heizen Ventilstellwert"
+      state_address: "3/5/165"
+      type: percent
+      state_class: measurement
+
+    - name: "Wohnzimmer Heizen Ventilstellwert"
+      state_address: "3/5/94"
+      type: percent
+      state_class: measurement
+
+    - name: "Terassentür"
+      state_address: "7/3/110"
+      type: temperature
+      state_class: measurement
+
+    - name: "Esszimmer/Küche Wand"
+      state_address: "7/3/112"
+      type: temperature
+      state_class: measurement
+#präsenz:
+
+
+  
+

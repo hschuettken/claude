@@ -1,0 +1,138 @@
+    - name: "Bad EG heating"
+      state_address: "3/5/70"
+
+    - name: "Busverkehrsüberschreitung"
+      state_address: "9/0/9"
+
+# präsenz
+# BAD OG
+    - name: "Bad OG LK1 (Dusche)"
+      state_address: "8/1/160"
+      device_class: motion
+
+#    - name: "Bad OG LK2 (Waschbecken)"
+#      state_address: "8/1/161"
+#      device_class: motion
+
+#    - name: "Bad OG LK3 (Toilette)"
+#      state_address: "8/1/162"
+#      device_class: motion
+
+
+# Wohnzimmer
+    - name: "Wohnzimmer LK1 (Küche)"
+      state_address: "8/1/90"
+      device_class: motion
+
+    - name: "Wohnzimmer LK2 (Esszimmer)"
+      state_address: "8/1/91"
+      device_class: motion
+
+    - name: "Wohnzimmer LK3 (Wohnzimmer / Eingang)"
+      state_address: "8/1/92"
+      device_class: motion      
+
+# Fensterkontakte
+
+
+    - name: "Haustür"
+      state_address: "5/4/50"
+      device_class: window
+      invert: true
+    - name: "Gästebad Fenster"
+      state_address: "5/4/60"
+      device_class: window
+      invert: true
+    - name: "Bad EG Fenster"
+      state_address: "5/4/70"
+      device_class: window
+      invert: true
+    - name: "Sport Fenster"
+      state_address: "5/4/80"
+      device_class: window
+      invert: true
+    - name: "Wohnzimmer alle Fenster"
+      state_address: "5/4/90"
+      device_class: window
+      invert: true
+    - name: "Wohnzimmer Fenster hinten"
+      state_address: "5/4/91"
+      device_class: window
+      invert: true
+    - name: "Wohnzimmer Fenster Kamin"
+      state_address: "5/4/92"
+      device_class: window
+      invert: true
+    - name: "Esszimmer Terassentür"
+      state_address: "5/4/110"
+      device_class: window
+      invert: true
+    - name: "Esszimmer/Wohnzimmer Fenster"
+      state_address: "5/4/111"
+      device_class: window
+      invert: true
+    - name: "Küche alle Fenster"
+      state_address: "5/4/130"
+      device_class: window
+      invert: true
+    - name: "Küche Fenster links"
+      state_address: "5/4/131"
+      device_class: window
+      invert: true
+    - name: "Küche Fenster rechts"
+      state_address: "5/4/132"
+      device_class: window
+      invert: true
+    - name: "Bad OG Fenster"
+      state_address: "5/4/160"
+      device_class: window
+      invert: true
+    - name: "Gästezimmer Fenster"
+      state_address: "5/4/170"
+      device_class: window
+      invert: true
+    - name: "Büro Fenster"
+      state_address: "5/4/180"
+      device_class: window
+      invert: true
+    - name: "Abstellraum Fenster"
+      state_address: "5/4/200"
+      device_class: window
+      invert: true
+    - name: "Ankleide Fenster"
+      state_address: "5/4/210"
+      device_class: window
+      invert: true
+    - name: "Schlafzimmer Fenster"
+      state_address: "5/4/220"
+      device_class: window
+      invert: true
+    - name: "Wohnzimmer/Esszimmer/Küche gesamt"
+      state_address: "5/4/240"
+      device_class: window
+      invert: true
+
+    - name: "Büro test Heizen an/aus"
+      state_address: "3/5/180"
+
+    - name: "Bad OG test Heizen an/aus"
+      state_address: "3/5/160"
+    - name: "Bad OG Radiator test Heizen an/aus"
+      state_address: "3/5/161"
+
+    - name: "Wohnzimmer test Heizen an/aus"
+      state_address: "3/5/90"
+    - name: "Wohnzimmer Kamin test Heizen an/aus"
+      state_address: "3/5/91"
+    - name: "Esszimmer Fenster test Heizen an/aus"
+      state_address: "3/5/110"
+    - name: "Esszimmer Träger test Heizen an/aus"
+      state_address: "3/5/111"
+    - name: "Küche test Heizen an/aus"
+      state_address: "3/5/130"
+    - name: "Heizanforderung links"
+      state_address: "3/6/0"
+    - name: "Heizanforderung rechts"
+      state_address: "3/6/1"
+    - name: "Heizanforderung gesamt"
+      state_address: "3/6/2"

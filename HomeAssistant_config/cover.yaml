@@ -1,0 +1,115 @@
+# Controller links - EG #####################################################
+      # Gästebad
+    - name: "Gästebad shutter"
+      move_long_address: "4/1/60"
+      stop_address: "4/2/60"
+      position_address: "4/3/60"
+      position_state_address: "4/5/60"
+      #travelling_time_down: 51
+      #travelling_time_up: 61
+      # Gästebad
+    - name: "Bad OG shutter"
+      move_long_address: "4/1/160"
+      stop_address: "4/2/160"
+      position_address: "4/3/160"
+      position_state_address: "4/5/160"
+      #travelling_time_down: 51
+      #travelling_time_up: 61
+      # Gästebad
+    - name: "Wohnzimmer Fenster links shutter"
+      move_long_address: "4/1/90"
+      stop_address: "4/2/90"
+      position_address: "4/3/90"
+      position_state_address: "4/5/90"
+      #travelling_time_down: 51
+      #travelling_time_up: 61
+      # Gästebad
+    - name: "Bad EG shutter"
+      move_long_address: "4/1/70"
+      stop_address: "4/2/70"
+      position_address: "4/3/70"
+      position_state_address: "4/5/70"
+      #travelling_time_down: 51
+      #travelling_time_up: 61
+      # Gästebad
+    - name: "Wohnzimmer FEnster rechts Kamin shutter"
+      move_long_address: "4/1/91"
+      stop_address: "4/2/91"
+      position_address: "4/3/91"
+      position_state_address: "4/5/91"
+      #travelling_time_down: 51
+      #travelling_time_up: 61
+      # Gästebad
+    - name: "Esszimmer gr Fenster shutter"
+      move_long_address: "4/1/111"
+      stop_address: "4/2/111"
+      position_address: "4/3/111"
+      position_state_address: "4/5/111"
+      #travelling_time_down: 51
+      #travelling_time_up: 61
+# Controller rechts - EG #####################################################
+      # Gästebad
+    - name: "Gästezimmer shutter"
+      move_long_address: "4/1/170"
+      stop_address: "4/2/170"
+      position_address: "4/3/170"
+      position_state_address: "4/5/170"
+      #travelling_time_down: 51
+      #travelling_time_up: 61
+      # Gästebad
+    - name: "Esszimmer Terassentür shutter"
+      move_long_address: "4/1/110"
+      stop_address: "4/2/110"
+      position_address: "4/3/110"
+      position_state_address: "4/5/110"
+      #travelling_time_down: 51
+      #travelling_time_up: 61
+      # Gästebad
+    - name: "Ankleide shutter"
+      move_long_address: "4/1/210"
+      stop_address: "4/2/210"
+      position_address: "4/3/210"
+      position_state_address: "4/5/210"
+      #travelling_time_down: 51
+      #travelling_time_up: 61
+      # Gästebad
+    - name: "Büro shutter"
+      move_long_address: "4/1/180"
+      stop_address: "4/2/180"
+      position_address: "4/3/180"
+      position_state_address: "4/5/180"
+      #travelling_time_down: 51
+      #travelling_time_up: 61
+      # Gästebad
+    - name: "Küche shutter"
+      move_long_address: "4/1/130"
+      stop_address: "4/2/130"
+      position_address: "4/3/130"
+      position_state_address: "4/5/130"
+      #travelling_time_down: 51
+      #travelling_time_up: 61
+      # Gästebad
+    - name: "Schlafzimmer shutter"
+      move_long_address: "4/1/220"
+      stop_address: "4/2/220"
+      position_address: "4/3/220"
+      position_state_address: "4/5/220"
+      #travelling_time_down: 51
+      #travelling_time_up: 61
+      # Gästebad
+    - name: "Sport shutter"
+      move_long_address: "4/1/80"
+      stop_address: "4/2/80"
+      position_address: "4/3/80"
+      position_state_address: "4/5/80"
+      #travelling_time_down: 51
+      #travelling_time_up: 61
+      # Gästebad
+    - name: "Markise shutter"
+      move_long_address: "4/1/230"
+      stop_address: "4/2/230"
+      position_address: "4/3/230"
+      position_state_address: "4/5/230"
+      #travelling_time_down: 51
+      #travelling_time_up: 61
+

@@ -1,0 +1,31 @@
+#  number:
+    - name: "Wohnzimmer test Heizen Übersteuerung Min Ventilstellwert"
+      state_address: "3/5/95"
+      address: "3/5/95"
+      respond_to_read: true
+      type: percent
+    - name: "Wohnzimmer test Heizen Übersteuerung Max Ventilstellwert"
+      state_address: "3/5/96"
+      address: "3/5/96"
+      respond_to_read: true
+      type: percent
+    - name: "Büro test Heizen Übersteuerung Min Ventilstellwert"
+      state_address: "3/5/183"
+      address: "3/5/183"
+      respond_to_read: true
+      type: percent
+    - name: "Büro test Heizen Übersteuerung Max Ventilstellwert"
+      state_address: "3/5/184"
+      address: "3/5/184"
+      respond_to_read: true
+      type: percent
+    - name: "Bad OG test Heizen Übersteuerung Min Ventilstellwert"
+      state_address: "3/5/166"
+      address: "3/5/166"
+      respond_to_read: true
+      type: percent
+    - name: "Bad OG test Heizen Übersteuerung Max Ventilstellwert"
+      state_address: "3/5/167"
+      address: "3/5/167"
+      respond_to_read: true
+      type: percent

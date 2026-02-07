@@ -1,0 +1,307 @@
+# Controller links - EG #####################################################
+      # Gästebad
+    - name: "Gästebad"
+      temperature_address: "7/3/60"
+      target_temperature_address: "3/2/61"
+      target_temperature_state_address: "3/2/60"
+
+      setpoint_shift_address: "3/3/60"
+      setpoint_shift_state_address: "3/4/60"
+
+      active_state_address: "3/5/60"
+
+      operation_mode_frost_protection_address: "3/6/62"
+      operation_mode_night_address: "3/6/61"
+      operation_mode_comfort_address: "3/6/60"
+      operation_mode_state_address: "3/6/64"
+      operation_mode_address: "3/6/63"
+#      operation_modes:
+#        - comfort
+#        - economy
+#        - building_protection
+
+      # Bad EG
+    - name: "Bad EG"
+      temperature_address: "7/3/70"
+      target_temperature_address: "3/2/71"
+      target_temperature_state_address: "3/2/70"
+
+      setpoint_shift_address: "3/3/70"
+      setpoint_shift_state_address: "3/4/70"
+
+      active_state_address: "3/5/70"
+
+      operation_mode_frost_protection_address: "3/6/72"
+      operation_mode_night_address: "3/6/71"
+      operation_mode_comfort_address: "3/6/70"
+      operation_mode_state_address: "3/6/74"
+      operation_mode_address: "3/6/73"
+#      operation_modes:
+#        - comfort
+#        - economy
+#        - building_protection
+
+      # Sport
+    - name: "Sport"
+      temperature_address: "7/3/80"
+      target_temperature_address: "3/2/81"
+      target_temperature_state_address: "3/2/80"
+
+      setpoint_shift_address: "3/3/80"
+      setpoint_shift_state_address: "3/4/80"
+
+      active_state_address: "3/5/80"
+
+      operation_mode_frost_protection_address: "3/6/82"
+      operation_mode_night_address: "3/6/81"
+      operation_mode_comfort_address: "3/6/80"
+      operation_mode_state_address: "3/6/84"
+      operation_mode_address: "3/6/83"
+#      operation_modes:
+#        - comfort
+#        - economy
+#        - building_protection
+
+      # Wohnzimmer
+    - name: "Wohnzimmer"
+      temperature_address: "7/3/90"
+      target_temperature_address: "3/2/91"
+      target_temperature_state_address: "3/2/90"
+
+      setpoint_shift_address: "3/3/90"
+      setpoint_shift_state_address: "3/4/90"
+
+      active_state_address: "3/5/90"
+      command_value_state_address: "3/5/94" 
+
+      operation_mode_frost_protection_address: "3/6/92"
+      operation_mode_night_address: "3/6/91"
+      operation_mode_comfort_address: "3/6/90"
+      operation_mode_state_address: "3/6/94"
+      operation_mode_address: "3/6/93"
+      setpoint_shift_min: -20
+      setpoint_shift_max: 20
+      min_temp: 7.0
+      max_temp: 32.0
+#      operation_modes:
+#        - comfort
+#        - economy
+#        - building_protection
+
+#      # Esszimmer
+#    - name: "Esszimmer (Träger)"
+#      temperature_address: "7/3/110"
+#      target_temperature_address: "3/2/111"
+#      target_temperature_state_address: "3/2/110"
+#
+#      setpoint_shift_address: "3/3/110"
+#      setpoint_shift_state_address: "3/4/110"
+#
+#      active_state_address: "3/5/110"
+#
+#      operation_mode_frost_protection_address: "3/6/112"
+#      operation_mode_night_address: "3/6/111"
+#      operation_mode_comfort_address: "3/6/110"
+#      operation_mode_state_address: "3/6/114"
+#      operation_mode_address: "3/6/113"
+#      operation_modes:
+#        - comfort
+#        - economy
+#        - building_protection
+
+#     # Küche
+#    - name: "Küche"
+#      temperature_address: "7/3/112"
+#      target_temperature_address: "3/2/131"
+#      target_temperature_state_address: "3/2/130"
+#
+#      setpoint_shift_address: "3/3/130"
+#      setpoint_shift_state_address: "3/4/130"
+#
+#      active_state_address: "3/5/130"
+#
+#      operation_mode_frost_protection_address: "3/6/132"
+#      operation_mode_night_address: "3/6/131"
+#      operation_mode_comfort_address: "3/6/130"
+#      operation_mode_state_address: "3/6/134"
+#      operation_mode_address: "3/6/133"
+#      operation_modes:
+#        - comfort
+#        - economy
+#        - building_protection
+
+
+# Controller links - OG #####################################################
+      # Bad OG Heizung
+    - name: "Bad OG Heizung"
+      temperature_address: "7/3/160"
+      target_temperature_address: "3/2/163"
+      target_temperature_state_address: "3/2/162"
+
+      setpoint_shift_address: "3/3/161"
+      setpoint_shift_state_address: "3/4/161"
+
+      active_state_address: "3/5/161"
+      command_value_state_address: "3/5/165" 
+
+      operation_mode_frost_protection_address: "3/6/167"
+      operation_mode_night_address: "3/6/166"
+      operation_mode_comfort_address: "3/6/165"
+      operation_mode_state_address: "3/6/169"
+      operation_mode_address: "3/6/168"
+#      operation_modes:
+#        - comfort
+#        - economy
+#        - building_protection
+
+      # Gästezimmer
+    - name: "Gästezimmer"
+      temperature_address: "7/3/170"
+      target_temperature_address: "3/2/171"
+      target_temperature_state_address: "3/2/170"
+
+      setpoint_shift_address: "3/3/170"
+      setpoint_shift_state_address: "3/4/170"
+
+      active_state_address: "3/5/170"
+
+      operation_mode_frost_protection_address: "3/6/172"
+      operation_mode_night_address: "3/6/171"
+      operation_mode_comfort_address: "3/6/170"
+      operation_mode_state_address: "3/6/174"
+      operation_mode_address: "3/6/173"
+#      operation_modes:
+#        - comfort
+#        - economy
+#        - building_protection
+
+      # Bad OG 
+    - name: "Bad OG"
+      temperature_address: "7/3/160"
+      target_temperature_address: "3/2/161"
+      target_temperature_state_address: "3/2/160"
+
+      setpoint_shift_address: "3/3/160"
+      setpoint_shift_state_address: "3/4/160"
+
+      active_state_address: "3/5/160"
+      command_value_state_address: "3/5/164" 
+
+      operation_mode_frost_protection_address: "3/6/162"
+      operation_mode_night_address: "3/6/161"
+      operation_mode_comfort_address: "3/6/160"
+      operation_mode_state_address: "3/6/164"
+      operation_mode_address: "3/6/163"
+#      operation_modes:
+#        - comfort
+#        - economy
+#        - building_protection
+
+     # Büro
+    - name: "Büro"
+      temperature_address: "7/3/180"
+      target_temperature_address: "3/2/181"
+      target_temperature_state_address: "3/2/180"
+
+      setpoint_shift_address: "3/3/180"
+      setpoint_shift_state_address: "3/4/180"
+
+      active_state_address: "3/5/180"
+      command_value_state_address: "3/5/182" 
+
+
+      operation_mode_frost_protection_address: "3/6/182"
+      operation_mode_night_address: "3/6/181"
+      operation_mode_comfort_address: "3/6/180"
+      operation_mode_state_address: "3/6/184"
+      operation_mode_address: "3/6/183"
+#      operation_modes:
+#        - comfort
+#        - economy
+#        - building_protection
+
+
+      # Flur OG
+    - name: "Flur OG"
+      temperature_address: "7/3/150"
+      target_temperature_address: "3/2/151"
+      target_temperature_state_address: "3/2/150"
+
+      setpoint_shift_address: "3/3/150"
+      setpoint_shift_state_address: "3/4/150"
+
+      active_state_address: "3/5/150"
+
+      operation_mode_frost_protection_address: "3/6/152"
+      operation_mode_night_address: "3/6/151"
+      operation_mode_comfort_address: "3/6/150"
+      operation_mode_state_address: "3/6/154"
+      operation_mode_address: "3/6/153"
+#      operation_modes:
+#        - comfort
+#        - economy
+#        - building_protection
+
+      # Schlafzimmer
+    - name: "Schlafzimmer"
+      temperature_address: "7/3/220"
+      target_temperature_address: "3/2/221"
+      target_temperature_state_address: "3/2/220"
+
+      setpoint_shift_address: "3/3/220"
+      setpoint_shift_state_address: "3/4/220"
+
+      active_state_address: "3/5/220"
+
+      operation_mode_frost_protection_address: "3/6/222"
+      operation_mode_night_address: "3/6/221"
+      operation_mode_comfort_address: "3/6/220"
+      operation_mode_state_address: "3/6/224"
+      operation_mode_address: "3/6/223"
+#      operation_modes:
+#        - comfort
+#        - economy
+#        - building_protection
+
+     # Ankleide
+    - name: "Ankleide"
+      temperature_address: "7/3/210"
+      target_temperature_address: "3/2/211"
+      target_temperature_state_address: "3/2/210"
+
+      setpoint_shift_address: "3/3/210"
+      setpoint_shift_state_address: "3/4/210"
+
+      active_state_address: "3/5/210"
+
+      operation_mode_frost_protection_address: "3/6/212"
+      operation_mode_night_address: "3/6/211"
+      operation_mode_comfort_address: "3/6/210"
+      operation_mode_state_address: "3/6/214"
+      operation_mode_address: "3/6/213"
+#      operation_modes:
+#        - comfort
+#        - economy
+#        - building_protection
+
+     # Flur EG
+    - name: "Flur EG"
+      temperature_address: "7/3/50"
+      target_temperature_address: "3/2/51"
+      target_temperature_state_address: "3/2/50"
+
+      setpoint_shift_address: "3/3/50"
+      setpoint_shift_state_address: "3/4/50"
+
+      active_state_address: "3/5/50"
+
+      operation_mode_frost_protection_address: "3/6/52"
+      operation_mode_night_address: "3/6/51"
+      operation_mode_comfort_address: "3/6/50"
+      operation_mode_state_address: "3/6/54"
+      operation_mode_address: "3/6/53"
+#      operation_modes:
+#        - comfort
+#        - economy
+#        - building_protection
+

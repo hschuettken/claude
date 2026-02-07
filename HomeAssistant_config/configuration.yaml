@@ -1,0 +1,1253 @@
+# Loads default set of integrations. Do not remove.
+default_config:
+#  external_url: "https://homeassistant.schuettken.net"
+#  internal_url: "http://homeassistant.local.schuettken.net:8123"
+
+energy:
+
+  # Text to speech
+tts:
+  - platform: google_translate
+
+automation: !include automations.yaml
+script: !include scripts.yaml
+scene: !include scenes.yaml
+
+logger:
+  default: info
+
+http:
+  server_port: 8123
+  cors_allowed_origins:
+    - https://google.com
+    - https://www.home-assistant.io
+    - https://homeassistant.schuettken.net
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - 192.168.0.0/24
+    - 192.168.0.50
+
+    # - 192.168.0.118
+    # - 192.168.0.120
+    # - 192.168.0.121
+    # - 192.168.0.122
+    # - 192.168.0.123
+    # - 192.168.0.131
+    # - 192.168.0.132
+    # - 192.168.0.133
+    # - 192.168.0.141
+    # - 192.168.0.142
+    # - 192.168.0.143      # Add the IP address of the proxy server
+
+recorder:
+  purge_keep_days: 3650
+
+history:
+
+my:
+
+influxdb:
+  api_version: 2
+  ssl: false
+  host: 192.168.0.66
+  port: 8086
+  token: xHRa49wPW8YRZXKu_LBMmSobSPFaRBc8xyxV0lykN1qVvEbPmlDisFkidQB2yFL7j-zs55GjKakgeS0av9OIPg==
+  organization: 4955a7616c11d6e3
+  bucket: hass
+  tags:
+    source: HA
+  tags_attributes:
+    - friendly_name
+  default_measurement: units
+#  include:
+#    domains:
+#       - sensor
+
+knx:
+  climate: !include ./KNX/climate.yaml
+  cover: !include ./KNX/cover.yaml
+  sensor: !include ./KNX/sensor.yaml
+  binary_sensor: !include ./KNX/binary_sensor.yaml
+  light: !include ./KNX/light.yaml
+  number: !include ./KNX/number.yaml
+  switch: !include ./KNX/switch.yaml
+
+#  expose:
+#    - type: temperature
+#      entity_id: sensor.gaestewc_esp32_guest_wc_temperature
+#      address: "7/3/60"
+#    - type: temperature
+#      entity_id: sensor.guest_wc_temperature_stable
+#      address: "7/3/60"
+#    - type: binary
+#      entity_id: input_boolean.knx_wohnzimmer_toggle_tv
+#      address: "9/3/90"
+
+
+
+
+modbus:
+  - name: amtron
+    type: tcp
+    host: 192.168.0.32
+    port: 502
+    #retries: 3
+    #timeout: 3
+    #delay: 2
+    sensors:
+      # --- Versions / Identity ---
+      - name: "Amtron Firmware Version (short)"
+        slave: 1
+        address: 100 # 2 regs -> 4 ASCII chars like X.XX
+        input_type: holding
+        data_type: string
+        count: 2
+
+      - name: "Amtron Protocol Version"
+        slave: 1
+        address: 120 # 2 regs -> 4 ASCII chars like X.XX
+        input_type: holding
+        data_type: string
+        count: 2
+
+      - name: "Amtron Device ID"
+        slave: 1
+        address: 141 # always "AM"
+        input_type: holding
+        data_type: string
+        count: 2
+
+      - name: "Amtron Model"
+        slave: 1
+        address: 142 # 20 ASCII chars (10 regs)
+        input_type: holding
+        data_type: string
+        count: 10
+
+      - name: "Amtron Device Name"
+        slave: 1
+        address: 158 # 32 ASCII chars (16 regs)
+        input_type: holding
+        data_type: string
+        count: 16
+
+      # Detailed app version: Major.Minor.Patch-Build
+      - name: "Amtron FW Major"
+        slave: 1
+        address: 153
+        input_type: holding
+        data_type: uint16
+      - name: "Amtron FW Minor"
+        slave: 1
+        address: 154
+        input_type: holding
+        data_type: uint16
+      - name: "Amtron FW Patch"
+        slave: 1
+        address: 155
+        input_type: holding
+        data_type: uint16
+      - name: "Amtron FW Build"
+        slave: 1
+        address: 156 # 2 regs -> uint32
+        input_type: holding
+        data_type: uint32
+
+      # --- Status / States ---
+      - name: "Amtron OCPP CP Status (raw)"
+        slave: 1
+        address: 104
+        input_type: holding
+        data_type: uint16
+
+      - name: "Amtron Error Codes 1 (raw uint32)"
+        slave: 1
+        address: 105 # 2 regs -> uint32
+        input_type: holding
+        data_type: uint32
+      - name: "Amtron Error Codes 2 (raw uint32)"
+        slave: 1
+        address: 107
+        input_type: holding
+        data_type: uint32
+      - name: "Amtron Error Codes 3 (raw uint32)"
+        slave: 1
+        address: 109
+        input_type: holding
+        data_type: uint32
+      - name: "Amtron Error Codes 4 (raw uint32)"
+        slave: 1
+        address: 111
+        input_type: holding
+        data_type: uint32
+
+      - name: "Amtron Vehicle State (raw)"
+        slave: 1
+        address: 122
+        input_type: holding
+        data_type: int16
+
+      - name: "Amtron Availability (raw)"
+        slave: 1
+        address: 124
+        input_type: holding
+        data_type: uint16
+
+      - name: "Amtron Relay State (raw)"
+        slave: 1
+        address: 140
+        input_type: holding
+        data_type: uint16
+
+      - name: "Amtron Plug Lock Status (raw)"
+        slave: 1
+        address: 152
+        input_type: holding
+        data_type: uint16
+
+      # Current limits
+      - name: "Amtron Safe Current [A]"
+        slave: 1
+        address: 131
+        input_type: holding
+        data_type: uint16
+        unit_of_measurement: "A"
+        device_class: current
+
+      - name: "Amtron Communication Timeout [s]"
+        slave: 1
+        address: 132
+        input_type: holding
+        data_type: uint16
+        unit_of_measurement: "s"
+
+      - name: "Amtron Operator Current Limit [A]"
+        slave: 1
+        address: 134
+        input_type: holding
+        data_type: uint16
+        unit_of_measurement: "A"
+        device_class: current
+
+      - name: "Amtron Min Charge Current [A]"
+        slave: 1
+        address: 712
+        input_type: holding
+        data_type: uint16
+        unit_of_measurement: "A"
+        device_class: current
+
+      - name: "Amtron Max Charge Current [A]"
+        slave: 1
+        address: 715
+        input_type: holding
+        data_type: uint16
+        unit_of_measurement: "A"
+        device_class: current
+
+      - name: "Amtron HEMS Current Limit [A]"
+        slave: 1
+        address: 1000
+        input_type: holding
+        data_type: uint16
+        unit_of_measurement: "A"
+        device_class: current
+
+      - name: "Amtron HEMS Current Limit 0.1A [A]"
+        slave: 1
+        address: 1001
+        input_type: holding
+        data_type: uint16
+        scale: 0.1
+        precision: 1
+        unit_of_measurement: "A"
+        device_class: current
+
+      - name: "Amtron HEMS Power Limit [W]"
+        slave: 1
+        address: 1002
+        input_type: holding
+        data_type: uint16
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+
+      # --- Metering (per phase + totals) ---
+      # Energy per phase [Wh] (L1 = Total; L2/L3 may be 0 on some models)
+      - name: "Amtron Meter L1 Energy [kWh]"
+        slave: 1
+        address: 200
+        input_type: holding
+        data_type: int32
+        scale: 0.001
+        precision: 3
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+
+      - name: "Amtron Meter L2 Energy [kWh]"
+        slave: 1
+        address: 202
+        input_type: holding
+        data_type: int32
+        scale: 0.001
+        precision: 3
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+
+      - name: "Amtron Meter L3 Energy [kWh]"
+        slave: 1
+        address: 204
+        input_type: holding
+        data_type: int32
+        scale: 0.001
+        precision: 3
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+
+      # Power per phase [W]
+      - name: "Amtron Meter L1 Power [W]"
+        slave: 1
+        address: 206
+        input_type: holding
+        data_type: int32
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+
+      - name: "Amtron Meter L2 Power [W]"
+        slave: 1
+        address: 208
+        input_type: holding
+        data_type: int32
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+
+      - name: "Amtron Meter L3 Power [W]"
+        slave: 1
+        address: 210
+        input_type: holding
+        data_type: int32
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+
+      # Current per phase [mA] -> convert to A
+      - name: "Amtron Meter L1 Current [A]"
+        slave: 1
+        address: 212
+        input_type: holding
+        data_type: int32
+        scale: 0.001
+        precision: 3
+        unit_of_measurement: "A"
+        device_class: current
+
+      - name: "Amtron Meter L2 Current [A]"
+        slave: 1
+        address: 214
+        input_type: holding
+        data_type: int32
+        scale: 0.001
+        precision: 3
+        unit_of_measurement: "A"
+        device_class: current
+
+      - name: "Amtron Meter L3 Current [A]"
+        slave: 1
+        address: 216
+        input_type: holding
+        data_type: int32
+        scale: 0.001
+        precision: 3
+        unit_of_measurement: "A"
+        device_class: current
+
+      - name: "Amtron Meter Total Energy [kWh]"
+        slave: 1
+        address: 218
+        input_type: holding
+        data_type: int32
+        scale: 0.001
+        precision: 3
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+
+      - name: "Amtron Meter Total Power [W]"
+        slave: 1
+        address: 220
+        input_type: holding
+        data_type: int32
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+
+      # Voltage per phase [V]
+      - name: "Amtron Meter L1 Voltage [V]"
+        slave: 1
+        address: 222
+        input_type: holding
+        data_type: int32
+        unit_of_measurement: "V"
+        device_class: voltage
+        state_class: measurement
+
+      - name: "Amtron Meter L2 Voltage [V]"
+        slave: 1
+        address: 224
+        input_type: holding
+        data_type: int32
+        unit_of_measurement: "V"
+        device_class: voltage
+        state_class: measurement
+
+      - name: "Amtron Meter L3 Voltage [V]"
+        slave: 1
+        address: 226
+        input_type: holding
+        data_type: int32
+        unit_of_measurement: "V"
+        device_class: voltage
+        state_class: measurement
+
+      # Charging session metrics
+      - name: "Amtron Signaled Current to EV [A]"
+        slave: 1
+        address: 706
+        input_type: holding
+        data_type: uint16
+        unit_of_measurement: "A"
+        device_class: current
+        state_class: measurement
+
+      # BCD times come as two 16-bit regs. Read separately for decoding below.
+      - name: "Amtron Charge Start Time (HI raw)"
+        slave: 1
+        address: 707
+        input_type: holding
+        data_type: uint16
+      - name: "Amtron Charge Start Time (LO raw)"
+        slave: 1
+        address: 708
+        input_type: holding
+        data_type: uint16
+
+      - name: "Amtron Charge End Time (HI raw)"
+        slave: 1
+        address: 710
+        input_type: holding
+        data_type: uint16
+      - name: "Amtron Charge End Time (LO raw)"
+        slave: 1
+        address: 711
+        input_type: holding
+        data_type: uint16
+
+      - name: "Amtron Charged Energy Session [kWh]"
+        slave: 1
+        address: 716
+        input_type: holding
+        data_type: uint32
+        scale: 0.001
+        precision: 3
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total
+
+      - name: "Amtron Charged Duration [s]"
+        slave: 1
+        address: 718
+        input_type: holding
+        data_type: uint32
+        unit_of_measurement: "s"
+        state_class: measurement
+
+template:
+  - sensor:
+      - name: "Market Grid Price Status"
+        unique_id: "market_grid_price_status"
+        state: >
+          {% set price = states('sensor.epex_spot_data_price_2') | float %}
+          {{ 1 if price > 0 else 0 }}
+        icon: mdi:flash
+  # multipy input_number.price_per_kwh_electricity_pv with market status
+  - sensor:
+      - name: "PV Electricity Price (Market Adjusted)"
+        unique_id: price_per_kwh_electricity_pv_adjusted
+        unit_of_measurement: "€/kWh"
+        state_class: measurement
+        icon: mdi:currency-eur
+        state: >-
+          {% set status = states('sensor.market_grid_price_status') | float(0) %}
+          {% set base   = states('input_number.price_per_kwh_electricity_pv') | float(0) %}
+          {{ (base / 100) | round(4) }}
+        attributes:
+          market_grid_price_status: "{{ states('sensor.market_grid_price_status') }}"
+          base_pv_price_per_kwh: "{{ states('input_number.price_per_kwh_electricity_pv') }}"
+          formula: "market_grid_price_status * base_pv_price_per_kwh / 100"
+  - sensor:
+      - name: "price_per_kwh_electricity_grid_eur"
+        unique_id: price_per_kwh_electricity_grid_eur
+        unit_of_measurement: "€/kWh"
+        state_class: measurement
+        icon: mdi:currency-eur
+        state: >-
+          {% set base   = states('input_number.price_per_kwh_electricity_grid') | float(0) %}
+          {{ ( base / 100) | round(4) }}
+        attributes:
+          base_import_price_per_kwh: "{{ states('input_number.price_per_kwh_electricity_grid') }}"
+          formula: "base_import_price_per_kwh / 100"
+
+  - sensor:
+      - name: "inverter_pv_1_power"
+        unique_id: inverter_pv_1_power
+        icon: mdi:flash
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >-
+          {% set current   = states('sensor.inverter_pv_1_current') | float(0) %}
+          {% set voltage   = states('sensor.inverter_pv_1_voltage') | float(0) %}
+          {{ ( current * voltage ) | round(4) }}
+        attributes:
+          inverter_pv_1_current: "{{ states('sensor.inverter_pv_1_current') }}"
+          inverter_pv_1_voltage: "{{ states('sensor.inverter_pv_1_voltage') }}"
+          formula: "inverter_pv_1_current * inverter_pv_1_voltage"
+
+  - sensor:
+      - name: "inverter_pv_2_power"
+        unique_id: inverter_pv_2_power
+        icon: mdi:flash
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >-
+          {% set current   = states('sensor.inverter_pv_2_current') | float(0) %}
+          {% set voltage   = states('sensor.inverter_pv_2_voltage') | float(0) %}
+          {{ ( current * voltage ) | round(4) }}
+        attributes:
+          inverter_pv_2_current: "{{ states('sensor.inverter_pv_2_current') }}"
+          inverter_pv_2_voltage: "{{ states('sensor.inverter_pv_2_voltage') }}"
+          formula: "inverter_pv_2_current * inverter_pv_2_voltage"
+
+  - sensor:
+      - name: "inverter_pv_east_power"
+        unique_id: inverter_pv_east_power
+        icon: mdi:flash
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >-
+          {% set p1   = states('sensor.inverter_pv_1_power') | float(0) %}
+          {% set p2   = states('sensor.inverter_pv_2_power') | float(0) %}
+          {{ ( p1 + p2 ) | round(4) }}
+        attributes:
+          inverter_pv_1_power: "{{ states('sensor.inverter_pv_1_power') }}"
+          inverter_pv_2_power: "{{ states('sensor.inverter_pv_2_power') }}"
+          formula: "inverter_pv_1_power + inverter_pv_2_power"
+
+  - sensor:
+      - name: "inverter_pv_3_power"
+        unique_id: inverter_pv_3_power
+        icon: mdi:flash
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >-
+          {% set current   = states('sensor.inverter_pv_3_current') | float(0) %}
+          {% set voltage   = states('sensor.inverter_pv_3_voltage') | float(0) %}
+          {{ ( current * voltage ) | round(4) }}
+        attributes:
+          inverter_pv_3_current: "{{ states('sensor.inverter_pv_3_current') }}"
+          inverter_pv_3_voltage: "{{ states('sensor.inverter_pv_3_voltage') }}"
+          formula: "inverter_pv_3_current * inverter_pv_3_voltage"
+
+  - sensor:
+      - name: "inverter_pv_4_power"
+        unique_id: inverter_pv_4_power
+        icon: mdi:flash
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >-
+          {% set current   = states('sensor.inverter_pv_4_current') | float(0) %}
+          {% set voltage   = states('sensor.inverter_pv_4_voltage') | float(0) %}
+          {{ ( current * voltage ) | round(4) }}
+        attributes:
+          inverter_pv_4_current: "{{ states('sensor.inverter_pv_4_current') }}"
+          inverter_pv_4_voltage: "{{ states('sensor.inverter_pv_4_voltage') }}"
+          formula: "inverter_pv_4_current * inverter_pv_4_voltage"
+
+  - sensor:
+      - name: "inverter_pv_west_power"
+        unique_id: inverter_pv_west_power
+        icon: mdi:flash
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >-
+          {% set p3   = states('sensor.inverter_pv_3_power') | float(0) %}
+          {% set p4   = states('sensor.inverter_pv_4_power') | float(0) %}
+          {{ ( p3 + p4 ) | round(4) }}
+        attributes:
+          inverter_pv_3_power: "{{ states('sensor.inverter_pv_3_power') }}"
+          inverter_pv_4_power: "{{ states('sensor.inverter_pv_4_power') }}"
+          formula: "inverter_pv_3_power + inverter_pv_4_power"
+
+  - sensor:
+      - name: "shelly3em_main_channel_total_energy"
+        unique_id: shelly3em_main_channel_total_energy
+        icon: mdi:flash
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        state: >-
+          {% set pa   = states('sensor.shelly3em_main_channel_a_energy') | float(0) %}
+          {% set pb   = states('sensor.shelly3em_main_channel_b_energy') | float(0) %}
+          {% set pc   = states('sensor.shelly3em_main_channel_c_energy') | float(0) %}
+          {% set total = pa + pb + pc %}
+          {% set last = states('sensor.shelly3em_main_channel_total_energy') | float(0) %}
+          {# if total ever drops below last, use last to avoid backward reset #}
+          {% if total < last %}
+            {{ last }}
+          {% else %}
+            {{ total | round(4) }}
+          {% endif %}
+        availability: >
+          {{ not (
+               is_state('sensor.shelly3em_main_channel_a_energy','unavailable') or
+               is_state('sensor.shelly3em_main_channel_b_energy','unavailable') or
+               is_state('sensor.shelly3em_main_channel_c_energy','unavailable')
+             ) }}
+        attributes:
+          shelly3em_main_channel_a_energy: "{{ states('sensor.shelly3em_main_channel_a_energy') }}"
+          shelly3em_main_channel_b_energy: "{{ states('sensor.shelly3em_main_channel_b_energy') }}"
+          shelly3em_main_channel_c_energy: "{{ states('sensor.shelly3em_main_channel_c_energy') }}"
+          formula: "shelly3em_main_channel_a_energy + shelly3em_main_channel_b_energy + shelly3em_main_channel_c_energy"
+
+  - sensor:
+      - name: "shelly3em_main_channel_total_power"
+        unique_id: shelly3em_main_channel_total_power
+        icon: mdi:flash
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >-
+          {% set pa   = states('sensor.shelly3em_main_channel_a_power') | float(0) %}
+          {% set pb   = states('sensor.shelly3em_main_channel_b_power') | float(0) %}
+          {% set pc   = states('sensor.shelly3em_main_channel_c_power') | float(0) %}
+          {% set total = pa + pb + pc %}
+          {% set last = states('sensor.shelly3em_main_channel_total_power') | float(0) %}
+          {# if total ever drops below last, use last to avoid backward reset #}
+          {{ total | round(4) }}
+        availability: >
+          {{ not (
+               is_state('sensor.shelly3em_main_channel_a_power','unavailable') or
+               is_state('sensor.shelly3em_main_channel_b_power','unavailable') or
+               is_state('sensor.shelly3em_main_channel_c_power','unavailable')
+             ) }}
+        attributes:
+          shelly3em_main_channel_a_power: "{{ states('sensor.shelly3em_main_channel_a_power') }}"
+          shelly3em_main_channel_b_power: "{{ states('sensor.shelly3em_main_channel_b_power') }}"
+          shelly3em_main_channel_c_power: "{{ states('sensor.shelly3em_main_channel_c_power') }}"
+          formula: "shelly3em_main_channel_a_power + shelly3em_main_channel_b_power + shelly3em_main_channel_c_power"
+
+
+
+  - sensor:
+      # --- Identity / versions ---
+      - name: "Amtron Firmware Version (short) (tpl)"
+        unique_id: amtron_tpl_fw_short
+        state: "{{ states('sensor.amtron_firmware_version_short') }}"
+        availability: "{{ has_value('sensor.amtron_firmware_version_short') }}"
+      - name: "Amtron Protocol Version (tpl)"
+        unique_id: amtron_tpl_protocol_version
+        state: "{{ states('sensor.amtron_protocol_version') }}"
+        availability: "{{ has_value('sensor.amtron_protocol_version') }}"
+      - name: "Amtron Device ID (tpl)"
+        unique_id: amtron_tpl_device_id
+        state: "{{ states('sensor.amtron_device_id') }}"
+        availability: "{{ has_value('sensor.amtron_device_id') }}"
+      - name: "Amtron Model (tpl)"
+        unique_id: amtron_tpl_model
+        state: "{{ states('sensor.amtron_model') }}"
+        availability: "{{ has_value('sensor.amtron_model') }}"
+      - name: "Amtron Device Name (tpl)"
+        unique_id: amtron_tpl_device_name
+        state: "{{ states('sensor.amtron_device_name') }}"
+        availability: "{{ has_value('sensor.amtron_device_name') }}"
+      - name: "Amtron Firmware Version (full) (tpl)"
+        unique_id: amtron_tpl_fw_full
+        state: >
+          {{ states('sensor.amtron_fw_major')|int }}.{{
+             states('sensor.amtron_fw_minor')|int }}.{{
+             states('sensor.amtron_fw_patch')|int }}-{{
+             states('sensor.amtron_fw_build')|int }}
+        availability: >
+          {{ has_value('sensor.amtron_fw_major')
+             and has_value('sensor.amtron_fw_minor')
+             and has_value('sensor.amtron_fw_patch')
+             and has_value('sensor.amtron_fw_build') }}
+
+      # raw numeric version parts as mirrors
+      - name: "Amtron FW Major (tpl)"
+        unique_id: amtron_tpl_fw_major
+        state: "{{ states('sensor.amtron_fw_major') }}"
+      - name: "Amtron FW Minor (tpl)"
+        unique_id: amtron_tpl_fw_minor
+        state: "{{ states('sensor.amtron_fw_minor') }}"
+      - name: "Amtron FW Patch (tpl)"
+        unique_id: amtron_tpl_fw_patch
+        state: "{{ states('sensor.amtron_fw_patch') }}"
+      - name: "Amtron FW Build (tpl)"
+        unique_id: amtron_tpl_fw_build
+        state: "{{ states('sensor.amtron_fw_build') }}"
+
+      # --- Status / states ---
+      - name: "Amtron OCPP CP Status (raw) (tpl)"
+        unique_id: amtron_tpl_ocpp_cp_status_raw
+        state: "{{ states('sensor.amtron_ocpp_cp_status_raw') }}"
+      - name: "Amtron Vehicle State (tpl)"
+        unique_id: amtron_tpl_vehicle_state
+        state: >
+          {% set map = {'1':'A - No vehicle','2':'B - Vehicle connected',
+                        '3':'C - Charging','4':'D - Charging (ventilation)',
+                        '5':'E - Error'} %}
+          {{ map.get(states('sensor.amtron_vehicle_state_raw'), 'unknown') }}
+      - name: "Amtron Availability (tpl)"
+        unique_id: amtron_tpl_availability
+        state: "{{ 'Available' if states('sensor.amtron_availability_raw')|int(0) == 1 else 'Unavailable' }}"
+      - name: "Amtron Relay State (tpl)"
+        unique_id: amtron_tpl_relay_state
+        state: "{{ 'On' if states('sensor.amtron_relay_state_raw')|int(0) == 1 else 'Off' }}"
+      - name: "Amtron Plug Lock (tpl)"
+        unique_id: amtron_tpl_plug_lock
+        state: "{{ 'Locked' if states('sensor.amtron_plug_lock_status_raw')|int(0) == 1 else 'Unlocked' }}"
+
+      # --- Limits / configuration mirrors ---
+      - name: "Amtron Safe Current [A] (tpl)"
+        unique_id: amtron_tpl_safe_current_a
+        state: "{{ states('sensor.amtron_safe_current_a') }}"
+        unit_of_measurement: "A"
+        device_class: current
+      - name: "Amtron Communication Timeout [s] (tpl)"
+        unique_id: amtron_tpl_comm_timeout_s
+        state: "{{ states('sensor.amtron_communication_timeout_s') }}"
+        unit_of_measurement: "s"
+      - name: "Amtron Operator Current Limit [A] (tpl)"
+        unique_id: amtron_tpl_operator_current_limit_a
+        state: "{{ states('sensor.amtron_operator_current_limit_a') }}"
+        unit_of_measurement: "A"
+        device_class: current
+      - name: "Amtron Min Charge Current [A] (tpl)"
+        unique_id: amtron_tpl_min_charge_current_a
+        state: "{{ states('sensor.amtron_min_charge_current_a') }}"
+        unit_of_measurement: "A"
+        device_class: current
+      - name: "Amtron Max Charge Current [A] (tpl)"
+        unique_id: amtron_tpl_max_charge_current_a
+        state: "{{ states('sensor.amtron_max_charge_current_a') }}"
+        unit_of_measurement: "A"
+        device_class: current
+      - name: "Amtron HEMS Current Limit [A] (tpl)"
+        unique_id: amtron_tpl_hems_current_limit_a
+        state: "{{ states('sensor.amtron_hems_current_limit_a') }}"
+        unit_of_measurement: "A"
+        device_class: current
+      - name: "Amtron HEMS Current Limit 0.1A [A] (tpl)"
+        unique_id: amtron_tpl_hems_current_limit_01a_a
+        state: "{{ states('sensor.amtron_hems_current_limit_01a_a') }}"
+        unit_of_measurement: "A"
+        device_class: current
+      - name: "Amtron HEMS Power Limit [W] (tpl)"
+        unique_id: amtron_tpl_hems_power_limit_w
+        state: "{{ states('sensor.amtron_hems_power_limit_w') }}"
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+
+      # --- Metering mirrors ---
+      - name: "Amtron Meter L1 Energy [kWh] (tpl)"
+        unique_id: amtron_tpl_l1_energy_kwh
+        state: "{{ states('sensor.amtron_meter_l1_energy_kwh') }}"
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+      - name: "Amtron Meter L2 Energy [kWh] (tpl)"
+        unique_id: amtron_tpl_l2_energy_kwh
+        state: "{{ states('sensor.amtron_meter_l2_energy_kwh') }}"
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+      - name: "Amtron Meter L3 Energy [kWh] (tpl)"
+        unique_id: amtron_tpl_l3_energy_kwh
+        state: "{{ states('sensor.amtron_meter_l3_energy_kwh') }}"
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+
+      - name: "Amtron Meter L1 Power [W] (tpl)"
+        unique_id: amtron_tpl_l1_power_w
+        state: "{{ states('sensor.amtron_meter_l1_power_w') }}"
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+      - name: "Amtron Meter L2 Power [W] (tpl)"
+        unique_id: amtron_tpl_l2_power_w
+        state: "{{ states('sensor.amtron_meter_l2_power_w') }}"
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+      - name: "Amtron Meter L3 Power [W] (tpl)"
+        unique_id: amtron_tpl_l3_power_w
+        state: "{{ states('sensor.amtron_meter_l3_power_w') }}"
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+
+      - name: "Amtron Meter L1 Current [A] (tpl)"
+        unique_id: amtron_tpl_l1_current_a
+        state: "{{ states('sensor.amtron_meter_l1_current_a') }}"
+        unit_of_measurement: "A"
+        device_class: current
+      - name: "Amtron Meter L2 Current [A] (tpl)"
+        unique_id: amtron_tpl_l2_current_a
+        state: "{{ states('sensor.amtron_meter_l2_current_a') }}"
+        unit_of_measurement: "A"
+        device_class: current
+      - name: "Amtron Meter L3 Current [A] (tpl)"
+        unique_id: amtron_tpl_l3_current_a
+        state: "{{ states('sensor.amtron_meter_l3_current_a') }}"
+        unit_of_measurement: "A"
+        device_class: current
+
+      - name: "Amtron Meter Total Energy [kWh] (tpl)"
+        unique_id: amtron_tpl_total_energy_kwh
+        state: "{{ states('sensor.amtron_meter_total_energy_kwh') }}"
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+      - name: "Amtron Meter Total Power [W] (tpl)"
+        unique_id: amtron_tpl_total_power_w
+        state: "{{ states('sensor.amtron_meter_total_power_w') }}"
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+
+      - name: "Amtron Meter L1 Voltage [V] (tpl)"
+        unique_id: amtron_tpl_l1_voltage_v
+        state: "{{ states('sensor.amtron_meter_l1_voltage_v') }}"
+        unit_of_measurement: "V"
+        device_class: voltage
+        state_class: measurement
+      - name: "Amtron Meter L2 Voltage [V] (tpl)"
+        unique_id: amtron_tpl_l2_voltage_v
+        state: "{{ states('sensor.amtron_meter_l2_voltage_v') }}"
+        unit_of_measurement: "V"
+        device_class: voltage
+        state_class: measurement
+      - name: "Amtron Meter L3 Voltage [V] (tpl)"
+        unique_id: amtron_tpl_l3_voltage_v
+        state: "{{ states('sensor.amtron_meter_l3_voltage_v') }}"
+        unit_of_measurement: "V"
+        device_class: voltage
+        state_class: measurement
+
+      # --- Session data mirrors + time decoding ---
+      - name: "Amtron Signaled Current to EV [A] (tpl)"
+        unique_id: amtron_tpl_signaled_current_to_ev_a
+        state: "{{ states('sensor.amtron_signaled_current_to_ev_a') }}"
+        unit_of_measurement: "A"
+        device_class: current
+
+      - name: "Amtron Charge Start Time (tpl)"
+        unique_id: amtron_tpl_charge_start_time
+        state: >
+          {% set hi = states('sensor.amtron_charge_start_time_hi_raw')|int(0) %}
+          {% set lo = states('sensor.amtron_charge_start_time_lo_raw')|int(0) %}
+          {% set hex = "%04X%04X"|format(hi, lo) %}
+          {% set d = hex[-6:] %}
+          {{ d[0:2] ~ ':' ~ d[2:4] ~ ':' ~ d[4:6] }}
+
+      - name: "Amtron Charge End Time (tpl)"
+        unique_id: amtron_tpl_charge_end_time
+        state: >
+          {% set hi = states('sensor.amtron_charge_end_time_hi_raw')|int(0) %}
+          {% set lo = states('sensor.amtron_charge_end_time_lo_raw')|int(0) %}
+          {% set hex = "%04X%04X"|format(hi, lo) %}
+          {% set d = hex[-6:] %}
+          {{ d[0:2] ~ ':' ~ d[2:4] ~ ':' ~ d[4:6] }}
+
+      - name: "Amtron Charged Energy Session [kWh] (tpl)"
+        unique_id: amtron_tpl_charged_energy_session_kwh
+        state: "{{ states('sensor.amtron_charged_energy_session_kwh') }}"
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total
+      - name: "Amtron Charged Duration [s] (tpl)"
+        unique_id: amtron_tpl_charged_duration_s
+        state: "{{ states('sensor.amtron_charged_duration_s') }}"
+        unit_of_measurement: "s"
+      - name: "Amtron Charged Duration (hh:mm:ss) (tpl)"
+        unique_id: amtron_tpl_charged_duration_hms
+        state: >
+          {% set s = states('sensor.amtron_charged_duration_s')|int(0) %}
+          {% set h = (s // 3600)|int %}{% set m = ((s % 3600) // 60)|int %}{% set ss = (s % 60)|int %}
+          {{ "%02d:%02d:%02d"|format(h,m,ss) }}
+
+  - number:
+      - name: "AMTRON power limit (W)"
+        unique_id: amtron_power_limit_w_out
+        state: ""
+        min: "0"
+        max: "22000"
+        step: "10"
+        #unit_of_measurement: W
+        # Write to AMTRON HEMS limit (Modbus holding register 1002)
+        set_value:
+          - action: modbus.write_register
+            data:
+              hub: amtron
+              slave: 1
+              address: 1002
+              value: "{{ value|int(0) }}"
+
+  - binary_sensor:
+      - name: "Amtron Available (tpl)"
+        unique_id: amtron_tpl_available_bin
+        state: "{{ states('sensor.amtron_availability_raw')|int(0) == 1 }}"
+      - name: "Amtron Relay On (tpl)"
+        unique_id: amtron_tpl_relay_on_bin
+        state: "{{ states('sensor.amtron_relay_state_raw')|int(0) == 1 }}"
+      - name: "Amtron Plug Locked (tpl)"
+        unique_id: amtron_tpl_plug_locked_bin
+        state: "{{ states('sensor.amtron_plug_lock_status_raw')|int(0) == 1 }}"
+
+  - number:
+      # HEMS Current Limit (0.1 A steps) -> reg 1001 (value = A * 10)
+      - name: "AMTRON HEMS Current Limit [A]"
+        unique_id: amtron_tpl_num_hems_current_a
+        min: "0"
+        max: "32"
+        step: "0.1"
+        state: "{{ states('sensor.amtron_hems_current_limit_01a_a')|float(0) }}"
+        set_value:
+          - action: modbus.write_register
+            data:
+              hub: amtron
+              slave: 1
+              address: 1001
+              value: "{{ (value|float(0) * 10)|int }}"
+
+      # HEMS Power Limit (W) -> reg 1002
+      - name: "AMTRON HEMS Power Limit [W]"
+        unique_id: amtron_tpl_num_hems_power_w
+        min: "0"
+        max: "11000"
+        step: "60"
+        state: "{{ states('sensor.amtron_hems_power_limit_w')|int(0) }}"
+        set_value:
+          - action: modbus.write_register
+            data:
+              hub: amtron
+              slave: 1
+              address: 1002
+              value: "{{ value|int(0) }}"
+
+      # SAFE_CURRENT (A) -> reg 131
+      - name: "AMTRON Safe Current [A]"
+        unique_id: amtron_tpl_num_safe_current_a
+        min: "0"
+        max: "32"
+        step: "1"
+        state: "{{ states('sensor.amtron_safe_current_a')|int(0) }}"
+        set_value:
+          - action: modbus.write_register
+            data:
+              hub: amtron
+              slave: 1
+              address: 131
+              value: "{{ value|int(0) }}"
+
+      # Communication timeout (s) -> reg 132
+      - name: "AMTRON Communication Timeout [s]"
+        unique_id: amtron_tpl_num_comm_timeout_s
+        min: "0"
+        max: "600"
+        step: "5"
+        state: "{{ states('sensor.amtron_communication_timeout_s')|int(0) }}"
+        set_value:
+          - action: modbus.write_register
+            data:
+              hub: amtron
+              slave: 1
+              address: 132
+              value: "{{ value|int(0) }}"
+
+
+
+
+switch:
+  - platform: template
+    switches:
+      amtron_pause_charging:
+        unique_id: amtron_tpl_sw_pause
+        friendly_name: "AMTRON Pause Charging"
+        value_template: >
+          {{ states('sensor.amtron_hems_current_limit_01a_a')|float(0) == 0.0
+             and states('sensor.amtron_hems_power_limit_w')|int(0) == 0 }}
+
+        # Pause: write 0 to both registers
+        turn_on:
+          - action: modbus.write_register
+            data: { hub: amtron, slave: 1, address: 1001, value: 0 }
+          - action: modbus.write_register
+            data: { hub: amtron, slave: 1, address: 1002, value: 0 }
+
+        # Resume: re-apply values from your numbers
+        turn_off:
+          - action: modbus.write_register
+            data:
+              hub: amtron
+              slave: 1
+              address: 1001
+              value: "{{ (states('number.amtron_hems_current_limit_a')|float(0) * 10)|int }}"
+          - action: modbus.write_register
+            data:
+              hub: amtron
+              slave: 1
+              address: 1002
+              value: "{{ states('number.amtron_hems_power_limit_w')|int(0) }}"
+
+# input_datetime:
+#   ev_boost_deadline:
+#     name: EV boost deadline (today)
+#     has_time: true
+#     has_date: false
+
+# input_boolean:
+#   ev_pv_charge_enable:
+#     name: EV PV charging enabled
+#     icon: mdi:ev-station
+#     initial: true
+#   ev_avoid_grid_import:
+#     name: Avoid any grid import while charging
+#     icon: mdi:transmission-tower-export
+#     initial: true
+#   ev_allow_battery_assist:
+#     name: Allow battery assist (not pure battery)
+#     icon: mdi:battery-heart
+#     initial: true
+#   ev_boost_enable:
+#     name: EV boost to target enabled
+#     icon: mdi:rocket
+#     initial: false
+
+# input_select:
+#   ev_charging_phases:
+#     name: EV phases
+#     options: ["1", "3"]
+#     initial: "3"
+#     icon: mdi:alpha-p-box-outline
+
+# input_number:
+#   ev_min_amps:
+#     name: EV min amps/phase
+#     min: 6
+#     max: 16
+#     step: 1
+#     unit_of_measurement: A
+#     initial: 6
+#   ev_max_amps:
+#     name: EV max amps/phase
+#     min: 6
+#     max: 32
+#     step: 1
+#     unit_of_measurement: A
+#     initial: 16
+#   ev_voltage_v:
+#     name: Nominal voltage
+#     min: 200
+#     max: 240
+#     step: 1
+#     unit_of_measurement: V
+#     initial: 230
+
+#   ev_grid_reserve_w:
+#     name: Grid safety reserve
+#     min: 0
+#     max: 1000
+#     step: 50
+#     unit_of_measurement: W
+#     initial: 200
+#   ev_hysteresis_w:
+#     name: Start/stop hysteresis
+#     min: 0
+#     max: 2000
+#     step: 50
+#     unit_of_measurement: W
+#     initial: 300
+#   ev_limit_step_w:
+#     name: Limit ramp step
+#     min: 50
+#     max: 2000
+#     step: 50
+#     unit_of_measurement: W
+#     initial: 200
+#   ev_import_cutoff_w:
+#     name: Import cutoff (stop if above)
+#     min: 0
+#     max: 2000
+#     step: 10
+#     unit_of_measurement: W
+#     initial: 50
+
+#   # NEW: battery + PV share policy
+#   ev_max_batt_assist_w:
+#     name: Max battery assist (W)
+#     min: 0
+#     max: 5000
+#     step: 50
+#     unit_of_measurement: W
+#     initial: 1000
+#   ev_batt_headroom_pct:
+#     name: Battery headroom vs max discharge (%)
+#     min: 50
+#     max: 100
+#     step: 1
+#     unit_of_measurement: "%"
+#     initial: 90
+#   ev_min_pv_share_pct:
+#     name: Min PV share of EV power (%)
+#     min: 0
+#     max: 100
+#     step: 5
+#     unit_of_measurement: "%"
+#     initial: 30
+
+#   # NEW: hard wallbox minimum power (your constraint)
+#   ev_wallbox_min_power_w:
+#     name: Wallbox hard minimum (W)
+#     min: 0
+#     max: 10000
+#     step: 100
+#     unit_of_measurement: W
+#     initial: 3800
+
+#   ev_boost_target_kwh:
+#     name: EV boost target (kWh)
+#     min: 0
+#     max: 80
+#     step: 0.1
+#     unit_of_measurement: kWh
+#     initial: 8
+
+#   ev_boost_max_grid_w:
+#     name: Boost max grid import (W)
+#     min: 0
+#     max: 4000
+#     step: 50
+#     unit_of_measurement: W
+#     initial: 800
+
+#   ev_boost_max_batt_assist_w:
+#     name: Boost max battery assist (W)
+#     min: 0
+#     max: 6000
+#     step: 50
+#     unit_of_measurement: W
+#     initial: 1500
+
+#   ev_boost_min_pv_share_pct:
+#     name: Boost min PV share floor (%)
+#     min: 0
+#     max: 100
+#     step: 5
+#     unit_of_measurement: "%"
+#     initial: 10
+
+#                  liter / min    m3 / min        m3 / h
+#
+#1    GästeWC      0,2    0,0002        0,012
+#2    Bad EG       2,4    0,0024        0,144
+#3    Sport        1,8    0,0018        0,108
+#4    Wozi links   1,4    0,0014        0,084
+#5    Wozi Kamin   1,3    0,0013        0,078
+#6    Esszimmer    1,6    0,0016        0,096
+#7    Esszimmer    1,6    0,0016        0,096
+#8    Küche        1,6    0,0016        0,096
+#9    Bad OG Rad   0      0
+#10   Gästezimmer  2      0,002         0,12
+#11   Bad OG       1,5    0,0015        0,09
+#12   Büro         1,3    0,0013        0,078
+#13   Flur OG      1,3    0,0013        0,078
+#14   Schlafen     1,2    0,0012        0,072
+#15   Ankleide     1,4    0,0014        0,084
+#16   Flur EG      1,3    0,0013        0,078
+#sum               21,9   0,0219        1,314
+##heating
+## 1 liter im 1K erwärumen = 1.16 Wh
+## 1 liter um 15k erwärmen: 17.4 Wh
+## 1 m3 um 15k erwärmen: 17.4 kwh
+## m3/h * temp-diff (15 fix) in kwh für 1000 liter ##}
+
+#template:
+#  sensor:
+#  - name: "Wohnzimmer Heating [kwh]"
+#    unique_id: wohnzimmer_heating_kwh
+#    value_template: >
+#      {% if is_state_attr("climate.wohnzimmer", "hvac_action", "heating") -%}
+#        {{ ( 0.084 + 0.078 ) * 17.4 }}
+#      {%- else -%}
+#        0
+#      {%- endif %}
+#    unit_of_measurement: kwh
+#  - name: "Esszimmer Heating [kwh]"
+#    unique_id: esszimmer_heating_kwh
+#    value_template: >
+#      {% if is_state_attr("climate.esszimmer_trager", "hvac_action", "heating") -%}
+#        {{ ( 0.096 + 0.096 ) * 17.4 }}
+#      {%- else -%}
+#        0
+#      {%- endif %}
+#    unit_of_measurement: kwh
+#  - name: "Küche Heating [kwh]"
+#    unique_id: kuche_heating_kwh
+#    value_template: >
+#      {% if is_state_attr("climate.kuche", "hvac_action", "heating") -%}#
+
+#        {{ ( 0.084 + 0.078 ) * 17.4 }}
+#      {%- else -%}
+#        0
+#      {%- endif %}
+#    unit_of_measurement: kwh
+
+sensor:
+  # - platform: integration
+  #   source: sensor.amtron_meter_total_power_w_tpl
+  #   name: EV charging energy (kWh)
+  #   method: trapezoidal
+  #   unit_prefix: k
+  #   round: 3
+
+  - platform: integration
+    source: sensor.inverter_pv_east_power
+    name: inverter_pv_east_energy
+    unique_id: inverter_pv_east_energy
+    unit_prefix: k
+    round: 2
+    unit_time: h
+    method: trapezoidal
+
+  - platform: integration
+    source: sensor.inverter_pv_west_power
+    name: inverter_pv_west_energy
+    unique_id: inverter_pv_west_energy
+    unit_prefix: k
+    round: 2
+    unit_time: h
+    method: trapezoidal
