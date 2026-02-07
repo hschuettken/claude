@@ -16,7 +16,7 @@ from typing import Any
 import pandas as pd
 
 from shared.influx_client import InfluxClient
-from shared.logging import get_logger
+from shared.log import get_logger
 
 from config import PVForecastSettings
 from weather import OpenMeteoClient

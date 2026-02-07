@@ -19,13 +19,17 @@ Output sensors in Home Assistant:
 """
 
 import asyncio
+import time
+from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from shared.ha_client import HomeAssistantClient
 from shared.influx_client import InfluxClient
-from shared.logging import get_logger
+from shared.log import get_logger
 from shared.mqtt_client import MQTTClient
+
+HEALTHCHECK_FILE = Path("/app/data/healthcheck")
 
 from config import PVForecastSettings
 from data import PVDataCollector
@@ -57,6 +61,8 @@ class PVForecastService:
             username=self.settings.mqtt_username,
             password=self.settings.mqtt_password,
         )
+
+        self._start_time = time.monotonic()
 
         # Location — will be resolved from HA if not configured
         self.latitude = self.settings.pv_latitude
@@ -124,6 +130,12 @@ class PVForecastService:
             hour=self.settings.model_retrain_hour,
             id="daily_retrain",
         )
+        self.scheduler.add_job(
+            self._heartbeat,
+            "interval",
+            seconds=self.settings.heartbeat_interval_seconds,
+            id="heartbeat",
+        )
         self.scheduler.start()
 
         logger.info(
@@ -168,8 +180,28 @@ class PVForecastService:
             }
             self.mqtt.publish("homelab/pv-forecast/updated", summary)
 
+            # Touch healthcheck file for Docker healthcheck
+            self._touch_healthcheck()
+
         except Exception:
             logger.exception("forecast_failed")
+
+    def _heartbeat(self) -> None:
+        """Publish MQTT heartbeat so other services know we're alive."""
+        self.mqtt.publish("homelab/pv-forecast/heartbeat", {
+            "status": "online",
+            "service": "pv-forecast",
+            "uptime_seconds": round(time.monotonic() - self._start_time, 1),
+        })
+        self._touch_healthcheck()
+
+    def _touch_healthcheck(self) -> None:
+        """Write timestamp to healthcheck file for Docker HEALTHCHECK."""
+        try:
+            HEALTHCHECK_FILE.parent.mkdir(parents=True, exist_ok=True)
+            HEALTHCHECK_FILE.write_text(str(time.time()))
+        except OSError:
+            pass
 
     async def _shutdown(self) -> None:
         """Clean up resources."""
