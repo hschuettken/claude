@@ -122,6 +122,36 @@ class MQTTClient:
         self._client.connect(self.host, self.port)
         self._client.loop_start()
 
+    def publish_ha_discovery(
+        self,
+        component: str,
+        object_id: str,
+        config: dict[str, Any],
+        node_id: str = "",
+    ) -> None:
+        """Publish an HA MQTT auto-discovery config message.
+
+        HA automatically creates an entity when it sees a config message on
+        the discovery topic. No manual HA config or restart needed.
+
+        Args:
+            component: HA platform type (e.g. "sensor", "binary_sensor").
+            object_id: Unique ID for this entity (e.g. "pv_forecast_status").
+            config: HA discovery config dict (name, state_topic, etc.).
+            node_id: Optional grouping node (e.g. "pv_forecast").
+        """
+        if node_id:
+            topic = f"homeassistant/{component}/{node_id}/{object_id}/config"
+        else:
+            topic = f"homeassistant/{component}/{object_id}/config"
+
+        # Ensure unique_id is set (required for entity registry)
+        if "unique_id" not in config:
+            config["unique_id"] = f"{node_id}_{object_id}" if node_id else object_id
+
+        self._client.publish(topic, json.dumps(config), retain=True)
+        logger.info("ha_discovery_published", component=component, object_id=object_id)
+
     def disconnect(self) -> None:
         """Stop the loop and disconnect."""
         self._client.loop_stop()

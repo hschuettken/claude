@@ -45,7 +45,8 @@ This file provides guidance for AI assistants working with this repository.
 │   │   ├── data.py                          #   InfluxDB data collector
 │   │   ├── model.py                         #   Gradient Boosting ML model
 │   │   ├── forecast.py                      #   Forecast orchestrator
-│   │   ├── ha_sensors.py                    #   Push forecasts to HA sensors
+│   │   ├── ha_sensors.py                    #   Push forecasts to HA sensors (REST API)
+│   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
 │   │   └── diagnose.py                      #   Step-by-step connectivity/data diagnostic
 │   └── example-service/                     #   Template service
 │       ├── Dockerfile
@@ -187,6 +188,33 @@ homelab/{service-name}/{event-type}
 
 Examples: `homelab/energy-monitor/price-changed`, `homelab/climate-control/setpoint-updated`
 
+### MQTT auto-discovery for Home Assistant
+
+Services register their entities in HA automatically via [MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery). On startup, each service publishes retained config messages to `homeassistant/{component}/{node_id}/{object_id}/config` — HA picks these up and creates entities without any manual configuration.
+
+Helper method on `MQTTClient`:
+```python
+self.mqtt.publish_ha_discovery("sensor", "today_kwh", node_id="pv_forecast", config={
+    "name": "PV Forecast Today",
+    "device": {"identifiers": ["homelab_pv_forecast"], "name": "PV AI Forecast"},
+    "state_topic": "homelab/pv-forecast/updated",
+    "value_template": "{{ value_json.today_kwh }}",
+    "unit_of_measurement": "kWh",
+    "device_class": "energy",
+})
+```
+
+**Important**: The MQTT broker used by the services must be the same one HA is connected to, otherwise HA won't see the discovery messages.
+
+### Docker healthcheck
+
+Services use a file-based healthcheck pattern for Docker:
+1. The service writes a timestamp to `/app/data/healthcheck` after each successful operation
+2. A `healthcheck.py` script checks if the file was updated within the last 5 minutes
+3. The Dockerfile declares: `HEALTHCHECK --interval=60s --start-period=120s CMD ["python", "healthcheck.py"]`
+
+Check health status with `docker ps` (shows `healthy`/`unhealthy` in the STATUS column).
+
 ### Configuration
 
 All config flows through `shared.config.Settings` (Pydantic). To add service-specific settings:
@@ -249,7 +277,9 @@ trained on historical production data (InfluxDB) correlated with weather feature
 
 **Schedule**: Forecast every hour, model retrain at 1 AM UTC daily.
 
-**HA output sensors** (prefix configurable via `HA_SENSOR_PREFIX`):
+**HA output sensors** — registered via two mechanisms:
+
+*Via REST API* (prefix configurable via `HA_SENSOR_PREFIX`):
 - `sensor.pv_ai_forecast_today_kwh` — total both arrays
 - `sensor.pv_ai_forecast_today_remaining_kwh` — remaining from current hour
 - `sensor.pv_ai_forecast_tomorrow_kwh`
@@ -259,7 +289,11 @@ trained on historical production data (InfluxDB) correlated with weather feature
 
 Each sensor includes an `hourly` attribute with per-hour breakdown.
 
-**MQTT events**: `homelab/pv-forecast/updated`, `homelab/pv-forecast/model-trained`
+*Via MQTT auto-discovery* (grouped under "PV AI Forecast" device in HA):
+- `binary_sensor` — Service status (online/offline, 3-min expiry)
+- `sensor` — Uptime (seconds), Today kWh, Today Remaining kWh, Tomorrow kWh, Day After kWh
+
+**MQTT events**: `homelab/pv-forecast/updated`, `homelab/pv-forecast/model-trained`, `homelab/pv-forecast/heartbeat`
 
 **Config** (env vars): `PV_EAST_ENERGY_ENTITY_ID`, `PV_EAST_CAPACITY_KWP`, `PV_EAST_AZIMUTH`, `PV_EAST_TILT` (same for west). `FORECAST_SOLAR_EAST_ENTITY_ID` / `WEST` (optional — used as ML feature). Location auto-detected from HA if not set.
 
