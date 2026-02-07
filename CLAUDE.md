@@ -20,6 +20,8 @@ This file provides guidance for AI assistants working with this repository.
 ├── docker-compose.yml                       # Orchestrates all services
 ├── docker-compose.override.example.yml      # Dev mode template (live code + debugger)
 ├── .env.example                             # Template for secrets (copy to .env)
+├── .env.enc                                 # SOPS-encrypted secrets (safe to commit)
+├── .sops.yaml                               # SOPS config (age public key + rules)
 ├── .gitignore
 ├── .vscode/launch.json                      # VS Code debugger attach configs
 ├── base/                                    # Shared Docker base image
@@ -53,7 +55,11 @@ This file provides guidance for AI assistants working with this repository.
 │   └── mosquitto/config/mosquitto.conf
 └── scripts/
     ├── build-base.sh                        #   Build the shared base image
-    └── new-service.sh                       #   Scaffold a new service
+    ├── new-service.sh                       #   Scaffold a new service
+    ├── secrets-encrypt.sh                   #   Encrypt .env → .env.enc
+    ├── secrets-decrypt.sh                   #   Decrypt .env.enc → .env
+    ├── secrets-edit.sh                      #   Edit encrypted secrets in-place
+    └── install-hooks.sh                     #   Install git pre-commit hooks
 ```
 
 ## Development Workflow
@@ -61,10 +67,32 @@ This file provides guidance for AI assistants working with this repository.
 ### First-time setup
 
 ```bash
-cp .env.example .env           # Fill in your HA token, InfluxDB creds, etc.
+# Secrets setup (SOPS + age)
+./scripts/install-hooks.sh     # Install git pre-commit hooks
+./scripts/secrets-decrypt.sh   # Decrypt .env.enc → .env (needs age key)
+# OR for first-time: cp .env.example .env and fill in values
+
 ./scripts/build-base.sh        # Build the shared base Docker image
 docker compose up --build      # Start everything
 ```
+
+### Secrets management (SOPS + age)
+
+Secrets are stored encrypted in `.env.enc` using [SOPS](https://github.com/getsops/sops) with [age](https://github.com/FiloSottile/age) encryption. The plain `.env` is gitignored.
+
+```bash
+./scripts/secrets-encrypt.sh   # Encrypt .env → .env.enc (commit this)
+./scripts/secrets-decrypt.sh   # Decrypt .env.enc → .env (after clone)
+./scripts/secrets-edit.sh      # Edit encrypted secrets in-place via $EDITOR
+```
+
+**Setup on a new machine:**
+1. Install `sops` and `age`
+2. Copy your age key to `.sops/age-key.txt` (from your password manager)
+3. Run `./scripts/secrets-decrypt.sh`
+4. Run `./scripts/install-hooks.sh`
+
+**Age key**: stored at `.sops/age-key.txt` (gitignored). Back it up in a password manager — if lost, you cannot decrypt your secrets.
 
 ### Dev mode (recommended for development)
 
@@ -212,5 +240,5 @@ Each sensor includes an `hourly` attribute with per-hour breakdown.
 4. **Base image** — If you add a dependency to `base/requirements.txt`, remind the user to rebuild with `./scripts/build-base.sh`.
 5. **docker-compose.yml** — When adding a new service, add it to `docker-compose.yml` following the existing pattern.
 6. **Update this file** — When adding significant components, update this CLAUDE.md.
-7. **Security** — Never commit `.env`. Be cautious with InfluxDB Flux queries (injection risk if building queries from user input).
+7. **Security** — Never commit plain `.env`. Secrets go in `.env.enc` (encrypted via SOPS). Be cautious with InfluxDB Flux queries (injection risk if building queries from user input).
 8. **InfluxDB** — Currently configured for **v2** (Flux query language). If the user has v1, the client wrapper needs changing.
