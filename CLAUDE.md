@@ -48,6 +48,14 @@ This file provides guidance for AI assistants working with this repository.
 │   │   ├── ha_sensors.py                    #   Push forecasts to HA sensors (REST API)
 │   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
 │   │   └── diagnose.py                      #   Step-by-step connectivity/data diagnostic
+│   ├── smart-ev-charging/                   #   Smart EV charging controller
+│   │   ├── Dockerfile
+│   │   ├── requirements.txt                 #   No extra deps (base image sufficient)
+│   │   ├── main.py                          #   Entry point + control loop
+│   │   ├── config.py                        #   EV-specific settings
+│   │   ├── charger.py                       #   Wallbox abstraction (read state, set power)
+│   │   ├── strategy.py                      #   Charging strategy logic
+│   │   └── healthcheck.py                   #   Docker HEALTHCHECK script
 │   └── example-service/                     #   Template service
 │       ├── Dockerfile
 │       ├── requirements.txt                 #   Service-specific deps only
@@ -296,6 +304,46 @@ Each sensor includes an `hourly` attribute with per-hour breakdown.
 **MQTT events**: `homelab/pv-forecast/updated`, `homelab/pv-forecast/model-trained`, `homelab/pv-forecast/heartbeat`
 
 **Config** (env vars): `PV_EAST_ENERGY_ENTITY_ID`, `PV_EAST_CAPACITY_KWP`, `PV_EAST_AZIMUTH`, `PV_EAST_TILT` (same for west). `FORECAST_SOLAR_EAST_ENTITY_ID` / `WEST` (optional — used as ML feature). Location auto-detected from HA if not set.
+
+### smart-ev-charging — Smart EV Charging Controller
+
+Controls the Amtron wallbox via HEMS power limit (Modbus register 1002) to optimize
+EV charging based on PV surplus, user preferences, and departure deadlines.
+
+**Economics**: Grid buy 25 ct/kWh (fixed), feed-in 7 ct/kWh, employer reimburses 25 ct/kWh.
+Charging from PV surplus = +18 ct/kWh profit. Grid charging = cost-neutral.
+
+**Charge modes** (selected via `input_select.ev_charge_mode`):
+
+| Mode | Behavior |
+|------|----------|
+| Off | Wallbox paused (HEMS = 0 W) |
+| PV Surplus | Dynamic tracking of solar surplus only |
+| Smart | PV surplus + grid fill by departure (with "Full by Morning") |
+| Eco | Fixed ~5 kW constant |
+| Fast | Fixed 11 kW maximum |
+| Manual | Service hands off — user controls wallbox directly via HA |
+
+**"Full by Morning"** modifier (`input_boolean.ev_full_by_morning`): When enabled with PV Surplus or Smart mode, the service calculates if the target energy can be reached by departure time. If not, it escalates to grid charging as the deadline approaches.
+
+**PV surplus formula**: `available_for_ev = current_ev_power - grid_power - grid_reserve`. This derives from the energy balance: grid = house + ev - pv, so available = pv - house - reserve.
+
+**Control loop**: Every 30 s — read HA state → calculate target power → write HEMS limit → publish MQTT status.
+
+**HA input helpers** (defined in `HomeAssistant_config/configuration.yaml`):
+- `input_select.ev_charge_mode` — Charge mode selector
+- `input_boolean.ev_full_by_morning` — Deadline mode
+- `input_datetime.ev_departure_time` — When the car leaves
+- `input_number.ev_target_energy_kwh` — Energy to add this session
+- `input_number.ev_battery_capacity_kwh` — Total EV battery capacity
+
+**HA output sensors** (via MQTT auto-discovery, "Smart EV Charging" device):
+- `binary_sensor` — Service online/offline
+- `sensor` — Charge Mode, Target Power (W), Actual Power (W), Session Energy (kWh), PV Available (W), Status text
+
+**MQTT events**: `homelab/smart-ev-charging/status`, `homelab/smart-ev-charging/heartbeat`
+
+**Config** (env vars): `EV_GRID_PRICE_CT`, `EV_FEED_IN_TARIFF_CT`, `EV_REIMBURSEMENT_CT`, `WALLBOX_MAX_POWER_W`, `WALLBOX_MIN_POWER_W`, `ECO_CHARGE_POWER_W`, `GRID_RESERVE_W`, `CONTROL_INTERVAL_SECONDS`. Entity IDs have sensible defaults matching the Amtron Modbus config.
 
 ## Code Conventions
 

@@ -68,6 +68,20 @@ services:
     networks:
       - homelab
 
+  smart-ev-charging:
+    build:
+      context: .
+      dockerfile: services/smart-ev-charging/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./shared:/app/shared:ro
+      - smart_ev_charging_data:/app/data
+    depends_on:
+      - mqtt
+    networks:
+      - homelab
+
   example-service:
     build:
       context: .
@@ -101,6 +115,7 @@ services:
 
 volumes:
   pv_forecast_data:
+  smart_ev_charging_data:
   mosquitto_data:
   # influxdb_data:
   # ollama_data:
