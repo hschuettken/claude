@@ -51,6 +51,9 @@ This file provides guidance for AI assistants working with this repository.
 │       ├── Dockerfile
 │       ├── requirements.txt                 #   Service-specific deps only
 │       └── main.py                          #   Entry point
+├── HomeAssistant_config/                    # Reference HA configuration (read-only docs)
+│   ├── configuration.yaml                   #   Main HA config (entities, integrations, InfluxDB)
+│   └── ...                                  #   KNX, sensor, climate, cover, light configs
 ├── infrastructure/                          # Config for infra containers
 │   └── mosquitto/config/mosquitto.conf
 └── scripts/
@@ -197,6 +200,38 @@ class MySettings(BaseSettings):
 
 Environment variables map to field names: `MY_CUSTOM_VAR` env var → `my_custom_var` field.
 
+## Home Assistant Setup
+
+Reference configuration is stored in `HomeAssistant_config/` for documentation purposes.
+
+### PV System
+
+Two PV arrays connected to a single inverter:
+
+| Array | Strings | Power Sensor | Energy Sensor |
+|-------|---------|-------------|---------------|
+| East  | PV1 + PV2 | `sensor.inverter_pv_east_power` (W) | `sensor.inverter_pv_east_energy` (kWh) |
+| West  | PV3 + PV4 | `sensor.inverter_pv_west_power` (W) | `sensor.inverter_pv_west_energy` (kWh) |
+
+- **Power sensors** are template sensors: `current × voltage` per string, summed per array
+- **Energy sensors** are `platform: integration` (Riemann sum, trapezoidal) from the power sensors
+- Energy sensors use `state_class: total_increasing` — they are **cumulative** (never reset at midnight)
+
+### InfluxDB
+
+- **Version**: v2 (Flux query language)
+- **Bucket**: `hass`
+- **Organization**: configured via org ID
+- **default_measurement**: `units` (all HA entities stored under this measurement)
+- **Recorder**: 3650-day retention (10 years)
+
+### Other Relevant Entities
+
+- **Grid metering**: Shelly 3EM (three-phase) — `sensor.shelly3em_main_channel_total_power` (W), `sensor.shelly3em_main_channel_total_energy` (kWh)
+- **Energy pricing**: EPEX spot market (`sensor.epex_spot_data_price_2`), `input_number.price_per_kwh_electricity_grid`, `input_number.price_per_kwh_electricity_pv`
+- **EV charging**: Amtron wallbox via Modbus — `sensor.amtron_meter_total_power_w`, `sensor.amtron_meter_total_energy_kwh`
+- **Forecast.Solar**: Not yet configured in HA (optional feature for pv-forecast)
+
 ## Services
 
 ### pv-forecast — AI Solar Production Forecast
@@ -205,6 +240,8 @@ Predicts PV output (kWh) for east and west arrays using a Gradient Boosting mode
 trained on historical production data (InfluxDB) correlated with weather features (Open-Meteo).
 
 **Data flow**: InfluxDB (actual production) + Open-Meteo (radiation/clouds/temp) + Forecast.Solar (optional) → ML model → HA sensors
+
+**Important**: The input energy sensors (`sensor.inverter_pv_east_energy`, `sensor.inverter_pv_west_energy`) are `total_increasing` cumulative sensors. The data collector diffs consecutive hourly values to derive per-hour kWh — it does **not** assume midnight resets.
 
 **Falls back** to radiation-based estimation when <14 days of training data exist.
 

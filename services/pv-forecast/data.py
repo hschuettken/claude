@@ -51,7 +51,11 @@ class PVDataCollector:
     ) -> pd.DataFrame:
         """Get hourly production from InfluxDB for an entity.
 
-        Queries the raw data points and resamples to hourly energy (kWh).
+        Handles total_increasing cumulative energy sensors (e.g. Riemann sum
+        integration sensors like sensor.inverter_pv_east_energy). These sensors
+        only go up over time, accumulating total kWh. We diff consecutive
+        hourly values to derive energy produced per hour.
+
         Returns a DataFrame with columns: [time, kwh].
         """
         range_start = f"-{days_back}d"
@@ -79,29 +83,35 @@ class PVDataCollector:
         df = df.dropna(subset=["value"])
         df = df.sort_values("time")
 
-        # The entity might report cumulative daily energy (resets at midnight)
-        # or instantaneous power. We handle both by looking at the value pattern.
-        # If values mostly increase within a day and reset, it's cumulative.
-        # We diff to get per-interval energy and resample to hourly.
+        # The energy sensors are total_increasing (cumulative Riemann sum).
+        # Values only go up — they represent total accumulated kWh since
+        # the integration sensor was created. To get hourly energy:
+        # 1. Resample to hourly by taking the last value per hour
+        # 2. Diff consecutive hours to get the increment
+        # 3. Drop negative diffs (sensor restarts / unavailable periods)
         df = df.set_index("time")
 
-        # Resample to hourly: take the max value per hour (handles cumulative)
-        # and then diff to get the hourly increment
-        hourly = df["value"].resample("1h").max()
-        hourly_diff = hourly.diff()
+        # Take last value per hour (end-of-hour cumulative total)
+        hourly = df["value"].resample("1h").last()
+        hourly = hourly.dropna()
 
-        # Where diff is negative (midnight reset or data gap), use the raw value
-        # (which represents energy since last reset = midnight)
-        first_of_day = hourly.index.hour == 0
-        hourly_kwh = hourly_diff.copy()
-        hourly_kwh[hourly_diff < 0] = 0
-        hourly_kwh[first_of_day] = hourly[first_of_day]
+        # Diff gives energy produced in each hour
+        hourly_kwh = hourly.diff()
+
+        # Negative diffs indicate sensor restart or data gap — discard them.
+        # No special midnight handling needed: total_increasing sensors
+        # do NOT reset at midnight (unlike daily energy sensors).
+        hourly_kwh[hourly_kwh < 0] = 0
+
+        # Cap per-hour production at a reasonable maximum to filter outliers.
+        # A residential array rarely exceeds 20 kWh in a single hour.
+        hourly_kwh[hourly_kwh > 20] = 0
 
         result = hourly_kwh.reset_index()
         result.columns = ["time", "kwh"]
         result = result.dropna()
 
-        # Filter out nighttime zeros and obvious outliers
+        # Filter out negative values (shouldn't happen after clipping, but safety)
         result = result[result["kwh"] >= 0]
 
         logger.info(
