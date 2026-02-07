@@ -15,8 +15,7 @@ Usage:
 
     # Query with Flux
     records = influx.query_records(
-        bucket="homeassistant",
-        measurement="°C",
+        bucket="hass",
         entity_id="sensor.temperature_living_room",
         range_start="-24h",
     )

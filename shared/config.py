@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     influxdb_url: str = "http://influxdb:8086"
     influxdb_token: str = ""
     influxdb_org: str = "homelab"
-    influxdb_bucket: str = "homeassistant"
+    influxdb_bucket: str = "hass"
 
     # --- MQTT ---
     mqtt_host: str = "mqtt"
