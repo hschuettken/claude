@@ -66,8 +66,11 @@ class InfluxClient:
 
         Args:
             bucket: InfluxDB bucket name.
-            measurement: Filter by _measurement (e.g., "°C", "W", "%").
-            entity_id: Filter by entity_id tag.
+            measurement: Filter by _measurement (e.g., "kWh", "W", "°C").
+            entity_id: Filter by entity_id tag. Accepts full HA entity IDs
+                like "sensor.temperature" — the "sensor." domain prefix is
+                stripped automatically since HA stores it in a separate
+                "domain" tag in InfluxDB.
             field: Filter by _field (default: "value").
             range_start: Start of time range (Flux duration or timestamp).
             range_stop: End of time range.
@@ -79,7 +82,10 @@ class InfluxClient:
         if measurement:
             filters.append(f'|> filter(fn: (r) => r["_measurement"] == "{measurement}")')
         if entity_id:
-            filters.append(f'|> filter(fn: (r) => r["entity_id"] == "{entity_id}")')
+            # HA stores entity_id without domain prefix in InfluxDB
+            # e.g. "sensor.inverter_pv_east_energy" → entity_id="inverter_pv_east_energy", domain="sensor"
+            influx_entity_id = entity_id.split(".", 1)[-1] if "." in entity_id else entity_id
+            filters.append(f'|> filter(fn: (r) => r["entity_id"] == "{influx_entity_id}")')
         if field:
             filters.append(f'|> filter(fn: (r) => r["_field"] == "{field}")')
 
@@ -99,10 +105,11 @@ from(bucket: "{bucket}")
         window: str = "1h",
     ) -> list[dict[str, Any]]:
         """Query windowed mean values for an entity — useful for trends."""
+        influx_entity_id = entity_id.split(".", 1)[-1] if "." in entity_id else entity_id
         flux = f"""
 from(bucket: "{bucket}")
   |> range(start: {range_start})
-  |> filter(fn: (r) => r["entity_id"] == "{entity_id}")
+  |> filter(fn: (r) => r["entity_id"] == "{influx_entity_id}")
   |> filter(fn: (r) => r["_field"] == "value")
   |> aggregateWindow(every: {window}, fn: mean, createEmpty: false)
   |> yield(name: "mean")

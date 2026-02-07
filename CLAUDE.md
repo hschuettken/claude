@@ -222,7 +222,9 @@ Two PV arrays connected to a single inverter:
 - **Version**: v2 (Flux query language)
 - **Bucket**: `hass`
 - **Organization**: configured via org ID
-- **default_measurement**: `units` (all HA entities stored under this measurement)
+- **`_measurement`**: the unit of measurement (e.g., `kWh`, `W`, `°C`) — NOT a fixed value
+- **`entity_id` tag**: stored WITHOUT the `sensor.`/`binary_sensor.` domain prefix (e.g., `inverter_pv_east_energy`, not `sensor.inverter_pv_east_energy`). The domain is in a separate `domain` tag. The `shared/influx_client.py` handles this stripping automatically.
+- **`_field`**: `value` for the numeric state
 - **Recorder**: 3650-day retention (10 years)
 
 ### Other Relevant Entities
@@ -230,7 +232,7 @@ Two PV arrays connected to a single inverter:
 - **Grid metering**: Shelly 3EM (three-phase) — `sensor.shelly3em_main_channel_total_power` (W), `sensor.shelly3em_main_channel_total_energy` (kWh)
 - **Energy pricing**: EPEX spot market (`sensor.epex_spot_data_price_2`), `input_number.price_per_kwh_electricity_grid`, `input_number.price_per_kwh_electricity_pv`
 - **EV charging**: Amtron wallbox via Modbus — `sensor.amtron_meter_total_power_w`, `sensor.amtron_meter_total_energy_kwh`
-- **Forecast.Solar**: Not yet configured in HA (optional feature for pv-forecast)
+- **Forecast.Solar**: Configured per array — `sensor.energy_production_today_east` / `west`, `sensor.energy_production_tomorrow_east` / `west`
 
 ## Services
 
