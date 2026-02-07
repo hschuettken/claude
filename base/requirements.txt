@@ -1,5 +1,5 @@
 # === Home Assistant integration ===
-homeassistant-api==4.2.0         # REST API client
+homeassistant-api>=4.2.1,<6      # REST API client
 websockets>=12.0,<14.0           # WebSocket API for real-time events
 
 # === InfluxDB ===
