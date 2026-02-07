@@ -111,6 +111,9 @@ class PVForecastService:
         # Connect MQTT for broadcasting events
         self.mqtt.connect_background()
 
+        # Register entities in HA via MQTT auto-discovery
+        self._register_ha_discovery()
+
         # Initial training attempt
         await self._train()
 
@@ -185,6 +188,87 @@ class PVForecastService:
 
         except Exception:
             logger.exception("forecast_failed")
+
+    def _register_ha_discovery(self) -> None:
+        """Register service entities in HA via MQTT auto-discovery."""
+        device = {
+            "identifiers": ["homelab_pv_forecast"],
+            "name": "PV AI Forecast",
+            "manufacturer": "Homelab",
+            "model": "pv-forecast",
+        }
+        node = "pv_forecast"
+
+        # Service status (online/offline)
+        self.mqtt.publish_ha_discovery("binary_sensor", "status", node_id=node, config={
+            "name": "PV Forecast Service",
+            "device": device,
+            "state_topic": "homelab/pv-forecast/heartbeat",
+            "value_template": "{{ 'ON' if value_json.status == 'online' else 'OFF' }}",
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device_class": "running",
+            "expire_after": 180,  # Mark offline if no heartbeat for 3 minutes
+            "icon": "mdi:solar-power-variant",
+        })
+
+        # Uptime sensor
+        self.mqtt.publish_ha_discovery("sensor", "uptime", node_id=node, config={
+            "name": "PV Forecast Uptime",
+            "device": device,
+            "state_topic": "homelab/pv-forecast/heartbeat",
+            "value_template": "{{ value_json.uptime_seconds | round(0) }}",
+            "unit_of_measurement": "s",
+            "device_class": "duration",
+            "entity_category": "diagnostic",
+            "icon": "mdi:timer-outline",
+        })
+
+        # Today forecast
+        self.mqtt.publish_ha_discovery("sensor", "today_kwh", node_id=node, config={
+            "name": "PV Forecast Today",
+            "device": device,
+            "state_topic": "homelab/pv-forecast/updated",
+            "value_template": "{{ value_json.today_kwh }}",
+            "unit_of_measurement": "kWh",
+            "device_class": "energy",
+            "icon": "mdi:solar-power-variant",
+        })
+
+        # Today remaining
+        self.mqtt.publish_ha_discovery("sensor", "today_remaining_kwh", node_id=node, config={
+            "name": "PV Forecast Today Remaining",
+            "device": device,
+            "state_topic": "homelab/pv-forecast/updated",
+            "value_template": "{{ value_json.today_remaining_kwh }}",
+            "unit_of_measurement": "kWh",
+            "device_class": "energy",
+            "icon": "mdi:solar-power-variant",
+        })
+
+        # Tomorrow forecast
+        self.mqtt.publish_ha_discovery("sensor", "tomorrow_kwh", node_id=node, config={
+            "name": "PV Forecast Tomorrow",
+            "device": device,
+            "state_topic": "homelab/pv-forecast/updated",
+            "value_template": "{{ value_json.tomorrow_kwh }}",
+            "unit_of_measurement": "kWh",
+            "device_class": "energy",
+            "icon": "mdi:solar-power-variant",
+        })
+
+        # Day after tomorrow forecast
+        self.mqtt.publish_ha_discovery("sensor", "day_after_kwh", node_id=node, config={
+            "name": "PV Forecast Day After Tomorrow",
+            "device": device,
+            "state_topic": "homelab/pv-forecast/updated",
+            "value_template": "{{ value_json.day_after_kwh }}",
+            "unit_of_measurement": "kWh",
+            "device_class": "energy",
+            "icon": "mdi:solar-power-variant",
+        })
+
+        logger.info("ha_discovery_registered", entity_count=6)
 
     def _heartbeat(self) -> None:
         """Publish MQTT heartbeat so other services know we're alive."""
