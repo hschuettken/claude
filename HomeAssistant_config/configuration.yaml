@@ -653,30 +653,11 @@ template:
           shelly3em_main_channel_c_power: "{{ states('sensor.shelly3em_main_channel_c_power') }}"
           formula: "shelly3em_main_channel_a_power + shelly3em_main_channel_b_power + shelly3em_main_channel_c_power"
 
+  # --- Amtron template sensors (value-adding transforms only) ---
   - sensor:
-      # --- Identity / versions ---
-      - name: "Amtron Firmware Version (short) (tpl)"
-        unique_id: amtron_tpl_fw_short
-        state: "{{ states('sensor.amtron_firmware_version_short') }}"
-        availability: "{{ has_value('sensor.amtron_firmware_version_short') }}"
-      - name: "Amtron Protocol Version (tpl)"
-        unique_id: amtron_tpl_protocol_version
-        state: "{{ states('sensor.amtron_protocol_version') }}"
-        availability: "{{ has_value('sensor.amtron_protocol_version') }}"
-      - name: "Amtron Device ID (tpl)"
-        unique_id: amtron_tpl_device_id
-        state: "{{ states('sensor.amtron_device_id') }}"
-        availability: "{{ has_value('sensor.amtron_device_id') }}"
-      - name: "Amtron Model (tpl)"
-        unique_id: amtron_tpl_model
-        state: "{{ states('sensor.amtron_model') }}"
-        availability: "{{ has_value('sensor.amtron_model') }}"
-      - name: "Amtron Device Name (tpl)"
-        unique_id: amtron_tpl_device_name
-        state: "{{ states('sensor.amtron_device_name') }}"
-        availability: "{{ has_value('sensor.amtron_device_name') }}"
-      - name: "Amtron Firmware Version (full) (tpl)"
+      - name: "Amtron Firmware Version (full)"
         unique_id: amtron_tpl_fw_full
+        icon: mdi:information-outline
         state: >
           {{ states('sensor.amtron_fw_major')|int }}.{{
              states('sensor.amtron_fw_minor')|int }}.{{
@@ -688,179 +669,33 @@ template:
              and has_value('sensor.amtron_fw_patch')
              and has_value('sensor.amtron_fw_build') }}
 
-      # raw numeric version parts as mirrors
-      - name: "Amtron FW Major (tpl)"
-        unique_id: amtron_tpl_fw_major
-        state: "{{ states('sensor.amtron_fw_major') }}"
-      - name: "Amtron FW Minor (tpl)"
-        unique_id: amtron_tpl_fw_minor
-        state: "{{ states('sensor.amtron_fw_minor') }}"
-      - name: "Amtron FW Patch (tpl)"
-        unique_id: amtron_tpl_fw_patch
-        state: "{{ states('sensor.amtron_fw_patch') }}"
-      - name: "Amtron FW Build (tpl)"
-        unique_id: amtron_tpl_fw_build
-        state: "{{ states('sensor.amtron_fw_build') }}"
-
-      # --- Status / states ---
-      - name: "Amtron OCPP CP Status (raw) (tpl)"
-        unique_id: amtron_tpl_ocpp_cp_status_raw
-        state: "{{ states('sensor.amtron_ocpp_cp_status_raw') }}"
-      - name: "Amtron Vehicle State (tpl)"
+      - name: "Amtron Vehicle State"
         unique_id: amtron_tpl_vehicle_state
+        icon: mdi:car-electric
         state: >
           {% set map = {'1':'A - No vehicle','2':'B - Vehicle connected',
                         '3':'C - Charging','4':'D - Charging (ventilation)',
                         '5':'E - Error'} %}
           {{ map.get(states('sensor.amtron_vehicle_state_raw'), 'unknown') }}
-      - name: "Amtron Availability (tpl)"
+
+      - name: "Amtron Availability"
         unique_id: amtron_tpl_availability
+        icon: mdi:ev-station
         state: "{{ 'Available' if states('sensor.amtron_availability_raw')|int(0) == 1 else 'Unavailable' }}"
-      - name: "Amtron Relay State (tpl)"
+
+      - name: "Amtron Relay State"
         unique_id: amtron_tpl_relay_state
+        icon: mdi:electric-switch
         state: "{{ 'On' if states('sensor.amtron_relay_state_raw')|int(0) == 1 else 'Off' }}"
-      - name: "Amtron Plug Lock (tpl)"
+
+      - name: "Amtron Plug Lock"
         unique_id: amtron_tpl_plug_lock
+        icon: mdi:lock
         state: "{{ 'Locked' if states('sensor.amtron_plug_lock_status_raw')|int(0) == 1 else 'Unlocked' }}"
 
-      # --- Limits / configuration mirrors ---
-      - name: "Amtron Safe Current [A] (tpl)"
-        unique_id: amtron_tpl_safe_current_a
-        state: "{{ states('sensor.amtron_safe_current_a') }}"
-        unit_of_measurement: "A"
-        device_class: current
-      - name: "Amtron Communication Timeout [s] (tpl)"
-        unique_id: amtron_tpl_comm_timeout_s
-        state: "{{ states('sensor.amtron_communication_timeout_s') }}"
-        unit_of_measurement: "s"
-      - name: "Amtron Operator Current Limit [A] (tpl)"
-        unique_id: amtron_tpl_operator_current_limit_a
-        state: "{{ states('sensor.amtron_operator_current_limit_a') }}"
-        unit_of_measurement: "A"
-        device_class: current
-      - name: "Amtron Min Charge Current [A] (tpl)"
-        unique_id: amtron_tpl_min_charge_current_a
-        state: "{{ states('sensor.amtron_min_charge_current_a') }}"
-        unit_of_measurement: "A"
-        device_class: current
-      - name: "Amtron Max Charge Current [A] (tpl)"
-        unique_id: amtron_tpl_max_charge_current_a
-        state: "{{ states('sensor.amtron_max_charge_current_a') }}"
-        unit_of_measurement: "A"
-        device_class: current
-      - name: "Amtron HEMS Current Limit [A] (tpl)"
-        unique_id: amtron_tpl_hems_current_limit_a
-        state: "{{ states('sensor.amtron_hems_current_limit_a') }}"
-        unit_of_measurement: "A"
-        device_class: current
-      - name: "Amtron HEMS Current Limit 0.1A [A] (tpl)"
-        unique_id: amtron_tpl_hems_current_limit_01a_a
-        state: "{{ states('sensor.amtron_hems_current_limit_01a_a') }}"
-        unit_of_measurement: "A"
-        device_class: current
-      - name: "Amtron HEMS Power Limit [W] (tpl)"
-        unique_id: amtron_tpl_hems_power_limit_w
-        state: "{{ states('sensor.amtron_hems_power_limit_w') }}"
-        unit_of_measurement: "W"
-        device_class: power
-        state_class: measurement
-
-      # --- Metering mirrors ---
-      - name: "Amtron Meter L1 Energy [kWh] (tpl)"
-        unique_id: amtron_tpl_l1_energy_kwh
-        state: "{{ states('sensor.amtron_meter_l1_energy_kwh') }}"
-        unit_of_measurement: "kWh"
-        device_class: energy
-        state_class: total_increasing
-      - name: "Amtron Meter L2 Energy [kWh] (tpl)"
-        unique_id: amtron_tpl_l2_energy_kwh
-        state: "{{ states('sensor.amtron_meter_l2_energy_kwh') }}"
-        unit_of_measurement: "kWh"
-        device_class: energy
-        state_class: total_increasing
-      - name: "Amtron Meter L3 Energy [kWh] (tpl)"
-        unique_id: amtron_tpl_l3_energy_kwh
-        state: "{{ states('sensor.amtron_meter_l3_energy_kwh') }}"
-        unit_of_measurement: "kWh"
-        device_class: energy
-        state_class: total_increasing
-
-      - name: "Amtron Meter L1 Power [W] (tpl)"
-        unique_id: amtron_tpl_l1_power_w
-        state: "{{ states('sensor.amtron_meter_l1_power_w') }}"
-        unit_of_measurement: "W"
-        device_class: power
-        state_class: measurement
-      - name: "Amtron Meter L2 Power [W] (tpl)"
-        unique_id: amtron_tpl_l2_power_w
-        state: "{{ states('sensor.amtron_meter_l2_power_w') }}"
-        unit_of_measurement: "W"
-        device_class: power
-        state_class: measurement
-      - name: "Amtron Meter L3 Power [W] (tpl)"
-        unique_id: amtron_tpl_l3_power_w
-        state: "{{ states('sensor.amtron_meter_l3_power_w') }}"
-        unit_of_measurement: "W"
-        device_class: power
-        state_class: measurement
-
-      - name: "Amtron Meter L1 Current [A] (tpl)"
-        unique_id: amtron_tpl_l1_current_a
-        state: "{{ states('sensor.amtron_meter_l1_current_a') }}"
-        unit_of_measurement: "A"
-        device_class: current
-      - name: "Amtron Meter L2 Current [A] (tpl)"
-        unique_id: amtron_tpl_l2_current_a
-        state: "{{ states('sensor.amtron_meter_l2_current_a') }}"
-        unit_of_measurement: "A"
-        device_class: current
-      - name: "Amtron Meter L3 Current [A] (tpl)"
-        unique_id: amtron_tpl_l3_current_a
-        state: "{{ states('sensor.amtron_meter_l3_current_a') }}"
-        unit_of_measurement: "A"
-        device_class: current
-
-      - name: "Amtron Meter Total Energy [kWh] (tpl)"
-        unique_id: amtron_tpl_total_energy_kwh
-        state: "{{ states('sensor.amtron_meter_total_energy_kwh') }}"
-        unit_of_measurement: "kWh"
-        device_class: energy
-        state_class: total_increasing
-      - name: "Amtron Meter Total Power [W] (tpl)"
-        unique_id: amtron_tpl_total_power_w
-        state: "{{ states('sensor.amtron_meter_total_power_w') }}"
-        unit_of_measurement: "W"
-        device_class: power
-        state_class: measurement
-
-      - name: "Amtron Meter L1 Voltage [V] (tpl)"
-        unique_id: amtron_tpl_l1_voltage_v
-        state: "{{ states('sensor.amtron_meter_l1_voltage_v') }}"
-        unit_of_measurement: "V"
-        device_class: voltage
-        state_class: measurement
-      - name: "Amtron Meter L2 Voltage [V] (tpl)"
-        unique_id: amtron_tpl_l2_voltage_v
-        state: "{{ states('sensor.amtron_meter_l2_voltage_v') }}"
-        unit_of_measurement: "V"
-        device_class: voltage
-        state_class: measurement
-      - name: "Amtron Meter L3 Voltage [V] (tpl)"
-        unique_id: amtron_tpl_l3_voltage_v
-        state: "{{ states('sensor.amtron_meter_l3_voltage_v') }}"
-        unit_of_measurement: "V"
-        device_class: voltage
-        state_class: measurement
-
-      # --- Session data mirrors + time decoding ---
-      - name: "Amtron Signaled Current to EV [A] (tpl)"
-        unique_id: amtron_tpl_signaled_current_to_ev_a
-        state: "{{ states('sensor.amtron_signaled_current_to_ev_a') }}"
-        unit_of_measurement: "A"
-        device_class: current
-
-      - name: "Amtron Charge Start Time (tpl)"
+      - name: "Amtron Charge Start Time"
         unique_id: amtron_tpl_charge_start_time
+        icon: mdi:clock-start
         state: >
           {% set hi = states('sensor.amtron_charge_start_time_hi_raw')|int(0) %}
           {% set lo = states('sensor.amtron_charge_start_time_lo_raw')|int(0) %}
@@ -868,8 +703,9 @@ template:
           {% set d = hex[-6:] %}
           {{ d[0:2] ~ ':' ~ d[2:4] ~ ':' ~ d[4:6] }}
 
-      - name: "Amtron Charge End Time (tpl)"
+      - name: "Amtron Charge End Time"
         unique_id: amtron_tpl_charge_end_time
+        icon: mdi:clock-end
         state: >
           {% set hi = states('sensor.amtron_charge_end_time_hi_raw')|int(0) %}
           {% set lo = states('sensor.amtron_charge_end_time_lo_raw')|int(0) %}
@@ -877,18 +713,9 @@ template:
           {% set d = hex[-6:] %}
           {{ d[0:2] ~ ':' ~ d[2:4] ~ ':' ~ d[4:6] }}
 
-      - name: "Amtron Charged Energy Session [kWh] (tpl)"
-        unique_id: amtron_tpl_charged_energy_session_kwh
-        state: "{{ states('sensor.amtron_charged_energy_session_kwh') }}"
-        unit_of_measurement: "kWh"
-        device_class: energy
-        state_class: total
-      - name: "Amtron Charged Duration [s] (tpl)"
-        unique_id: amtron_tpl_charged_duration_s
-        state: "{{ states('sensor.amtron_charged_duration_s') }}"
-        unit_of_measurement: "s"
-      - name: "Amtron Charged Duration (hh:mm:ss) (tpl)"
+      - name: "Amtron Charged Duration"
         unique_id: amtron_tpl_charged_duration_hms
+        icon: mdi:timer-outline
         state: >
           {% set s = states('sensor.amtron_charged_duration_s')|int(0) %}
           {% set h = (s // 3600)|int %}{% set m = ((s % 3600) // 60)|int %}{% set ss = (s % 60)|int %}
@@ -1023,9 +850,11 @@ input_select:
     name: EV Charge Mode
     options:
       - "Off"
-      - "IQ Charge"
-      - "Full Charge"
-      - "Eco Charge"
+      - "PV Surplus"
+      - "Smart"
+      - "Eco"
+      - "Fast"
+      - "Manual"
     initial: "Off"
     icon: mdi:ev-station
 
