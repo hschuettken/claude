@@ -27,7 +27,7 @@ import pandas as pd
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.model_selection import cross_val_score
 
-from shared.logging import get_logger
+from shared.log import get_logger
 
 logger = get_logger("pv-model")
 

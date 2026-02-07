@@ -32,7 +32,7 @@ from typing import Any
 from influxdb_client import InfluxDBClient
 from influxdb_client.client.flux_table import TableList
 
-from shared.logging import get_logger
+from shared.log import get_logger
 
 logger = get_logger("influx-client")
 

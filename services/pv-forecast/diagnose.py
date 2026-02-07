@@ -22,7 +22,7 @@ import sys
 import traceback
 
 # Bootstrap shared library
-from shared.logging import setup_logging
+from shared.log import setup_logging
 
 setup_logging("DEBUG")
 

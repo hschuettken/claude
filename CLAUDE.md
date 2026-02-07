@@ -30,7 +30,7 @@ This file provides guidance for AI assistants working with this repository.
 ├── shared/                                  # Shared Python library (mounted into every container)
 │   ├── __init__.py
 │   ├── config.py                            #   Pydantic settings from env vars
-│   ├── logging.py                           #   Structured logging (structlog)
+│   ├── log.py                               #   Structured logging (structlog)
 │   ├── ha_client.py                         #   Home Assistant async REST client
 │   ├── influx_client.py                     #   InfluxDB v2 query wrapper
 │   ├── mqtt_client.py                       #   MQTT pub/sub wrapper

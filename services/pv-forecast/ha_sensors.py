@@ -25,7 +25,7 @@ from __future__ import annotations
 from typing import Any
 
 from shared.ha_client import HomeAssistantClient
-from shared.logging import get_logger
+from shared.log import get_logger
 
 from forecast import ArrayForecast, DayForecast, FullForecast
 

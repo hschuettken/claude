@@ -1,7 +1,7 @@
 """Structured logging setup shared across all services.
 
 Usage:
-    from shared.logging import get_logger
+    from shared.log import get_logger
     logger = get_logger("my-service")
     logger.info("started", version="1.0")
 """

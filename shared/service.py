@@ -36,7 +36,7 @@ from typing import Any
 from shared.config import Settings
 from shared.ha_client import HomeAssistantClient
 from shared.influx_client import InfluxClient
-from shared.logging import get_logger
+from shared.log import get_logger
 from shared.mqtt_client import MQTTClient
 
 

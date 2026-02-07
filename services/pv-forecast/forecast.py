@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from shared.ha_client import HomeAssistantClient
-from shared.logging import get_logger
+from shared.log import get_logger
 
 from config import PVForecastSettings
 from data import PVDataCollector
