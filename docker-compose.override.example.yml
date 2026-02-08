@@ -34,6 +34,15 @@ services:
     ports:
       - "5678:5678"                          # VS Code debugger port
 
+  orchestrator:
+    volumes:
+      - ./services/orchestrator:/app
+      - ./shared:/app/shared:ro
+      - orchestrator_data:/app/data
+    environment:
+      - LOG_LEVEL=DEBUG
+      # - DEBUG_SERVICE=orchestrator
+
   example-service:
     volumes:
       - ./services/example-service:/app
