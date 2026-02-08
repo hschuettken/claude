@@ -265,7 +265,11 @@ Two PV arrays connected to a single inverter:
 
 ### Other Relevant Entities
 
-- **Grid metering**: Shelly 3EM (three-phase) — `sensor.shelly3em_main_channel_total_power` (W), `sensor.shelly3em_main_channel_total_energy` (kWh)
+- **Grid connection meter**: `sensor.power_meter_active_power` (W) — positive = exporting to grid, negative = importing from grid
+- **Household consumption**: Shelly 3EM (three-phase) — `sensor.shelly3em_main_channel_total_power` (W, always positive, house only)
+- **PV DC input**: `sensor.inverter_input_power` (W) — raw solar panel output
+- **Inverter AC output**: `sensor.inverter_active_power` (W) — combined PV + battery AC output
+- **Home battery**: `sensor.batteries_charge_discharge_power` (W, positive = charging, negative = discharging), `sensor.batteries_state_of_capacity` (%, SoC) — 7 kWh / 3.5 kW max
 - **Energy pricing**: EPEX spot market (`sensor.epex_spot_data_price_2`), `input_number.price_per_kwh_electricity_grid`, `input_number.price_per_kwh_electricity_pv`
 - **EV charging**: Amtron wallbox via Modbus — `sensor.amtron_meter_total_power_w`, `sensor.amtron_meter_total_energy_kwh`
 - **Forecast.Solar**: Configured per array — `sensor.energy_production_today_east` / `west`, `sensor.energy_production_tomorrow_east` / `west`
@@ -326,7 +330,10 @@ Charging from PV surplus = +18 ct/kWh profit. Grid charging = cost-neutral.
 
 **"Full by Morning"** modifier (`input_boolean.ev_full_by_morning`): When enabled with PV Surplus or Smart mode, the service calculates if the target energy can be reached by departure time. If not, it escalates to grid charging as the deadline approaches.
 
-**PV surplus formula**: `available_for_ev = current_ev_power - grid_power - grid_reserve`. This derives from the energy balance: grid = house + ev - pv, so available = pv - house - reserve.
+**PV surplus formula** (grid meter: positive = exporting, negative = importing):
+`pv_available = grid_power + ev_power + battery_power - reserve`. The grid meter sees the net of everything behind it. When the battery charges (battery_power > 0), the EV reclaims that power. When discharging (< 0), available is reduced to only count real PV surplus.
+
+**Battery assist**: On top of PV-only surplus, the strategy allows limited battery discharge for EV charging. This is gated by: SoC > floor (20%), PV forecast quality (good day → more aggressive), and a max discharge rate cap (2 kW default) to protect battery longevity. Battery assist only kicks in when PV is producing but surplus alone isn't enough for the wallbox minimum.
 
 **Control loop**: Every 30 s — read HA state → calculate target power → write HEMS limit → publish MQTT status.
 
@@ -337,13 +344,13 @@ Charging from PV surplus = +18 ct/kWh profit. Grid charging = cost-neutral.
 - `input_number.ev_target_energy_kwh` — Energy to add this session
 - `input_number.ev_battery_capacity_kwh` — Total EV battery capacity
 
-**HA output sensors** (via MQTT auto-discovery, "Smart EV Charging" device):
+**HA output sensors** (via MQTT auto-discovery, "Smart EV Charging" device, 10 entities):
 - `binary_sensor` — Service online/offline
-- `sensor` — Charge Mode, Target Power (W), Actual Power (W), Session Energy (kWh), PV Available (W), Status text
+- `sensor` — Charge Mode, Target Power (W), Actual Power (W), Session Energy (kWh), PV Available (W), Status text, Home Battery Power (W), Home Battery SoC (%), House Power (W)
 
 **MQTT events**: `homelab/smart-ev-charging/status`, `homelab/smart-ev-charging/heartbeat`
 
-**Config** (env vars): `EV_GRID_PRICE_CT`, `EV_FEED_IN_TARIFF_CT`, `EV_REIMBURSEMENT_CT`, `WALLBOX_MAX_POWER_W`, `WALLBOX_MIN_POWER_W`, `ECO_CHARGE_POWER_W`, `GRID_RESERVE_W`, `CONTROL_INTERVAL_SECONDS`. Entity IDs have sensible defaults matching the Amtron Modbus config.
+**Config** (env vars): `EV_GRID_PRICE_CT`, `EV_FEED_IN_TARIFF_CT`, `EV_REIMBURSEMENT_CT`, `WALLBOX_MAX_POWER_W`, `WALLBOX_MIN_POWER_W`, `ECO_CHARGE_POWER_W`, `GRID_RESERVE_W`, `CONTROL_INTERVAL_SECONDS`, `BATTERY_MIN_SOC_PCT`, `BATTERY_EV_ASSIST_MAX_W`, `PV_FORECAST_GOOD_KWH`. Entity IDs have sensible defaults matching the Amtron + Sungrow + Shelly setup.
 
 ## Code Conventions
 

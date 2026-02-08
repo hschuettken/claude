@@ -56,6 +56,9 @@ class SmartEVChargingService(BaseService):
             grid_reserve_w=self.settings.grid_reserve_w,
             start_hysteresis_w=self.settings.surplus_start_hysteresis_w,
             ramp_step_w=self.settings.ramp_step_w,
+            battery_min_soc_pct=self.settings.battery_min_soc_pct,
+            battery_ev_assist_max_w=self.settings.battery_ev_assist_max_w,
+            pv_forecast_good_kwh=self.settings.pv_forecast_good_kwh,
         )
 
         self.logger.info(
@@ -64,6 +67,8 @@ class SmartEVChargingService(BaseService):
             max_power=self.settings.wallbox_max_power_w,
             min_power=self.settings.wallbox_min_power_w,
             eco_power=self.settings.eco_charge_power_w,
+            battery_min_soc=self.settings.battery_min_soc_pct,
+            battery_max_assist=self.settings.battery_ev_assist_max_w,
         )
 
         # Control loop — runs until SIGTERM / SIGINT
@@ -97,27 +102,35 @@ class SmartEVChargingService(BaseService):
         mode = await self._read_charge_mode()
         wallbox = await charger.read_state()
         grid_power = await self._read_float(self.settings.grid_power_entity)
-        pv_power = (
-            await self._read_float(self.settings.pv_east_power_entity)
-            + await self._read_float(self.settings.pv_west_power_entity)
-        )
+        pv_power = await self._read_float(self.settings.pv_power_entity)
         full_by_morning = await self._read_bool(self.settings.full_by_morning_entity)
         departure_time = await self._read_time(self.settings.departure_time_entity)
         target_energy = await self._read_float(self.settings.target_energy_entity)
 
-        # Optional: home battery state (for monitoring, not control)
-        battery_power = await self._read_float_optional(
-            self.settings.battery_power_entity
+        # Home battery state
+        battery_power = await self._read_float(
+            self.settings.battery_power_entity,
         )
-        battery_soc = await self._read_float_optional(
-            self.settings.battery_soc_entity
+        battery_soc = await self._read_float(
+            self.settings.battery_soc_entity,
         )
+
+        # PV forecast (defaults to 0 if unavailable)
+        pv_forecast_remaining = await self._read_float(
+            self.settings.pv_forecast_remaining_entity,
+        )
+
+        # Household consumption (for monitoring)
+        house_power = await self._read_float(self.settings.house_power_entity)
 
         ctx = ChargingContext(
             mode=mode,
             wallbox=wallbox,
             grid_power_w=grid_power,
             pv_power_w=pv_power,
+            battery_power_w=battery_power,
+            battery_soc_pct=battery_soc,
+            pv_forecast_remaining_kwh=pv_forecast_remaining,
             full_by_morning=full_by_morning,
             departure_time=departure_time,
             target_energy_kwh=target_energy,
@@ -133,7 +146,7 @@ class SmartEVChargingService(BaseService):
             await charger.set_power_limit(decision.target_power_w)
 
         # 4) Publish status
-        self._publish_status(ctx, decision, battery_power, battery_soc)
+        self._publish_status(ctx, decision, house_power)
         self._touch_healthcheck()
 
         self.logger.info(
@@ -143,8 +156,10 @@ class SmartEVChargingService(BaseService):
             grid_w=round(grid_power),
             pv_w=round(pv_power),
             ev_w=round(wallbox.current_power_w),
-            bat_w=round(battery_power) if battery_power is not None else None,
-            bat_soc=round(battery_soc) if battery_soc is not None else None,
+            house_w=round(house_power),
+            bat_w=round(battery_power),
+            bat_soc=round(battery_soc),
+            forecast_kwh=round(pv_forecast_remaining, 1),
             target_w=decision.target_power_w,
             reason=decision.reason,
         )
@@ -170,19 +185,6 @@ class SmartEVChargingService(BaseService):
         except Exception:
             self.logger.warning("read_float_failed", entity_id=entity_id)
             return default
-
-    async def _read_float_optional(self, entity_id: str) -> float | None:
-        """Read a float sensor, returning None if the entity is not configured."""
-        if not entity_id:
-            return None
-        try:
-            state = await self.ha.get_state(entity_id)
-            val = state.get("state", "")
-            if val in ("unavailable", "unknown", ""):
-                return None
-            return float(val)
-        except Exception:
-            return None
 
     async def _read_bool(self, entity_id: str) -> bool:
         try:
@@ -210,13 +212,13 @@ class SmartEVChargingService(BaseService):
         self,
         ctx: ChargingContext,
         decision: ChargingDecision,
-        battery_power: float | None = None,
-        battery_soc: float | None = None,
+        house_power: float = 0.0,
     ) -> None:
         pv_available = max(
             0,
-            ctx.wallbox.current_power_w
-            - ctx.grid_power_w
+            ctx.grid_power_w
+            + ctx.wallbox.current_power_w
+            + ctx.battery_power_w
             - self.settings.grid_reserve_w,
         )
         payload: dict = {
@@ -229,13 +231,13 @@ class SmartEVChargingService(BaseService):
             "grid_power_w": round(ctx.grid_power_w),
             "pv_power_w": round(ctx.pv_power_w),
             "pv_available_w": round(pv_available),
+            "house_power_w": round(house_power),
+            "battery_power_w": round(ctx.battery_power_w),
+            "battery_soc_pct": round(ctx.battery_soc_pct, 1),
+            "pv_forecast_remaining_kwh": round(ctx.pv_forecast_remaining_kwh, 1),
             "full_by_morning": ctx.full_by_morning,
             "reason": decision.reason,
         }
-        if battery_power is not None:
-            payload["battery_power_w"] = round(battery_power)
-        if battery_soc is not None:
-            payload["battery_soc_pct"] = round(battery_soc, 1)
         self.publish("status", payload)
 
     # ------------------------------------------------------------------
@@ -336,44 +338,46 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        entity_count = 7
+        self.mqtt.publish_ha_discovery(
+            "sensor", "battery_power", node_id=node, config={
+                "name": "Home Battery Power",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.battery_power_w }}",
+                "unit_of_measurement": "W",
+                "device_class": "power",
+                "state_class": "measurement",
+                "icon": "mdi:home-battery",
+            },
+        )
 
-        # Optional battery sensors (only if entity IDs are configured)
-        if self.settings.battery_power_entity:
-            self.mqtt.publish_ha_discovery(
-                "sensor", "battery_power", node_id=node, config={
-                    "name": "Home Battery Power",
-                    "device": device,
-                    "state_topic": status_topic,
-                    "value_template": (
-                        "{{ value_json.battery_power_w | default(0) }}"
-                    ),
-                    "unit_of_measurement": "W",
-                    "device_class": "power",
-                    "state_class": "measurement",
-                    "icon": "mdi:home-battery",
-                },
-            )
-            entity_count += 1
+        self.mqtt.publish_ha_discovery(
+            "sensor", "battery_soc", node_id=node, config={
+                "name": "Home Battery SoC",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.battery_soc_pct }}",
+                "unit_of_measurement": "%",
+                "device_class": "battery",
+                "state_class": "measurement",
+                "icon": "mdi:battery-medium",
+            },
+        )
 
-        if self.settings.battery_soc_entity:
-            self.mqtt.publish_ha_discovery(
-                "sensor", "battery_soc", node_id=node, config={
-                    "name": "Home Battery SoC",
-                    "device": device,
-                    "state_topic": status_topic,
-                    "value_template": (
-                        "{{ value_json.battery_soc_pct | default(0) }}"
-                    ),
-                    "unit_of_measurement": "%",
-                    "device_class": "battery",
-                    "state_class": "measurement",
-                    "icon": "mdi:battery-medium",
-                },
-            )
-            entity_count += 1
+        self.mqtt.publish_ha_discovery(
+            "sensor", "house_power", node_id=node, config={
+                "name": "House Power",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.house_power_w }}",
+                "unit_of_measurement": "W",
+                "device_class": "power",
+                "state_class": "measurement",
+                "icon": "mdi:home-lightning-bolt",
+            },
+        )
 
-        self.logger.info("ha_discovery_registered", entity_count=entity_count)
+        self.logger.info("ha_discovery_registered", entity_count=10)
 
     # ------------------------------------------------------------------
     # Healthcheck

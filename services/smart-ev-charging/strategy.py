@@ -28,8 +28,11 @@ class ChargingContext:
 
     mode: ChargeMode
     wallbox: WallboxState
-    grid_power_w: float        # positive = importing, negative = exporting
-    pv_power_w: float          # total PV production (east + west)
+    grid_power_w: float        # positive = exporting to grid, negative = importing
+    pv_power_w: float          # total PV production (DC input)
+    battery_power_w: float     # positive = charging, negative = discharging
+    battery_soc_pct: float     # 0–100 %
+    pv_forecast_remaining_kwh: float  # remaining PV kWh expected today
     full_by_morning: bool
     departure_time: time | None
     target_energy_kwh: float
@@ -49,11 +52,24 @@ class ChargingDecision:
 class ChargingStrategy:
     """Calculates target charging power based on mode and conditions.
 
-    PV surplus formula:
-        available_for_ev = current_ev_power - grid_power - grid_reserve
+    PV surplus formula (grid meter: positive = exporting, negative = importing):
 
-    This works because grid_power = house + ev - pv, so:
-        available_for_ev = ev - (house + ev - pv) - reserve = pv - house - reserve
+        pv_available = grid_power + ev_power + battery_charge_power - reserve
+
+    The grid meter reflects the net of everything behind it:
+        grid = pv - house - ev - battery_charge  (when exporting)
+
+    So: pv_available = pv - house - reserve  (which is what we want).
+
+    When the home battery is charging (battery_power > 0), this formula
+    "reclaims" that power for the EV — the EV takes priority over storage.
+
+    When the battery is discharging (battery_power < 0), the available power
+    is reduced, because we only want real PV surplus, not battery energy.
+
+    Battery assist: On top of the PV-only surplus, we can allow limited
+    battery discharge for the EV if the PV forecast looks good and the
+    battery has enough charge. This is capped to protect battery longevity.
     """
 
     def __init__(
@@ -64,6 +80,9 @@ class ChargingStrategy:
         grid_reserve_w: int = 200,
         start_hysteresis_w: int = 300,
         ramp_step_w: int = 500,
+        battery_min_soc_pct: float = 20.0,
+        battery_ev_assist_max_w: float = 2000.0,
+        pv_forecast_good_kwh: float = 15.0,
     ) -> None:
         self.max_power_w = max_power_w
         self.min_power_w = min_power_w
@@ -71,6 +90,9 @@ class ChargingStrategy:
         self.grid_reserve_w = grid_reserve_w
         self.start_hysteresis_w = start_hysteresis_w
         self.ramp_step_w = ramp_step_w
+        self.battery_min_soc_pct = battery_min_soc_pct
+        self.battery_ev_assist_max_w = battery_ev_assist_max_w
+        self.pv_forecast_good_kwh = pv_forecast_good_kwh
 
         self._was_pv_charging = False
         self._last_target_w: int = 0
@@ -138,8 +160,13 @@ class ChargingStrategy:
         return ChargingDecision(power_w, f"{label} charging at {power_w} W")
 
     def _pv_surplus(self, ctx: ChargingContext) -> ChargingDecision:
-        """Track PV surplus — charge only from solar excess."""
-        available = self._calc_pv_available(ctx)
+        """Track PV surplus — charge primarily from solar excess.
+
+        May add limited battery assist if forecast is good and SoC allows.
+        """
+        pv_only = self._calc_pv_only_available(ctx)
+        assist = self._calc_battery_assist(ctx, pv_only)
+        available = pv_only + assist
 
         # Hysteresis: require more surplus to START than to KEEP charging
         threshold = (
@@ -150,10 +177,10 @@ class ChargingStrategy:
 
         if available >= threshold:
             target = self._clamp(available)
-            return ChargingDecision(
-                target,
-                f"PV surplus charging ({available:.0f} W available)",
-            )
+            parts = [f"PV surplus {pv_only:.0f} W"]
+            if assist > 0:
+                parts.append(f"+ {assist:.0f} W battery assist")
+            return ChargingDecision(target, f"{' '.join(parts)} → {target} W")
 
         if self._was_pv_charging:
             return ChargingDecision(
@@ -243,20 +270,76 @@ class ChargingStrategy:
         return decision
 
     # ------------------------------------------------------------------
-    # Helpers
+    # PV surplus & battery assist
     # ------------------------------------------------------------------
 
-    def _calc_pv_available(self, ctx: ChargingContext) -> float:
-        """Power available from PV surplus for the EV.
+    def _calc_pv_only_available(self, ctx: ChargingContext) -> float:
+        """Power available from PV surplus only (no battery discharge).
 
-        The grid meter (Shelly 3EM) sees the net of everything behind it,
-        including a home battery.  When the battery charges, it reduces the
-        visible surplus; when it discharges, it increases it.  This means
-        the formula automatically gives the EV whatever surplus is left
-        *after* the battery BMS has taken its share — no explicit battery
-        handling is needed here.
+        Formula: grid_power + ev_power + battery_power - reserve
+
+        grid_power is positive when exporting.  When the home battery is
+        charging (battery_power > 0) that power is "reclaimed" — the EV
+        takes priority over filling the battery.  When the battery is
+        discharging (battery_power < 0), available is reduced so we don't
+        count battery energy as PV surplus.
         """
-        return ctx.wallbox.current_power_w - ctx.grid_power_w - self.grid_reserve_w
+        return (
+            ctx.grid_power_w
+            + ctx.wallbox.current_power_w
+            + ctx.battery_power_w
+            - self.grid_reserve_w
+        )
+
+    def _calc_battery_assist(
+        self, ctx: ChargingContext, pv_only_available: float,
+    ) -> float:
+        """Extra power the home battery can contribute for EV charging.
+
+        Rules:
+        - Only assist when battery SoC is above the floor (battery_min_soc_pct)
+        - Cap discharge rate at battery_ev_assist_max_w (protect longevity)
+        - Scale assist by PV forecast: good forecast → more aggressive
+        - Only assist when there IS some PV surplus (just not enough alone)
+        - Never assist if battery is already discharging heavily for the house
+        """
+        # No assist if battery SoC too low
+        if ctx.battery_soc_pct <= self.battery_min_soc_pct:
+            return 0.0
+
+        # No assist if there's zero PV (e.g. nighttime) — save battery
+        if ctx.pv_power_w < 100:
+            return 0.0
+
+        # No assist if PV surplus is negative (house consuming more than PV)
+        if pv_only_available < 0:
+            return 0.0
+
+        # Scale assist limit by PV forecast quality
+        # Good forecast → allow up to max assist; poor forecast → reduce
+        forecast_factor = min(
+            1.0, ctx.pv_forecast_remaining_kwh / self.pv_forecast_good_kwh,
+        )
+
+        # Scale by SoC: full battery → full assist, at floor → zero
+        soc_headroom = (
+            (ctx.battery_soc_pct - self.battery_min_soc_pct)
+            / (100.0 - self.battery_min_soc_pct)
+        )
+        soc_factor = min(1.0, max(0.0, soc_headroom))
+
+        max_assist = self.battery_ev_assist_max_w * forecast_factor * soc_factor
+
+        # How much more we need to reach wallbox minimum
+        shortfall = self.min_power_w - pv_only_available
+        if shortfall <= 0:
+            return 0.0  # PV alone is already enough
+
+        return min(shortfall, max_assist)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     def _clamp(self, power_w: float) -> int:
         """Clamp to valid wallbox range or 0 if below minimum."""

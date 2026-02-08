@@ -17,27 +17,33 @@ class EVChargingSettings(BaseSettings):
     wallbox_energy_session_entity: str = "sensor.amtron_charged_energy_session_kwh"
     wallbox_hems_power_number: str = "number.amtron_hems_power_limit_w"
 
-    # --- Grid metering (Shelly 3EM) ---
-    # Positive = importing from grid, negative = exporting to grid
-    grid_power_entity: str = "sensor.shelly3em_main_channel_total_power"
+    # --- Grid connection meter ---
+    # Positive = exporting to grid, negative = importing from grid
+    grid_power_entity: str = "sensor.power_meter_active_power"
+
+    # --- Household consumption (Shelly 3EM, always positive) ---
+    house_power_entity: str = "sensor.shelly3em_main_channel_total_power"
 
     # --- PV production ---
-    pv_east_power_entity: str = "sensor.inverter_pv_east_power"
-    pv_west_power_entity: str = "sensor.inverter_pv_west_power"
+    pv_power_entity: str = "sensor.inverter_input_power"
 
-    # --- Home battery (optional — for status reporting) ---
-    # The PV surplus formula already accounts for the battery via the grid
-    # meter, but reading these gives visibility into battery state.
-    # Leave empty to disable battery monitoring.
-    battery_power_entity: str = ""     # W, positive=charging, negative=discharging
-    battery_soc_entity: str = ""       # % state of charge
+    # --- Home battery (7 kWh, 3.5 kW max charge/discharge) ---
+    # positive = charging, negative = discharging
+    battery_power_entity: str = "sensor.batteries_charge_discharge_power"
+    battery_soc_entity: str = "sensor.batteries_state_of_capacity"
+    battery_min_soc_pct: float = 20.0       # Floor — never drain below this for EV
+    battery_ev_assist_max_w: float = 2000.0  # Max battery discharge rate for EV assist
+
+    # --- PV forecast (optional — for battery-aware decisions) ---
+    pv_forecast_remaining_entity: str = "sensor.pv_ai_forecast_today_remaining_kwh"
+    pv_forecast_good_kwh: float = 15.0  # Above this = "good day", allow more battery use
 
     # --- HA helper entity IDs ---
     charge_mode_entity: str = "input_select.ev_charge_mode"
     full_by_morning_entity: str = "input_boolean.ev_full_by_morning"
     departure_time_entity: str = "input_datetime.ev_departure_time"
     target_energy_entity: str = "input_number.ev_target_energy_kwh"
-    battery_capacity_entity: str = "input_number.ev_battery_capacity_kwh"
+    ev_battery_capacity_entity: str = "input_number.ev_battery_capacity_kwh"
 
     # --- Wallbox power limits ---
     wallbox_max_power_w: int = 11000  # 16A x 3ph x 230V
