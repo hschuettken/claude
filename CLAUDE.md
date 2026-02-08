@@ -60,6 +60,7 @@ This file provides guidance for AI assistants working with this repository.
 └── scripts/
     ├── build-base.sh                        #   Build the shared base image
     ├── new-service.sh                       #   Scaffold a new service
+    ├── ha-export.py                         #   Export all HA entities/services to Markdown
     ├── secrets-encrypt.sh                   #   Encrypt .env → .env.enc
     ├── secrets-decrypt.sh                   #   Decrypt .env.enc → .env
     ├── secrets-edit.sh                      #   Edit encrypted secrets in-place
@@ -150,6 +151,17 @@ docker compose up --build                         # Build and run all services
 docker compose logs -f <service-name>             # Tail logs for a service
 docker compose down                               # Stop everything
 ```
+
+### Exporting Home Assistant data
+
+Export all entities, states, services, areas, and devices to a Markdown reference file:
+
+```bash
+python scripts/ha-export.py                          # Output: HomeAssistant_config/ha_export.md
+python scripts/ha-export.py -o custom-path.md        # Custom output path
+```
+
+Requires `HA_URL` and `HA_TOKEN` in `.env`. Uses REST API for states/services and WebSocket API for area/device/entity registries. The generated file is useful as AI context — it gives a complete picture of what's available in the home.
 
 ### Adding a Python dependency
 
