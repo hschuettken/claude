@@ -36,6 +36,27 @@ This file provides guidance for AI assistants working with this repository.
 │   ├── mqtt_client.py                       #   MQTT pub/sub wrapper
 │   └── service.py                           #   BaseService class (heartbeat, debugger, shutdown)
 ├── services/                                # One directory per microservice
+│   ├── orchestrator/                        #   AI-powered home brain & coordinator
+│   │   ├── Dockerfile
+│   │   ├── requirements.txt                 #   telegram-bot, google-generativeai, openai, anthropic
+│   │   ├── main.py                          #   Entry point (OrchestratorService)
+│   │   ├── config.py                        #   Orchestrator-specific settings
+│   │   ├── brain.py                         #   Core reasoning engine (LLM + tool loop)
+│   │   ├── tools.py                         #   LLM tool definitions & execution
+│   │   ├── memory.py                        #   Persistent conversations, profiles, preferences
+│   │   ├── calendar.py                      #   Google Calendar integration (read family, write own)
+│   │   ├── proactive.py                     #   Scheduled briefings, alerts, suggestions
+│   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
+│   │   ├── llm/                             #   Pluggable LLM backends
+│   │   │   ├── __init__.py                  #     Provider factory
+│   │   │   ├── base.py                      #     Abstract LLM interface
+│   │   │   ├── gemini.py                    #     Google Gemini (default)
+│   │   │   ├── openai_compat.py             #     OpenAI / Ollama
+│   │   │   └── anthropic_llm.py             #     Anthropic Claude
+│   │   └── channels/                        #   Communication channels
+│   │       ├── __init__.py
+│   │       ├── base.py                      #     Abstract channel interface
+│   │       └── telegram.py                  #     Telegram bot
 │   ├── pv-forecast/                         #   AI solar production forecast
 │   │   ├── Dockerfile
 │   │   ├── requirements.txt                 #   scikit-learn, pandas, numpy
@@ -287,6 +308,69 @@ Two PV arrays connected to a single inverter:
 - **Forecast.Solar**: Configured per array — `sensor.energy_production_today_east` / `west`, `sensor.energy_production_tomorrow_east` / `west`
 
 ## Services
+
+### orchestrator — AI-Powered Home Brain & Coordinator
+
+The central intelligence layer that coordinates all services, communicates with users via Telegram, and makes proactive suggestions. Uses an LLM (Gemini by default, swappable) with function-calling to reason about the home state and interact with Home Assistant.
+
+**Architecture**: Brain (LLM + tools) ↔ Telegram (user I/O) ↔ Proactive Engine (scheduled), all backed by Memory (persistent profiles/conversations) and connected to HA/InfluxDB/MQTT.
+
+**LLM Providers** (configured via `LLM_PROVIDER` env var):
+
+| Provider | Model Default | Env Var for API Key |
+|----------|--------------|---------------------|
+| `gemini` (default) | `gemini-2.0-flash` | `GEMINI_API_KEY` |
+| `openai` | `gpt-4o` | `OPENAI_API_KEY` |
+| `anthropic` | `claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY` |
+| `ollama` | `llama3` | — (uses `OLLAMA_URL`) |
+
+**LLM Tools** — functions the AI can call to interact with the home:
+- `get_entity_state` — Read any HA entity
+- `get_home_energy_summary` — Full energy snapshot (PV, grid, battery, EV, house)
+- `get_pv_forecast` — Today/tomorrow solar forecast with hourly breakdown
+- `get_ev_charging_status` — Current EV charge mode, power, session energy
+- `set_ev_charge_mode` — Change EV charge mode (with user confirmation)
+- `get_weather_forecast` — Current weather and short-term forecast
+- `query_energy_history` — Historical data from InfluxDB (trends/analysis)
+- `call_ha_service` — Control any HA device (with user confirmation)
+- `get_user_preferences` / `set_user_preference` — Persistent user preferences
+- `send_notification` — Send Telegram message to a specific user
+- `get_energy_prices` — Grid, feed-in, EPEX spot, oil prices
+- `get_calendar_events` — Read family or orchestrator Google Calendar events
+- `check_household_availability` — Check who is home/away (absences, business trips)
+- `create_calendar_event` — Create reminders/events on orchestrator's own calendar
+
+**Communication**: Telegram bot with commands `/start`, `/status`, `/forecast`, `/clear`, `/whoami`, `/help` plus free-text LLM conversation.
+
+**Proactive Features**:
+- **Morning briefing** (configurable time) — weather, PV forecast, energy plan for the day
+- **Evening summary** — today's production, grid usage, savings
+- **Optimization alerts** — excess PV, idle EV, battery strategy opportunities
+
+**Memory** (persistent in `/app/data/memory/`):
+- Per-user conversation history (with configurable max length)
+- User profiles with learned preferences (sauna days, wake times, departure times)
+- Decision log (what the orchestrator decided and why)
+
+**Google Calendar** (optional, via Service Account):
+- Family calendar (read-only) — absences, business trips, appointments
+- Orchestrator calendar (read/write) — reminders, scheduled actions
+- Uses `google-api-python-client` with Service Account auth (no interactive OAuth)
+- Setup: create Service Account in Google Cloud Console, share calendars with its email
+
+**MQTT**: Subscribes to `homelab/+/heartbeat` and `homelab/+/updated` to track all service states.
+
+**HA entities** (via MQTT auto-discovery, "Home Orchestrator" device):
+- `binary_sensor` — Service online/offline
+- `sensor` — Uptime, LLM Provider
+
+**Config** (env vars): `LLM_PROVIDER`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`, `MORNING_BRIEFING_TIME`, `ENABLE_PROACTIVE_SUGGESTIONS`, `GRID_PRICE_CT`, `FEED_IN_TARIFF_CT`, `OIL_PRICE_PER_KWH_CT`, `HOUSEHOLD_USERS`, `GOOGLE_CALENDAR_CREDENTIALS_FILE`, `GOOGLE_CALENDAR_FAMILY_ID`, `GOOGLE_CALENDAR_ORCHESTRATOR_ID`. Most entity IDs have sensible defaults matching the existing HA setup.
+
+**Example use cases**:
+- "Do you need to charge your car tomorrow?" → checks PV forecast, EV battery, schedule
+- "Can you turn on the wood-firing oven tomorrow at 5 PM to save oil?" → weather check, heating demand analysis
+- "Do you need your sauna tomorrow, or can we use more PV for the IR panels?" → preference check, PV forecast comparison
+- "How much did PV save us this month?" → InfluxDB historical query + cost calculation
 
 ### pv-forecast — AI Solar Production Forecast
 
