@@ -184,8 +184,14 @@ class ForecastEngine:
         weather_df["day_of_year"] = weather_df["time"].dt.dayofyear
         weather_df["month"] = weather_df["time"].dt.month
 
-        # Only daylight hours
-        weather_df = weather_df[(weather_df["hour"] >= 5) & (weather_df["hour"] <= 21)]
+        # Only daylight hours — use actual sunrise/sunset from Open-Meteo
+        if "sunrise_hour" in weather_df.columns and "sunset_hour" in weather_df.columns:
+            weather_df = weather_df[
+                (weather_df["hour"] >= np.floor(weather_df["sunrise_hour"]).astype(int))
+                & (weather_df["hour"] < np.ceil(weather_df["sunset_hour"]).astype(int))
+            ]
+        else:
+            weather_df = weather_df[(weather_df["hour"] >= 6) & (weather_df["hour"] <= 18)]
 
         # Split into days
         weather_df["date"] = weather_df["time"].dt.date
@@ -350,6 +356,14 @@ class ForecastEngine:
                     tilt,
                     self.settings.pv_latitude,
                 )
+
+            # Physics constraint: zero out predictions where GHI ≈ 0 (dark hours).
+            # Even if the model predicts a small positive value, no sun = no power.
+            ghi = weather_day["shortwave_radiation"].fillna(0).values
+            predictions = np.where(ghi < 5.0, 0.0, predictions)
+
+            # Clamp very small predictions to zero (reduce noise)
+            predictions = np.where(predictions < 0.01, 0.0, predictions)
 
             hourly = [
                 HourlyForecast(

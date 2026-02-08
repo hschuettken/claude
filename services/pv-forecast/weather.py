@@ -44,6 +44,9 @@ HOURLY_VARS = [
     "sunshine_duration",  # Seconds of sunshine per hour
 ]
 
+# Daily variables — sunrise/sunset for proper daylight filtering
+DAILY_VARS = ["sunrise", "sunset"]
+
 
 class OpenMeteoClient:
     """Async client for the Open-Meteo weather API."""
@@ -74,6 +77,7 @@ class OpenMeteoClient:
             "latitude": self.latitude,
             "longitude": self.longitude,
             "hourly": ",".join(HOURLY_VARS),
+            "daily": ",".join(DAILY_VARS),
             "forecast_days": forecast_days,
             "timezone": "UTC",
         }
@@ -99,6 +103,7 @@ class OpenMeteoClient:
             "latitude": self.latitude,
             "longitude": self.longitude,
             "hourly": ",".join(HOURLY_VARS),
+            "daily": ",".join(DAILY_VARS),
             "start_date": str(start_date),
             "end_date": str(end_date),
             "timezone": "UTC",
@@ -109,9 +114,29 @@ class OpenMeteoClient:
         return self._parse_hourly(data)
 
     def _parse_hourly(self, data: dict[str, Any]) -> list[dict[str, Any]]:
-        """Convert Open-Meteo response to a list of hourly dicts."""
+        """Convert Open-Meteo response to a list of hourly dicts.
+
+        Includes sunrise_hour and sunset_hour (decimal UTC hours) from daily
+        data, merged into each hourly record by date.
+        """
         hourly = data.get("hourly", {})
         times = hourly.get("time", [])
+
+        # Parse daily sunrise/sunset → decimal hour by date
+        daily = data.get("daily", {})
+        daily_times = daily.get("time", [])
+        sunrise_by_date: dict[str, float] = {}
+        sunset_by_date: dict[str, float] = {}
+        for i, dt_str in enumerate(daily_times):
+            sr_list = daily.get("sunrise", [])
+            ss_list = daily.get("sunset", [])
+            if i < len(sr_list) and sr_list[i]:
+                sr_dt = datetime.fromisoformat(sr_list[i])
+                sunrise_by_date[dt_str] = sr_dt.hour + sr_dt.minute / 60.0
+            if i < len(ss_list) and ss_list[i]:
+                ss_dt = datetime.fromisoformat(ss_list[i])
+                sunset_by_date[dt_str] = ss_dt.hour + ss_dt.minute / 60.0
+
         records = []
         for i, time_str in enumerate(times):
             record: dict[str, Any] = {
@@ -119,5 +144,11 @@ class OpenMeteoClient:
             }
             for var in HOURLY_VARS:
                 record[var] = hourly.get(var, [None])[i]
+
+            # Attach sunrise/sunset for this day (fallback 6/18 if missing)
+            date_str = time_str[:10]
+            record["sunrise_hour"] = sunrise_by_date.get(date_str, 6.0)
+            record["sunset_hour"] = sunset_by_date.get(date_str, 18.0)
+
             records.append(record)
         return records

@@ -270,9 +270,15 @@ async def check_weather(settings) -> None:
         records = await weather.get_solar_forecast(forecast_days=1)
         if records:
             daytime = [r for r in records if r.get("shortwave_radiation", 0) and r.get("shortwave_radiation", 0) > 0]
+            # Show sunrise/sunset info
+            sr = records[0].get("sunrise_hour", "?")
+            ss = records[0].get("sunset_hour", "?")
+            sr_str = f"{int(sr)}:{int((sr % 1) * 60):02d}" if isinstance(sr, float) else str(sr)
+            ss_str = f"{int(ss)}:{int((ss % 1) * 60):02d}" if isinstance(ss, float) else str(ss)
             result("Forecast API", True,
                    f"Hours returned: {len(records)}\n"
                    f"Daylight hours with radiation: {len(daytime)}\n"
+                   f"Sunrise (UTC): {sr_str}, Sunset (UTC): {ss_str}\n"
                    f"Sample: {json.dumps({k: v for k, v in records[len(records)//2].items() if k != 'time'}, default=str, indent=2)[:300]}")
         else:
             result("Forecast API", False, "No records returned")
