@@ -50,6 +50,8 @@ FEATURE_COLS = [
     "sunshine_duration",
     "capacity_kwp",
     "forecast_solar_kwh",  # Forecast.Solar prediction (daily total for this array)
+    "sunrise_hour",  # Decimal UTC hour of sunrise (e.g. 7.25 = 07:15)
+    "sunset_hour",  # Decimal UTC hour of sunset (e.g. 16.5 = 16:30)
 ]
 
 
@@ -60,6 +62,7 @@ class PVModel:
         self.array_name = array_name
         self.model_dir = Path(model_dir)
         self.model: GradientBoostingRegressor | None = None
+        self._trained_features: list[str] | None = None
         self._model_path = self.model_dir / f"pv_model_{array_name}.joblib"
 
     def train(self, df: pd.DataFrame) -> dict[str, float]:
@@ -77,6 +80,7 @@ class PVModel:
         if missing:
             logger.warning("missing_features", missing=list(missing))
 
+        self._trained_features = available_features
         X = df[available_features].fillna(0).values
         y = df["kwh"].values
 
@@ -140,25 +144,52 @@ class PVModel:
         if self.model is None:
             raise RuntimeError(f"Model not trained for array '{self.array_name}'")
 
-        available_features = [c for c in FEATURE_COLS if c in df.columns]
-        X = df[available_features].fillna(0).values
+        # Use the exact features the model was trained with (order matters)
+        if self._trained_features:
+            features = [c for c in self._trained_features if c in df.columns]
+        else:
+            features = [c for c in FEATURE_COLS if c in df.columns]
+        X = df[features].fillna(0).values
         predictions = self.model.predict(X)
         # Ensure non-negative
         return np.clip(predictions, 0, None)
 
     def _save(self) -> None:
-        """Persist model to disk."""
+        """Persist model and feature list to disk."""
         self.model_dir.mkdir(parents=True, exist_ok=True)
-        joblib.dump(self.model, self._model_path)
+        joblib.dump(
+            {"model": self.model, "features": self._trained_features},
+            self._model_path,
+        )
         logger.info("model_saved", path=str(self._model_path))
 
     def load(self) -> bool:
-        """Load model from disk. Returns True if successful."""
-        if self._model_path.exists():
-            self.model = joblib.load(self._model_path)
-            logger.info("model_loaded", path=str(self._model_path))
-            return True
-        return False
+        """Load model from disk. Returns True if features match current config."""
+        if not self._model_path.exists():
+            return False
+
+        data = joblib.load(self._model_path)
+
+        if isinstance(data, dict):
+            saved_features = data.get("features", [])
+            # If saved features don't match current FEATURE_COLS, force retrain
+            if saved_features and set(saved_features) != set(FEATURE_COLS):
+                logger.info(
+                    "model_features_changed",
+                    array=self.array_name,
+                    old_count=len(saved_features),
+                    new_count=len(FEATURE_COLS),
+                )
+                return False
+            self.model = data["model"]
+            self._trained_features = saved_features or None
+        else:
+            # Old format (bare model without features) — force retrain
+            logger.info("model_old_format", array=self.array_name)
+            return False
+
+        logger.info("model_loaded", path=str(self._model_path))
+        return True
 
     @property
     def is_trained(self) -> bool:

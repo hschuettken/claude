@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from shared.influx_client import InfluxClient
@@ -261,8 +262,17 @@ class PVDataCollector:
                     total_rows=len(merged),
                 )
 
-        # Only keep daylight hours (5-21) — no point training on nighttime
-        merged = merged[(merged["hour"] >= 5) & (merged["hour"] <= 21)]
+        # Only keep daylight hours — use actual sunrise/sunset from weather data.
+        # In winter at 52°N, sunrise can be ~7:15 UTC and sunset ~16:15 UTC,
+        # so the old hardcoded 5–21 range included many dark hours.
+        if "sunrise_hour" in merged.columns and "sunset_hour" in merged.columns:
+            merged = merged[
+                (merged["hour"] >= np.floor(merged["sunrise_hour"]).astype(int))
+                & (merged["hour"] < np.ceil(merged["sunset_hour"]).astype(int))
+            ]
+        else:
+            # Fallback if sunrise/sunset not in weather data
+            merged = merged[(merged["hour"] >= 6) & (merged["hour"] <= 18)]
 
         logger.info(
             "training_data_ready",
