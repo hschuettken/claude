@@ -65,6 +65,12 @@ class OrchestratorSettings(BaseSettings):
     feed_in_tariff_ct: float = 7.0
     oil_price_per_kwh_ct: float = 10.0
 
+    # --- Google Calendar ---
+    google_calendar_credentials_file: str = ""  # path to service account JSON key
+    google_calendar_credentials_json: str = ""  # or base64-encoded JSON (for Docker)
+    google_calendar_family_id: str = ""  # shared family calendar (read-only)
+    google_calendar_orchestrator_id: str = ""  # orchestrator's own calendar (read/write)
+
     # --- Memory ---
     max_conversation_history: int = 50
 

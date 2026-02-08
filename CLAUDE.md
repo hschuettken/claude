@@ -44,6 +44,7 @@ This file provides guidance for AI assistants working with this repository.
 │   │   ├── brain.py                         #   Core reasoning engine (LLM + tool loop)
 │   │   ├── tools.py                         #   LLM tool definitions & execution
 │   │   ├── memory.py                        #   Persistent conversations, profiles, preferences
+│   │   ├── calendar.py                      #   Google Calendar integration (read family, write own)
 │   │   ├── proactive.py                     #   Scheduled briefings, alerts, suggestions
 │   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
 │   │   ├── llm/                             #   Pluggable LLM backends
@@ -335,6 +336,9 @@ The central intelligence layer that coordinates all services, communicates with 
 - `get_user_preferences` / `set_user_preference` — Persistent user preferences
 - `send_notification` — Send Telegram message to a specific user
 - `get_energy_prices` — Grid, feed-in, EPEX spot, oil prices
+- `get_calendar_events` — Read family or orchestrator Google Calendar events
+- `check_household_availability` — Check who is home/away (absences, business trips)
+- `create_calendar_event` — Create reminders/events on orchestrator's own calendar
 
 **Communication**: Telegram bot with commands `/start`, `/status`, `/forecast`, `/clear`, `/whoami`, `/help` plus free-text LLM conversation.
 
@@ -348,13 +352,19 @@ The central intelligence layer that coordinates all services, communicates with 
 - User profiles with learned preferences (sauna days, wake times, departure times)
 - Decision log (what the orchestrator decided and why)
 
+**Google Calendar** (optional, via Service Account):
+- Family calendar (read-only) — absences, business trips, appointments
+- Orchestrator calendar (read/write) — reminders, scheduled actions
+- Uses `google-api-python-client` with Service Account auth (no interactive OAuth)
+- Setup: create Service Account in Google Cloud Console, share calendars with its email
+
 **MQTT**: Subscribes to `homelab/+/heartbeat` and `homelab/+/updated` to track all service states.
 
 **HA entities** (via MQTT auto-discovery, "Home Orchestrator" device):
 - `binary_sensor` — Service online/offline
 - `sensor` — Uptime, LLM Provider
 
-**Config** (env vars): `LLM_PROVIDER`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`, `MORNING_BRIEFING_TIME`, `ENABLE_PROACTIVE_SUGGESTIONS`, `GRID_PRICE_CT`, `FEED_IN_TARIFF_CT`, `OIL_PRICE_PER_KWH_CT`, `HOUSEHOLD_USERS`. Most entity IDs have sensible defaults matching the existing HA setup.
+**Config** (env vars): `LLM_PROVIDER`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`, `MORNING_BRIEFING_TIME`, `ENABLE_PROACTIVE_SUGGESTIONS`, `GRID_PRICE_CT`, `FEED_IN_TARIFF_CT`, `OIL_PRICE_PER_KWH_CT`, `HOUSEHOLD_USERS`, `GOOGLE_CALENDAR_CREDENTIALS_FILE`, `GOOGLE_CALENDAR_FAMILY_ID`, `GOOGLE_CALENDAR_ORCHESTRATOR_ID`. Most entity IDs have sensible defaults matching the existing HA setup.
 
 **Example use cases**:
 - "Do you need to charge your car tomorrow?" → checks PV forecast, EV battery, schedule

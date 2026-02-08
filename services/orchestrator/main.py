@@ -20,6 +20,7 @@ from pathlib import Path
 from shared.service import BaseService
 
 from brain import Brain
+from calendar import GoogleCalendarClient
 from channels.telegram import TelegramChannel
 from config import OrchestratorSettings
 from llm import create_provider
@@ -49,12 +50,28 @@ class OrchestratorService(BaseService):
             provider=self.settings.llm_provider,
         )
 
+        # --- Google Calendar (optional) ---
+        gcal = GoogleCalendarClient(
+            credentials_file=self.settings.google_calendar_credentials_file,
+            credentials_json=self.settings.google_calendar_credentials_json,
+            timezone=self.settings.timezone,
+        )
+        if gcal.available:
+            self.logger.info(
+                "google_calendar_enabled",
+                family_cal=bool(self.settings.google_calendar_family_id),
+                orchestrator_cal=bool(self.settings.google_calendar_orchestrator_id),
+            )
+        else:
+            self.logger.info("google_calendar_disabled", reason="No credentials configured")
+
         tool_executor = ToolExecutor(
             ha=self.ha,
             influx=self.influx,
             mqtt=self.mqtt,
             memory=memory,
             settings=self.settings,
+            gcal=gcal if gcal.available else None,
         )
 
         brain = Brain(
