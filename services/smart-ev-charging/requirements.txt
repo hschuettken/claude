@@ -1,0 +1,2 @@
+# No extra deps — shared base image has everything needed
+# (httpx, paho-mqtt, structlog, pydantic-settings, influxdb-client)
