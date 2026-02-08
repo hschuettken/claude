@@ -25,6 +25,13 @@ class EVChargingSettings(BaseSettings):
     pv_east_power_entity: str = "sensor.inverter_pv_east_power"
     pv_west_power_entity: str = "sensor.inverter_pv_west_power"
 
+    # --- Home battery (optional — for status reporting) ---
+    # The PV surplus formula already accounts for the battery via the grid
+    # meter, but reading these gives visibility into battery state.
+    # Leave empty to disable battery monitoring.
+    battery_power_entity: str = ""     # W, positive=charging, negative=discharging
+    battery_soc_entity: str = ""       # % state of charge
+
     # --- HA helper entity IDs ---
     charge_mode_entity: str = "input_select.ev_charge_mode"
     full_by_morning_entity: str = "input_boolean.ev_full_by_morning"

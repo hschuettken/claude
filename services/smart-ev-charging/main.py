@@ -105,6 +105,14 @@ class SmartEVChargingService(BaseService):
         departure_time = await self._read_time(self.settings.departure_time_entity)
         target_energy = await self._read_float(self.settings.target_energy_entity)
 
+        # Optional: home battery state (for monitoring, not control)
+        battery_power = await self._read_float_optional(
+            self.settings.battery_power_entity
+        )
+        battery_soc = await self._read_float_optional(
+            self.settings.battery_soc_entity
+        )
+
         ctx = ChargingContext(
             mode=mode,
             wallbox=wallbox,
@@ -125,7 +133,7 @@ class SmartEVChargingService(BaseService):
             await charger.set_power_limit(decision.target_power_w)
 
         # 4) Publish status
-        self._publish_status(ctx, decision)
+        self._publish_status(ctx, decision, battery_power, battery_soc)
         self._touch_healthcheck()
 
         self.logger.info(
@@ -135,6 +143,8 @@ class SmartEVChargingService(BaseService):
             grid_w=round(grid_power),
             pv_w=round(pv_power),
             ev_w=round(wallbox.current_power_w),
+            bat_w=round(battery_power) if battery_power is not None else None,
+            bat_soc=round(battery_soc) if battery_soc is not None else None,
             target_w=decision.target_power_w,
             reason=decision.reason,
         )
@@ -161,6 +171,19 @@ class SmartEVChargingService(BaseService):
             self.logger.warning("read_float_failed", entity_id=entity_id)
             return default
 
+    async def _read_float_optional(self, entity_id: str) -> float | None:
+        """Read a float sensor, returning None if the entity is not configured."""
+        if not entity_id:
+            return None
+        try:
+            state = await self.ha.get_state(entity_id)
+            val = state.get("state", "")
+            if val in ("unavailable", "unknown", ""):
+                return None
+            return float(val)
+        except Exception:
+            return None
+
     async def _read_bool(self, entity_id: str) -> bool:
         try:
             state = await self.ha.get_state(entity_id)
@@ -184,7 +207,11 @@ class SmartEVChargingService(BaseService):
     # ------------------------------------------------------------------
 
     def _publish_status(
-        self, ctx: ChargingContext, decision: ChargingDecision
+        self,
+        ctx: ChargingContext,
+        decision: ChargingDecision,
+        battery_power: float | None = None,
+        battery_soc: float | None = None,
     ) -> None:
         pv_available = max(
             0,
@@ -192,7 +219,7 @@ class SmartEVChargingService(BaseService):
             - ctx.grid_power_w
             - self.settings.grid_reserve_w,
         )
-        self.publish("status", {
+        payload: dict = {
             "mode": ctx.mode.value,
             "vehicle": ctx.wallbox.vehicle_state_text,
             "vehicle_connected": ctx.wallbox.vehicle_connected,
@@ -204,7 +231,12 @@ class SmartEVChargingService(BaseService):
             "pv_available_w": round(pv_available),
             "full_by_morning": ctx.full_by_morning,
             "reason": decision.reason,
-        })
+        }
+        if battery_power is not None:
+            payload["battery_power_w"] = round(battery_power)
+        if battery_soc is not None:
+            payload["battery_soc_pct"] = round(battery_soc, 1)
+        self.publish("status", payload)
 
     # ------------------------------------------------------------------
     # MQTT auto-discovery
@@ -304,7 +336,44 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.logger.info("ha_discovery_registered", entity_count=7)
+        entity_count = 7
+
+        # Optional battery sensors (only if entity IDs are configured)
+        if self.settings.battery_power_entity:
+            self.mqtt.publish_ha_discovery(
+                "sensor", "battery_power", node_id=node, config={
+                    "name": "Home Battery Power",
+                    "device": device,
+                    "state_topic": status_topic,
+                    "value_template": (
+                        "{{ value_json.battery_power_w | default(0) }}"
+                    ),
+                    "unit_of_measurement": "W",
+                    "device_class": "power",
+                    "state_class": "measurement",
+                    "icon": "mdi:home-battery",
+                },
+            )
+            entity_count += 1
+
+        if self.settings.battery_soc_entity:
+            self.mqtt.publish_ha_discovery(
+                "sensor", "battery_soc", node_id=node, config={
+                    "name": "Home Battery SoC",
+                    "device": device,
+                    "state_topic": status_topic,
+                    "value_template": (
+                        "{{ value_json.battery_soc_pct | default(0) }}"
+                    ),
+                    "unit_of_measurement": "%",
+                    "device_class": "battery",
+                    "state_class": "measurement",
+                    "icon": "mdi:battery-medium",
+                },
+            )
+            entity_count += 1
+
+        self.logger.info("ha_discovery_registered", entity_count=entity_count)
 
     # ------------------------------------------------------------------
     # Healthcheck

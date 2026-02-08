@@ -247,7 +247,15 @@ class ChargingStrategy:
     # ------------------------------------------------------------------
 
     def _calc_pv_available(self, ctx: ChargingContext) -> float:
-        """Power available from PV surplus for the EV."""
+        """Power available from PV surplus for the EV.
+
+        The grid meter (Shelly 3EM) sees the net of everything behind it,
+        including a home battery.  When the battery charges, it reduces the
+        visible surplus; when it discharges, it increases it.  This means
+        the formula automatically gives the EV whatever surplus is left
+        *after* the battery BMS has taken its share — no explicit battery
+        handling is needed here.
+        """
         return ctx.wallbox.current_power_w - ctx.grid_power_w - self.grid_reserve_w
 
     def _clamp(self, power_w: float) -> int:
