@@ -5,16 +5,12 @@ Fetches all entities, states, services, areas, and devices from Home Assistant
 and writes a comprehensive reference document. Useful for AI assistants and
 developers who need a complete picture of the smart home setup.
 
+Dependencies: Python 3.10+ (stdlib only). Optionally `pip install websockets`
+for area/device/entity registry data.
+
 Usage:
-    # From repo root (requires deps: httpx, websockets, pydantic-settings):
-    python scripts/ha-export.py
-
-    # Custom output path:
-    python scripts/ha-export.py -o my-export.md
-
-    # Via Docker (using any service container):
-    docker compose run --rm -v ./scripts:/app/scripts:ro \\
-        example-service python /app/scripts/ha-export.py
+    python scripts/ha-export.py                      # Uses .env for HA_URL/HA_TOKEN
+    python scripts/ha-export.py -o custom-path.md    # Custom output path
 """
 
 from __future__ import annotations
@@ -22,24 +18,22 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import ssl
 import sys
+import urllib.request
+import urllib.error
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# Add repo root to sys.path for shared library imports
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
-
-from shared.config import Settings  # noqa: E402
-from shared.ha_client import HomeAssistantClient  # noqa: E402
-
 try:
-    import websockets  # noqa: E402
+    import websockets
 except ImportError:
     websockets = None  # type: ignore[assignment]
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT = REPO_ROOT / "HomeAssistant_config" / "ha_export.md"
 
 # Domains ordered by typical relevance for smart-home overview
@@ -69,15 +63,66 @@ DOMAIN_EXTRA_ATTRS: dict[str, list[str]] = {
 
 
 # ---------------------------------------------------------------------------
-# Data fetching
+# Config: read HA_URL / HA_TOKEN from environment or .env file
 # ---------------------------------------------------------------------------
 
-async def fetch_ws_registries(
+def _load_dotenv() -> None:
+    """Minimal .env loader — no external deps needed."""
+    for candidate in [Path.cwd() / ".env", REPO_ROOT / ".env"]:
+        if candidate.is_file():
+            for line in candidate.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip("'\"")
+                # Don't override already-set env vars
+                if key not in os.environ:
+                    os.environ[key] = value
+            return
+
+
+def _get_config() -> tuple[str, str]:
+    """Return (ha_url, ha_token) from env, falling back to .env file."""
+    _load_dotenv()
+    ha_url = os.environ.get("HA_URL", "http://homeassistant.local:8123").rstrip("/")
+    ha_token = os.environ.get("HA_TOKEN", "")
+    return ha_url, ha_token
+
+
+# ---------------------------------------------------------------------------
+# REST API helpers (stdlib only — no httpx needed)
+# ---------------------------------------------------------------------------
+
+def _ha_get(url: str, token: str, path: str) -> Any:
+    """GET a Home Assistant REST API endpoint. Returns parsed JSON."""
+    req = urllib.request.Request(
+        f"{url}/api{path}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    # Allow self-signed certs (common in homelab setups)
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+        return json.loads(resp.read().decode())
+
+
+# ---------------------------------------------------------------------------
+# WebSocket registry fetcher (optional — needs `pip install websockets`)
+# ---------------------------------------------------------------------------
+
+async def _fetch_ws_registries(
     url: str, token: str,
 ) -> dict[str, list[dict[str, Any]]]:
     """Fetch area, device, and entity registries via the HA WebSocket API."""
     if websockets is None:
-        print("  ! websockets library not installed — skipping registry data")
+        print("  ! websockets not installed (pip install websockets) — skipping registries")
         return {}
 
     ws_url = url.replace("http://", "ws://").replace("https://", "wss://")
@@ -91,7 +136,12 @@ async def fetch_ws_registries(
     }
 
     try:
-        async with websockets.connect(ws_url, close_timeout=10) as ws:
+        # Allow self-signed certs for wss://
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        async with websockets.connect(ws_url, close_timeout=10, ssl=ssl_ctx if ws_url.startswith("wss") else None) as ws:
             # Auth handshake
             msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
             if msg.get("type") != "auth_required":
@@ -111,8 +161,8 @@ async def fetch_ws_registries(
                     registries[name] = resp["result"]
                     print(f"    {name}: {len(resp['result'])} entries")
                 else:
-                    err = resp.get("error", {}).get("message", "unknown")
-                    print(f"    {name}: failed ({err})")
+                    err_msg = resp.get("error", {}).get("message", "unknown")
+                    print(f"    {name}: failed ({err_msg})")
                     registries[name] = []
 
     except Exception as exc:
@@ -120,22 +170,6 @@ async def fetch_ws_registries(
         print("    Continuing with REST API data only (no area/device info)")
 
     return registries
-
-
-async def fetch_services(ha: HomeAssistantClient) -> list[dict[str, Any]]:
-    """Fetch available services via REST API."""
-    client = await ha._get_client()
-    resp = await client.get("/services")
-    resp.raise_for_status()
-    return resp.json()
-
-
-async def fetch_config(ha: HomeAssistantClient) -> dict[str, Any]:
-    """Fetch HA instance configuration via REST API."""
-    client = await ha._get_client()
-    resp = await client.get("/config")
-    resp.raise_for_status()
-    return resp.json()
 
 
 # ---------------------------------------------------------------------------
@@ -411,41 +445,41 @@ async def main() -> None:
     )
     args = parser.parse_args()
 
-    settings = Settings()
+    ha_url, ha_token = _get_config()
 
-    if not settings.ha_token:
+    if not ha_token:
         print(
             "Error: HA_TOKEN is not set.\n"
             "Set it in .env or pass as an environment variable."
         )
         sys.exit(1)
 
-    ha = HomeAssistantClient(settings.ha_url, settings.ha_token)
-
     try:
-        print(f"Connecting to Home Assistant at {settings.ha_url} …")
+        print(f"Connecting to Home Assistant at {ha_url} …")
 
-        # -- REST: config, states, services --
+        # -- REST: config --
         print("  Fetching config …")
         try:
-            config = await fetch_config(ha)
+            config = _ha_get(ha_url, ha_token, "/config")
             print(f"    HA version {config.get('version', '?')}")
         except Exception as exc:
-            print(f"    Failed to fetch config: {exc}")
+            print(f"    Failed: {exc}")
             config = {}
 
+        # -- REST: states --
         print("  Fetching states …")
-        states = await ha.get_states()
+        states: list[dict[str, Any]] = _ha_get(ha_url, ha_token, "/states")
         print(f"    {len(states)} entities")
 
+        # -- REST: services --
         print("  Fetching services …")
-        services = await fetch_services(ha)
+        services: list[dict[str, Any]] = _ha_get(ha_url, ha_token, "/services")
         total_svc = sum(len(s.get("services", {})) for s in services)
         print(f"    {total_svc} services across {len(services)} domains")
 
-        # -- WebSocket: registries --
+        # -- WebSocket: registries (optional) --
         print("  Fetching registries via WebSocket …")
-        registries = await fetch_ws_registries(settings.ha_url, settings.ha_token)
+        registries = await _fetch_ws_registries(ha_url, ha_token)
 
         # -- Generate Markdown --
         print("Generating Markdown …")
@@ -457,8 +491,15 @@ async def main() -> None:
         size_kb = args.output.stat().st_size / 1024
         print(f"\nDone — {args.output.relative_to(REPO_ROOT)}  ({size_kb:.1f} KB)")
 
-    finally:
-        await ha.close()
+    except urllib.error.HTTPError as exc:
+        print(f"\nError: HTTP {exc.code} from {ha_url}")
+        if exc.code == 401:
+            print("  Check that HA_TOKEN is a valid long-lived access token.")
+        sys.exit(1)
+    except urllib.error.URLError as exc:
+        print(f"\nError: Cannot reach {ha_url} — {exc.reason}")
+        print("  Check that HA_URL is correct and Home Assistant is running.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
