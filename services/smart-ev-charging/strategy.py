@@ -48,6 +48,15 @@ class ChargingDecision:
     reason: str                # human-readable explanation
     skip_control: bool = False # True = don't touch wallbox (Manual mode)
 
+    # --- Detailed context for HA sensors ---
+    pv_surplus_w: float = 0.0           # PV-only available power (before battery assist)
+    battery_assist_w: float = 0.0       # Battery assist contribution (W)
+    battery_assist_reason: str = ""     # Why battery is/isn't assisting
+    deadline_active: bool = False       # Whether deadline escalation is active
+    deadline_hours_left: float = -1.0   # Hours until departure (-1 = no deadline)
+    deadline_required_w: float = 0.0    # Required avg power to meet deadline
+    energy_remaining_kwh: float = 0.0   # kWh still needed (target - session)
+
 
 class ChargingStrategy:
     """Calculates target charging power based on mode and conditions.
@@ -165,7 +174,7 @@ class ChargingStrategy:
         May add limited battery assist if forecast is good and SoC allows.
         """
         pv_only = self._calc_pv_only_available(ctx)
-        assist = self._calc_battery_assist(ctx, pv_only)
+        assist, assist_reason = self._calc_battery_assist_detailed(ctx, pv_only)
         available = pv_only + assist
 
         # Hysteresis: require more surplus to START than to KEEP charging
@@ -175,30 +184,50 @@ class ChargingStrategy:
             else self.min_power_w + self.start_hysteresis_w
         )
 
+        base_fields = {
+            "pv_surplus_w": round(pv_only, 1),
+            "battery_assist_w": round(assist, 1),
+            "battery_assist_reason": assist_reason,
+        }
+
         if available >= threshold:
             target = self._clamp(available)
             parts = [f"PV surplus {pv_only:.0f} W"]
             if assist > 0:
                 parts.append(f"+ {assist:.0f} W battery assist")
-            return ChargingDecision(target, f"{' '.join(parts)} → {target} W")
+            return ChargingDecision(
+                target, f"{' '.join(parts)} → {target} W", **base_fields,
+            )
 
         if self._was_pv_charging:
             return ChargingDecision(
                 0,
                 f"PV surplus below minimum ({available:.0f} W < {self.min_power_w} W)",
+                **base_fields,
             )
 
         return ChargingDecision(
             0,
             f"Waiting for PV surplus ({available:.0f}/{threshold} W)",
+            **base_fields,
         )
 
     def _smart(self, ctx: ChargingContext) -> ChargingDecision:
         """PV surplus during the day; deadline logic handles grid fill."""
         pv = self._pv_surplus(ctx)
         if pv.target_power_w > 0:
-            return ChargingDecision(pv.target_power_w, f"Smart: {pv.reason}")
-        return ChargingDecision(0, f"Smart: {pv.reason}")
+            return ChargingDecision(
+                pv.target_power_w, f"Smart: {pv.reason}",
+                pv_surplus_w=pv.pv_surplus_w,
+                battery_assist_w=pv.battery_assist_w,
+                battery_assist_reason=pv.battery_assist_reason,
+            )
+        return ChargingDecision(
+            0, f"Smart: {pv.reason}",
+            pv_surplus_w=pv.pv_surplus_w,
+            battery_assist_w=pv.battery_assist_w,
+            battery_assist_reason=pv.battery_assist_reason,
+        )
 
     # ------------------------------------------------------------------
     # Full-by-morning deadline escalation
@@ -218,15 +247,30 @@ class ChargingStrategy:
             return base  # already handled by target-reached check above
 
         hours_left = self._hours_until(ctx.departure_time, ctx.now)
+
+        # Populate deadline context on the base decision regardless of escalation
+        base.deadline_active = True
+        base.deadline_hours_left = round(hours_left, 2)
+        base.energy_remaining_kwh = round(remaining_kwh, 2)
+
         if hours_left <= 0:
-            return ChargingDecision(
+            d = ChargingDecision(
                 self.max_power_w,
                 "Past departure — fast charging remaining "
                 f"{remaining_kwh:.1f} kWh",
+                pv_surplus_w=base.pv_surplus_w,
+                battery_assist_w=base.battery_assist_w,
+                battery_assist_reason=base.battery_assist_reason,
+                deadline_active=True,
+                deadline_hours_left=0.0,
+                deadline_required_w=float(self.max_power_w),
+                energy_remaining_kwh=round(remaining_kwh, 2),
             )
+            return d
 
         # Required average power to finish on time (+ 10 % margin)
         required_w = (remaining_kwh / hours_left) * 1000 * 1.1
+        base.deadline_required_w = round(required_w, 1)
 
         if required_w <= base.target_power_w:
             return base  # current power is sufficient
@@ -237,11 +281,19 @@ class ChargingStrategy:
             # This means we have lots of time — no escalation needed.
             return base
 
-        return ChargingDecision(
+        d = ChargingDecision(
             max(base.target_power_w, escalated),
             f"Deadline: {remaining_kwh:.1f} kWh in {hours_left:.1f} h "
             f"→ {required_w:.0f} W needed",
+            pv_surplus_w=base.pv_surplus_w,
+            battery_assist_w=base.battery_assist_w,
+            battery_assist_reason=base.battery_assist_reason,
+            deadline_active=True,
+            deadline_hours_left=round(hours_left, 2),
+            deadline_required_w=round(required_w, 1),
+            energy_remaining_kwh=round(remaining_kwh, 2),
         )
+        return d
 
     # ------------------------------------------------------------------
     # Ramp limiting
@@ -265,6 +317,13 @@ class ChargingStrategy:
             return ChargingDecision(
                 ramped,
                 f"{decision.reason} (ramping {last}→{ramped} W)",
+                pv_surplus_w=decision.pv_surplus_w,
+                battery_assist_w=decision.battery_assist_w,
+                battery_assist_reason=decision.battery_assist_reason,
+                deadline_active=decision.deadline_active,
+                deadline_hours_left=decision.deadline_hours_left,
+                deadline_required_w=decision.deadline_required_w,
+                energy_remaining_kwh=decision.energy_remaining_kwh,
             )
 
         return decision
@@ -294,7 +353,16 @@ class ChargingStrategy:
     def _calc_battery_assist(
         self, ctx: ChargingContext, pv_only_available: float,
     ) -> float:
+        """Extra power the home battery can contribute for EV charging."""
+        assist, _ = self._calc_battery_assist_detailed(ctx, pv_only_available)
+        return assist
+
+    def _calc_battery_assist_detailed(
+        self, ctx: ChargingContext, pv_only_available: float,
+    ) -> tuple[float, str]:
         """Extra power the home battery can contribute for EV charging.
+
+        Returns (assist_w, reason) tuple with explanation.
 
         Rules:
         - Only assist when battery SoC is above the floor (battery_min_soc_pct)
@@ -305,15 +373,15 @@ class ChargingStrategy:
         """
         # No assist if battery SoC too low
         if ctx.battery_soc_pct <= self.battery_min_soc_pct:
-            return 0.0
+            return 0.0, f"SoC {ctx.battery_soc_pct:.0f}% <= floor {self.battery_min_soc_pct:.0f}%"
 
         # No assist if there's zero PV (e.g. nighttime) — save battery
         if ctx.pv_power_w < 100:
-            return 0.0
+            return 0.0, f"No PV production ({ctx.pv_power_w:.0f} W < 100 W)"
 
         # No assist if PV surplus is negative (house consuming more than PV)
         if pv_only_available < 0:
-            return 0.0
+            return 0.0, f"No PV surplus ({pv_only_available:.0f} W < 0)"
 
         # Scale assist limit by PV forecast quality
         # Good forecast → allow up to max assist; poor forecast → reduce
@@ -333,9 +401,15 @@ class ChargingStrategy:
         # How much more we need to reach wallbox minimum
         shortfall = self.min_power_w - pv_only_available
         if shortfall <= 0:
-            return 0.0  # PV alone is already enough
+            return 0.0, "PV surplus sufficient (no assist needed)"
 
-        return min(shortfall, max_assist)
+        assist = min(shortfall, max_assist)
+        reason = (
+            f"Shortfall {shortfall:.0f} W, "
+            f"max assist {max_assist:.0f} W "
+            f"(forecast {forecast_factor:.0%}, SoC {soc_factor:.0%})"
+        )
+        return assist, reason
 
     # ------------------------------------------------------------------
     # Helpers

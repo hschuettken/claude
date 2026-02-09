@@ -237,8 +237,93 @@ class SmartEVChargingService(BaseService):
             "pv_forecast_remaining_kwh": round(ctx.pv_forecast_remaining_kwh, 1),
             "full_by_morning": ctx.full_by_morning,
             "reason": decision.reason,
+            # --- Enhanced decision context ---
+            "pv_surplus_w": round(decision.pv_surplus_w),
+            "battery_assist_w": round(decision.battery_assist_w),
+            "battery_assist_reason": decision.battery_assist_reason,
+            "deadline_active": decision.deadline_active,
+            "deadline_hours_left": decision.deadline_hours_left,
+            "deadline_required_w": round(decision.deadline_required_w),
+            "energy_remaining_kwh": decision.energy_remaining_kwh,
+            "target_energy_kwh": ctx.target_energy_kwh,
+            "reasoning": self._compose_reasoning(ctx, decision, house_power, pv_available),
         }
         self.publish("status", payload)
+
+    def _compose_reasoning(
+        self,
+        ctx: ChargingContext,
+        decision: ChargingDecision,
+        house_power: float,
+        pv_available: float,
+    ) -> str:
+        """Compose detailed human-readable reasoning for the current decision."""
+        lines: list[str] = []
+
+        # Mode & vehicle
+        lines.append(f"Mode: {ctx.mode.value} | Vehicle: {ctx.wallbox.vehicle_state_text}")
+
+        if not ctx.wallbox.vehicle_connected:
+            lines.append("→ No vehicle connected, nothing to do.")
+            return "\n".join(lines)
+
+        # Energy balance
+        grid_dir = "export" if ctx.grid_power_w > 0 else "import"
+        bat_dir = "charging" if ctx.battery_power_w > 0 else "discharging"
+        lines.append(
+            f"Grid: {ctx.grid_power_w:+.0f} W ({grid_dir}) | "
+            f"PV: {ctx.pv_power_w:.0f} W | House: {house_power:.0f} W"
+        )
+        lines.append(
+            f"Battery: {ctx.battery_power_w:+.0f} W ({bat_dir}, "
+            f"SoC {ctx.battery_soc_pct:.0f}%)"
+        )
+
+        # PV surplus calculation
+        if ctx.mode in (ChargeMode.PV_SURPLUS, ChargeMode.SMART):
+            lines.append(
+                f"PV surplus: {decision.pv_surplus_w:.0f} W "
+                f"(grid {ctx.grid_power_w:+.0f} + EV {ctx.wallbox.current_power_w:.0f} "
+                f"+ bat {ctx.battery_power_w:+.0f} - reserve {self.settings.grid_reserve_w})"
+            )
+            if decision.battery_assist_w > 0:
+                lines.append(
+                    f"Battery assist: +{decision.battery_assist_w:.0f} W — "
+                    f"{decision.battery_assist_reason}"
+                )
+            elif decision.battery_assist_reason:
+                lines.append(f"Battery assist: off — {decision.battery_assist_reason}")
+
+        # Forecast context
+        lines.append(
+            f"PV forecast remaining: {ctx.pv_forecast_remaining_kwh:.1f} kWh"
+        )
+
+        # Full-by-morning / deadline
+        if ctx.full_by_morning:
+            lines.append(
+                f"Full-by-morning: ON | Target: {ctx.target_energy_kwh:.0f} kWh | "
+                f"Charged: {ctx.wallbox.session_energy_kwh:.1f} kWh | "
+                f"Remaining: {decision.energy_remaining_kwh:.1f} kWh"
+            )
+            if decision.deadline_active and decision.deadline_hours_left >= 0:
+                dep = ctx.departure_time
+                dep_str = f"{dep.hour:02d}:{dep.minute:02d}" if dep else "?"
+                lines.append(
+                    f"Departure: {dep_str} ({decision.deadline_hours_left:.1f}h left) | "
+                    f"Required: {decision.deadline_required_w:.0f} W avg"
+                )
+
+        # Final decision
+        if decision.skip_control:
+            lines.append("→ Manual mode: not controlling wallbox")
+        elif decision.target_power_w > 0:
+            lines.append(f"→ Charging at {decision.target_power_w} W")
+        else:
+            lines.append("→ Not charging")
+        lines.append(f"Reason: {decision.reason}")
+
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # MQTT auto-discovery
@@ -254,12 +339,14 @@ class SmartEVChargingService(BaseService):
         }
         node = "smart_ev_charging"
         status_topic = f"homelab/{self.name}/status"
+        heartbeat_topic = f"homelab/{self.name}/heartbeat"
 
+        # --- Connectivity & uptime ---
         self.mqtt.publish_ha_discovery(
             "binary_sensor", "service_status", node_id=node, config={
                 "name": "Service Status",
                 "device": device,
-                "state_topic": f"homelab/{self.name}/heartbeat",
+                "state_topic": heartbeat_topic,
                 "value_template": (
                     "{{ 'ON' if value_json.status == 'online' else 'OFF' }}"
                 ),
@@ -268,6 +355,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
+        # --- Core charging sensors ---
         self.mqtt.publish_ha_discovery(
             "sensor", "charge_mode", node_id=node, config={
                 "name": "Charge Mode",
@@ -377,7 +465,184 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.logger.info("ha_discovery_registered", entity_count=10)
+        # --- Enhanced decision context sensors ---
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "pv_surplus", node_id=node, config={
+                "name": "PV Surplus (before assist)",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.pv_surplus_w }}",
+                "unit_of_measurement": "W",
+                "device_class": "power",
+                "state_class": "measurement",
+                "icon": "mdi:solar-power-variant",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "battery_assist", node_id=node, config={
+                "name": "Battery Assist Power",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.battery_assist_w }}",
+                "unit_of_measurement": "W",
+                "device_class": "power",
+                "state_class": "measurement",
+                "icon": "mdi:battery-arrow-down",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "battery_assist_reason", node_id=node, config={
+                "name": "Battery Assist Reason",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.battery_assist_reason[:250] }}",
+                "icon": "mdi:battery-heart-variant",
+                "entity_category": "diagnostic",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "pv_power", node_id=node, config={
+                "name": "PV DC Power",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.pv_power_w }}",
+                "unit_of_measurement": "W",
+                "device_class": "power",
+                "state_class": "measurement",
+                "icon": "mdi:solar-panel-large",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "grid_power", node_id=node, config={
+                "name": "Grid Power",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.grid_power_w }}",
+                "unit_of_measurement": "W",
+                "device_class": "power",
+                "state_class": "measurement",
+                "icon": "mdi:transmission-tower",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "pv_forecast_remaining", node_id=node, config={
+                "name": "PV Forecast Remaining",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.pv_forecast_remaining_kwh }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:solar-power-variant-outline",
+            },
+        )
+
+        # --- Deadline / Full-by-morning sensors ---
+
+        self.mqtt.publish_ha_discovery(
+            "binary_sensor", "full_by_morning", node_id=node, config={
+                "name": "Full by Morning",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": (
+                    "{{ 'ON' if value_json.full_by_morning else 'OFF' }}"
+                ),
+                "icon": "mdi:clock-alert-outline",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "binary_sensor", "vehicle_connected", node_id=node, config={
+                "name": "Vehicle Connected",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": (
+                    "{{ 'ON' if value_json.vehicle_connected else 'OFF' }}"
+                ),
+                "device_class": "plug",
+                "icon": "mdi:car-electric-outline",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "energy_remaining", node_id=node, config={
+                "name": "Energy Remaining to Target",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.energy_remaining_kwh }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:battery-alert-variant-outline",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "target_energy", node_id=node, config={
+                "name": "Target Energy",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.target_energy_kwh }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:bullseye-arrow",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "deadline_hours_left", node_id=node, config={
+                "name": "Deadline Hours Left",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.deadline_hours_left }}",
+                "unit_of_measurement": "h",
+                "icon": "mdi:timer-sand",
+                "entity_category": "diagnostic",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "deadline_required_power", node_id=node, config={
+                "name": "Deadline Required Power",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.deadline_required_w }}",
+                "unit_of_measurement": "W",
+                "device_class": "power",
+                "icon": "mdi:speedometer",
+                "entity_category": "diagnostic",
+            },
+        )
+
+        # --- Decision reasoning (the key sensor for understanding decisions) ---
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "decision_reasoning", node_id=node, config={
+                "name": "Decision Reasoning",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.reason[:250] }}",
+                "json_attributes_topic": status_topic,
+                "json_attributes_template": (
+                    '{{ {"full_reasoning": value_json.reasoning, '
+                    '"mode": value_json.mode, '
+                    '"pv_surplus_w": value_json.pv_surplus_w, '
+                    '"battery_assist_w": value_json.battery_assist_w, '
+                    '"battery_assist_reason": value_json.battery_assist_reason, '
+                    '"deadline_active": value_json.deadline_active, '
+                    '"deadline_hours_left": value_json.deadline_hours_left, '
+                    '"deadline_required_w": value_json.deadline_required_w, '
+                    '"energy_remaining_kwh": value_json.energy_remaining_kwh} | tojson }}'
+                ),
+                "icon": "mdi:head-cog-outline",
+            },
+        )
+
+        self.logger.info("ha_discovery_registered", entity_count=22)
 
     # ------------------------------------------------------------------
     # Healthcheck

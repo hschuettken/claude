@@ -372,6 +372,8 @@ class ToolExecutor:
         self.gcal = gcal
         self._send_notification = send_notification_fn
         self._tz = ZoneInfo(settings.timezone)
+        # Injected by OrchestratorService after construction
+        self._activity_tracker: Any = None
 
     async def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
         """Execute a tool and return a JSON-serializable result string."""
@@ -503,11 +505,14 @@ class ToolExecutor:
                 "option": mode,
             },
         )
+        decision_text = f"Set EV charge mode to {mode}"
         self.memory.log_decision(
             context="EV charge mode change",
-            decision=f"Set charge mode to {mode}",
+            decision=decision_text,
             reasoning="User requested via orchestrator",
         )
+        if self._activity_tracker:
+            self._activity_tracker.record_decision(decision_text)
         return {"success": True, "mode": mode}
 
     async def _tool_get_weather_forecast(self) -> dict[str, Any]:
@@ -561,11 +566,14 @@ class ToolExecutor:
         data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         result = await self.ha.call_service(domain, service, data or {})
+        decision_text = f"Called {domain}.{service} with {data}"
         self.memory.log_decision(
             context=f"HA service call: {domain}.{service}",
-            decision=f"Called {domain}.{service} with {data}",
+            decision=decision_text,
             reasoning="User requested via orchestrator",
         )
+        if self._activity_tracker:
+            self._activity_tracker.record_decision(decision_text)
         return {"success": True, "domain": domain, "service": service}
 
     async def _tool_get_user_preferences(self, user_id: str) -> dict[str, Any]:

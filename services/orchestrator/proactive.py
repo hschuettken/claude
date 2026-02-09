@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     from channels.telegram import TelegramChannel
     from config import OrchestratorSettings
 
+# Avoid circular import — ActivityTracker is injected at runtime
+
 logger = get_logger("proactive")
 
 
@@ -80,6 +82,8 @@ class ProactiveEngine:
         self._tasks: list[asyncio.Task] = []
         self._last_morning_date: str = ""
         self._last_evening_date: str = ""
+        # Injected by OrchestratorService after construction
+        self._activity_tracker: Any = None
 
     async def start(self, shutdown_event: asyncio.Event) -> None:
         """Start all proactive background tasks."""
@@ -159,6 +163,8 @@ class ProactiveEngine:
             message = await self._brain.generate_proactive_message(prompt)
             for chat_id in self._settings.allowed_chat_ids:
                 await self._telegram.send_message(chat_id, message)
+            if self._activity_tracker:
+                self._activity_tracker.record_suggestion(message)
             logger.info("briefing_sent", recipients=len(self._settings.allowed_chat_ids))
         except Exception:
             logger.exception("briefing_failed")
@@ -187,6 +193,8 @@ class ProactiveEngine:
                 if message and "NO_SUGGESTIONS" not in message:
                     for chat_id in self._settings.allowed_chat_ids:
                         await self._telegram.send_message(chat_id, message)
+                    if self._activity_tracker:
+                        self._activity_tracker.record_suggestion(message)
                     logger.info("optimization_suggestion_sent")
                 else:
                     logger.debug("no_optimization_suggestions")
