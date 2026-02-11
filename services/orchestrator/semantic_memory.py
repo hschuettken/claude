@@ -77,8 +77,9 @@ class EmbeddingProvider:
             http_options=types.HttpOptions(api_version="v1"),
         )
         result = await client.aio.models.embed_content(
-            model="text-embedding-004",
+            model="gemini-embedding-001",
             contents=text,
+            config=types.EmbedContentConfig(output_dimensionality=768),
         )
         return list(result.embeddings[0].values)
 
