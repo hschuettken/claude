@@ -361,7 +361,7 @@ class ProactiveEngine:
         """Forward EV trip clarification questions to users via Telegram.
 
         The ev-forecast service sends these when it can't determine if someone
-        will use the EV (e.g., Hans for medium-distance trips). The user's
+        will use the EV (e.g., Henning for medium-distance trips). The user's
         response is processed by the Brain, which calls the
         respond_to_ev_trip_clarification tool.
         """

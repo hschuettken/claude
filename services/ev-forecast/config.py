@@ -16,24 +16,22 @@ class EVForecastSettings(BaseSettings):
     ev_battery_capacity_net_kwh: float = 76.0     # Usable capacity
     ev_consumption_kwh_per_100km: float = 22.0    # Average mileage
 
-    # --- Audi Connect — Account 1 (Hans) ---
-    audi_account1_name: str = "Hans"
-    audi_account1_soc_entity: str = "sensor.audi_a6_e_tron_state_of_charge"
-    audi_account1_range_entity: str = "sensor.audi_a6_e_tron_range"
-    audi_account1_charging_entity: str = "sensor.audi_a6_e_tron_charging_state"
-    audi_account1_plug_entity: str = "sensor.audi_a6_e_tron_plug_state"
-    audi_account1_mileage_entity: str = "sensor.audi_a6_e_tron_mileage"
-    audi_account1_remaining_charge_entity: str = "sensor.audi_a6_e_tron_remaining_charge_time"
-    audi_account1_vin: str = ""  # VIN for service calls
+    # --- Combined EV sensors (from HA template sensors in ev_audi_connect.yaml) ---
+    # These read from the template sensors that combine both Audi Connect accounts.
+    # HA determines the active account via mileage check; the service just reads the result.
+    ev_soc_entity: str = "sensor.ev_state_of_charge"
+    ev_range_entity: str = "sensor.ev_range"
+    ev_charging_entity: str = "sensor.ev_charging_state"
+    ev_plug_entity: str = "sensor.ev_plug_state"
+    ev_mileage_entity: str = "sensor.ev_mileage"
+    ev_remaining_charge_entity: str = "sensor.ev_remaining_charge_time"
+    ev_active_account_entity: str = "sensor.ev_active_account"
+    ev_climatisation_entity: str = "sensor.ev_climatisation"
 
-    # --- Audi Connect — Account 2 (Nicole) ---
+    # --- Audi Connect accounts (needed for cloud data refresh via VIN) ---
+    audi_account1_name: str = "Henning"
+    audi_account1_vin: str = ""
     audi_account2_name: str = "Nicole"
-    audi_account2_soc_entity: str = "sensor.audi_a6_e_tron_state_of_charge_2"
-    audi_account2_range_entity: str = "sensor.audi_a6_e_tron_range_2"
-    audi_account2_charging_entity: str = "sensor.audi_a6_e_tron_charging_state_2"
-    audi_account2_plug_entity: str = "sensor.audi_a6_e_tron_plug_state_2"
-    audi_account2_mileage_entity: str = "sensor.audi_a6_e_tron_mileage_2"
-    audi_account2_remaining_charge_entity: str = "sensor.audi_a6_e_tron_remaining_charge_time_2"
     audi_account2_vin: str = ""
 
     # --- Refresh intervals ---
@@ -47,7 +45,7 @@ class EVForecastSettings(BaseSettings):
 
     # --- Trip prediction ---
     # Calendar event prefixes for identifying who drives
-    calendar_prefix_hans: str = "H:"
+    calendar_prefix_henning: str = "H:"
     calendar_prefix_nicole: str = "N:"
 
     # Nicole's default commute (Mon-Thu) in km one way
@@ -56,8 +54,8 @@ class EVForecastSettings(BaseSettings):
     nicole_departure_time: str = "07:00"
     nicole_arrival_time: str = "18:00"
 
-    # Hans thresholds for train vs car
-    hans_train_threshold_km: float = 350.0
+    # Henning thresholds for train vs car
+    henning_train_threshold_km: float = 350.0
 
     # Known destinations with one-way distances (km) — JSON string
     # Format: {"Münster": 60, "Aachen": 80, "STR": 500, "Stuttgart": 500, ...}

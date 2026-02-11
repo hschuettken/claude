@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Any
 
 import paho.mqtt.client as mqtt
@@ -61,6 +62,7 @@ class MQTTClient:
     ) -> None:
         self.host = host
         self.port = port
+        self._client_id = client_id
         self._handlers: dict[str, list[MessageHandler]] = {}
 
         self._client = mqtt.Client(
@@ -95,8 +97,10 @@ class MQTTClient:
         for handler in handlers:
             try:
                 handler(msg.topic, payload)
-            except Exception:
+            except Exception as exc:
                 logger.exception("mqtt_handler_error", topic=msg.topic)
+                # Publish to dead-letter topic for observability/replay
+                self._publish_error(msg.topic, payload, exc)
 
     def subscribe(self, topic: str, handler: MessageHandler) -> None:
         """Register a handler for a topic (supports MQTT wildcards)."""
@@ -151,6 +155,24 @@ class MQTTClient:
 
         self._client.publish(topic, json.dumps(config), retain=True)
         logger.info("ha_discovery_published", component=component, object_id=object_id)
+
+    def _publish_error(self, original_topic: str, payload: Any, exc: Exception) -> None:
+        """Publish failed message metadata to a dead-letter error topic."""
+        try:
+            error_payload = json.dumps({
+                "original_topic": original_topic,
+                "original_payload": payload if isinstance(payload, dict) else str(payload),
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "service": self._client_id,
+            })
+            self._client.publish(
+                f"homelab/errors/{self._client_id}",
+                error_payload,
+            )
+        except Exception:
+            pass  # Don't let error reporting cause more errors
 
     def disconnect(self) -> None:
         """Stop the loop and disconnect."""

@@ -36,6 +36,7 @@ class SmartEVChargingService(BaseService):
         super().__init__(settings=EVChargingSettings())
         self.settings: EVChargingSettings  # narrow type for IDE
         self.tz = ZoneInfo(self.settings.timezone)
+        self._current_trace_id: str = ""
 
     async def run(self) -> None:
         self.mqtt.connect_background()
@@ -46,6 +47,12 @@ class SmartEVChargingService(BaseService):
         self.mqtt.subscribe(
             "homelab/orchestrator/command/smart-ev-charging",
             self._on_orchestrator_command,
+        )
+
+        # Subscribe to ev-forecast plan for cross-service correlation
+        self.mqtt.subscribe(
+            "homelab/ev-forecast/plan",
+            self._on_ev_forecast_plan,
         )
 
         charger = WallboxController(
@@ -174,9 +181,19 @@ class SmartEVChargingService(BaseService):
         # 2) Decide target power
         decision = strategy.decide(ctx)
 
-        # 3) Apply to wallbox
+        # 3) Apply to wallbox (blocked in safe mode)
         if not decision.skip_control:
-            await charger.set_power_limit(decision.target_power_w)
+            if await self.is_safe_mode():
+                self.logger.warning(
+                    "safe_mode_active",
+                    target_w=decision.target_power_w,
+                )
+                decision.reason = (
+                    f"SAFE MODE: would set {decision.target_power_w} W (blocked)"
+                )
+                decision.skip_control = True
+            else:
+                await charger.set_power_limit(decision.target_power_w)
 
         # 4) Publish status
         self._publish_status(ctx, decision, house_power)
@@ -270,6 +287,7 @@ class SmartEVChargingService(BaseService):
             - self.settings.grid_reserve_w,
         )
         payload: dict = {
+            "trace_id": self._current_trace_id,
             "mode": ctx.mode.value,
             "vehicle": ctx.wallbox.vehicle_state_text,
             "vehicle_connected": ctx.wallbox.vehicle_connected,
@@ -297,6 +315,7 @@ class SmartEVChargingService(BaseService):
             "deadline_required_w": round(decision.deadline_required_w),
             "energy_remaining_kwh": decision.energy_remaining_kwh,
             "target_energy_kwh": ctx.target_energy_kwh,
+            "plan_target_reached": ctx.target_reached,
             "reasoning": self._compose_reasoning(ctx, decision, house_power, pv_available),
         }
         self.publish("status", payload)
@@ -401,6 +420,13 @@ class SmartEVChargingService(BaseService):
             self._force_cycle.set()
         else:
             self.logger.debug("unknown_command", command=command)
+
+    def _on_ev_forecast_plan(self, topic: str, payload: dict) -> None:
+        """Capture trace_id from ev-forecast plan for cross-service correlation."""
+        trace_id = payload.get("trace_id", "")
+        if trace_id:
+            self._current_trace_id = trace_id
+            self.logger.info("ev_forecast_trace_id_received", trace_id=trace_id)
 
     # ------------------------------------------------------------------
     # MQTT auto-discovery

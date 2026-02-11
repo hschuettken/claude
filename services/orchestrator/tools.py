@@ -327,7 +327,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "description": (
                 "Respond to a pending EV trip clarification from the ev-forecast service. "
                 "When the service is unsure whether someone will use the EV for a trip "
-                "(e.g., Hans for medium-distance trips), it sends a question via Telegram. "
+                "(e.g., Henning for medium-distance trips), it sends a question via Telegram. "
                 "Use this tool to forward the user's answer back to the ev-forecast service."
             ),
             "parameters": {
@@ -406,7 +406,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                         "type": "string",
                         "description": (
                             "What to search for — a natural-language description of the "
-                            "information you need (e.g. 'Hans sauna preferences', "
+                            "information you need (e.g. 'Henning sauna preferences', "
                             "'EV charging decisions last week', 'Nicole business trips')."
                         ),
                     },
@@ -446,7 +446,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                         "type": "string",
                         "description": (
                             "The fact or knowledge to store. Be specific and include context. "
-                            "Example: 'Hans prefers to charge the EV overnight when electricity "
+                            "Example: 'Henning prefers to charge the EV overnight when electricity "
                             "is cheaper, unless there is enough PV forecast for tomorrow.'"
                         ),
                     },

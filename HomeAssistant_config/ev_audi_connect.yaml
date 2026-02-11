@@ -2,7 +2,7 @@
 # EV Audi Connect — Dual Account Configuration
 # =============================================================================
 #
-# The Audi A6 e-tron has two Audi Connect accounts (Hans & Nicole).
+# The Audi A6 Avant e-tron has two Audi Connect accounts (Henning & Nicole).
 # Only the person who last drove sees valid data; the other shows "unknown".
 #
 # This config creates:
@@ -16,8 +16,8 @@
 #
 # IMPORTANT: Adjust the entity IDs below to match your actual Audi Connect
 # integration entity names. The defaults assume:
-#   Account 1 (Hans):  sensor.audi_a6_e_tron_<property>
-#   Account 2 (Nicole): sensor.audi_a6_e_tron_<property>_2
+#   Account 1 (Henning):  sensor.audi_a6_avant_e_tron_<property>
+#   Account 2 (Nicole): sensor.audi_a6_avant_e_tron_<property>_2
 # =============================================================================
 
 # --- Template sensors: "Virtual" Audi Connect that always shows valid data ---
@@ -32,8 +32,8 @@ template:
         state_class: measurement
         icon: mdi:car-battery
         state: >-
-          {% set a1 = states('sensor.audi_a6_e_tron_state_of_charge') %}
-          {% set a2 = states('sensor.audi_a6_e_tron_state_of_charge_2') %}
+          {% set a1 = states('sensor.audi_a6_avant_e_tron_state_of_charge') %}
+          {% set a2 = states('sensor.audi_a6_avant_e_tron_state_of_charge_2') %}
           {% if a1 not in ['unknown', 'unavailable', 'None', ''] %}
             {{ a1 }}
           {% elif a2 not in ['unknown', 'unavailable', 'None', ''] %}
@@ -42,12 +42,12 @@ template:
             unknown
           {% endif %}
         attributes:
-          account1_value: "{{ states('sensor.audi_a6_e_tron_state_of_charge') }}"
-          account2_value: "{{ states('sensor.audi_a6_e_tron_state_of_charge_2') }}"
+          account1_value: "{{ states('sensor.audi_a6_avant_e_tron_state_of_charge') }}"
+          account2_value: "{{ states('sensor.audi_a6_avant_e_tron_state_of_charge_2') }}"
           source_account: >-
-            {% set a1 = states('sensor.audi_a6_e_tron_state_of_charge') %}
+            {% set a1 = states('sensor.audi_a6_avant_e_tron_state_of_charge') %}
             {% if a1 not in ['unknown', 'unavailable', 'None', ''] %}
-              Hans
+              Henning
             {% else %}
               Nicole
             {% endif %}
@@ -58,8 +58,8 @@ template:
         unit_of_measurement: "km"
         icon: mdi:map-marker-distance
         state: >-
-          {% set a1 = states('sensor.audi_a6_e_tron_range') %}
-          {% set a2 = states('sensor.audi_a6_e_tron_range_2') %}
+          {% set a1 = states('sensor.audi_a6_avant_e_tron_range') %}
+          {% set a2 = states('sensor.audi_a6_avant_e_tron_range_2') %}
           {% if a1 not in ['unknown', 'unavailable', 'None', ''] %}
             {{ a1 }}
           {% elif a2 not in ['unknown', 'unavailable', 'None', ''] %}
@@ -68,16 +68,16 @@ template:
             unknown
           {% endif %}
         attributes:
-          account1_value: "{{ states('sensor.audi_a6_e_tron_range') }}"
-          account2_value: "{{ states('sensor.audi_a6_e_tron_range_2') }}"
+          account1_value: "{{ states('sensor.audi_a6_avant_e_tron_range') }}"
+          account2_value: "{{ states('sensor.audi_a6_avant_e_tron_range_2') }}"
 
       # --- Charging State ---
       - name: "EV Charging State"
         unique_id: ev_combined_charging_state
         icon: mdi:ev-plug-type2
         state: >-
-          {% set a1 = states('sensor.audi_a6_e_tron_charging_state') %}
-          {% set a2 = states('sensor.audi_a6_e_tron_charging_state_2') %}
+          {% set a1 = states('sensor.audi_a6_avant_e_tron_charging_state') %}
+          {% set a2 = states('sensor.audi_a6_avant_e_tron_charging_state_2') %}
           {% if a1 not in ['unknown', 'unavailable', 'None', ''] %}
             {{ a1 }}
           {% elif a2 not in ['unknown', 'unavailable', 'None', ''] %}
@@ -91,8 +91,8 @@ template:
         unique_id: ev_combined_plug_state
         icon: mdi:power-plug
         state: >-
-          {% set a1 = states('sensor.audi_a6_e_tron_plug_state') %}
-          {% set a2 = states('sensor.audi_a6_e_tron_plug_state_2') %}
+          {% set a1 = states('sensor.audi_a6_avant_e_tron_plug_state') %}
+          {% set a2 = states('sensor.audi_a6_avant_e_tron_plug_state_2') %}
           {% if a1 not in ['unknown', 'unavailable', 'None', ''] %}
             {{ a1 }}
           {% elif a2 not in ['unknown', 'unavailable', 'None', ''] %}
@@ -107,8 +107,8 @@ template:
         unit_of_measurement: "min"
         icon: mdi:battery-clock-outline
         state: >-
-          {% set a1 = states('sensor.audi_a6_e_tron_remaining_charge_time') %}
-          {% set a2 = states('sensor.audi_a6_e_tron_remaining_charge_time_2') %}
+          {% set a1 = states('sensor.audi_a6_avant_e_tron_remaining_charge_time') %}
+          {% set a2 = states('sensor.audi_a6_avant_e_tron_remaining_charge_time_2') %}
           {% if a1 not in ['unknown', 'unavailable', 'None', ''] %}
             {{ a1 }}
           {% elif a2 not in ['unknown', 'unavailable', 'None', ''] %}
@@ -124,8 +124,8 @@ template:
         icon: mdi:counter
         state_class: total_increasing
         state: >-
-          {% set a1 = states('sensor.audi_a6_e_tron_mileage') %}
-          {% set a2 = states('sensor.audi_a6_e_tron_mileage_2') %}
+          {% set a1 = states('sensor.audi_a6_avant_e_tron_mileage') %}
+          {% set a2 = states('sensor.audi_a6_avant_e_tron_mileage_2') %}
           {% if a1 not in ['unknown', 'unavailable', 'None', ''] %}
             {{ a1 }}
           {% elif a2 not in ['unknown', 'unavailable', 'None', ''] %}
@@ -134,16 +134,46 @@ template:
             unknown
           {% endif %}
 
-      # --- Active Account indicator ---
+      # --- Climatisation State ---
+      - name: "EV Climatisation"
+        unique_id: ev_combined_climatisation
+        icon: mdi:air-conditioner
+        state: >-
+          {% set a1 = states('sensor.audi_a6_avant_e_tron_climatisation') %}
+          {% set a2 = states('sensor.audi_a6_avant_e_tron_climatisation_2') %}
+          {% if a1 not in ['unknown', 'unavailable', 'None', ''] %}
+            {{ a1 }}
+          {% elif a2 not in ['unknown', 'unavailable', 'None', ''] %}
+            {{ a2 }}
+          {% else %}
+            unknown
+          {% endif %}
+
+      # --- Window Heating State ---
+      - name: "EV Window Heating"
+        unique_id: ev_combined_window_heating
+        icon: mdi:car-defrost-rear
+        state: >-
+          {% set a1 = states('sensor.audi_a6_avant_e_tron_window_heating') %}
+          {% set a2 = states('sensor.audi_a6_avant_e_tron_window_heating_2') %}
+          {% if a1 not in ['unknown', 'unavailable', 'None', ''] %}
+            {{ a1 }}
+          {% elif a2 not in ['unknown', 'unavailable', 'None', ''] %}
+            {{ a2 }}
+          {% else %}
+            unknown
+          {% endif %}
+
+      # --- Active Account indicator (mileage-based detection) ---
       - name: "EV Active Account"
         unique_id: ev_active_account
         icon: mdi:account-check
         state: >-
-          {% set a1_soc = states('sensor.audi_a6_e_tron_state_of_charge') %}
-          {% set a2_soc = states('sensor.audi_a6_e_tron_state_of_charge_2') %}
-          {% if a1_soc not in ['unknown', 'unavailable', 'None', ''] %}
-            Hans
-          {% elif a2_soc not in ['unknown', 'unavailable', 'None', ''] %}
+          {% set a1_mileage = states('sensor.audi_a6_avant_e_tron_mileage') %}
+          {% set a2_mileage = states('sensor.audi_a6_avant_e_tron_mileage_2') %}
+          {% if a1_mileage not in ['unknown', 'unavailable', 'None', ''] %}
+            Henning
+          {% elif a2_mileage not in ['unknown', 'unavailable', 'None', ''] %}
             Nicole
           {% else %}
             None
@@ -194,4 +224,53 @@ template:
 #
 # NOTE: The ev-forecast service also triggers refreshes programmatically.
 # You may not need this automation if the service handles it.
+# =============================================================================
+
+# =============================================================================
+# Scripts: EV Climatisation & Vehicle Controls
+# =============================================================================
+# Add this to your scripts.yaml or include separately.
+#
+# script:
+#   ev_start_climate_control:
+#     alias: "EV: Start Climate Control"
+#     description: "Start the EV's climate control (pre-conditioning)"
+#     sequence:
+#       - service: audiconnect.execute_vehicle_action
+#         data:
+#           vin: !secret ev_vin
+#           action: start_climatisation
+#     mode: single
+#   ev_stop_climate_control:
+#     alias: "EV: Stop Climate Control"
+#     sequence:
+#       - service: audiconnect.execute_vehicle_action
+#         data:
+#           vin: !secret ev_vin
+#           action: stop_climatisation
+#     mode: single
+#   ev_start_window_heating:
+#     alias: "EV: Start Window Heating"
+#     sequence:
+#       - service: audiconnect.execute_vehicle_action
+#         data:
+#           vin: !secret ev_vin
+#           action: start_window_heating
+#     mode: single
+#   ev_lock:
+#     alias: "EV: Lock Vehicle"
+#     sequence:
+#       - service: audiconnect.execute_vehicle_action
+#         data:
+#           vin: !secret ev_vin
+#           action: lock
+#     mode: single
+#   ev_unlock:
+#     alias: "EV: Unlock Vehicle"
+#     sequence:
+#       - service: audiconnect.execute_vehicle_action
+#         data:
+#           vin: !secret ev_vin
+#           action: unlock
+#     mode: single
 # =============================================================================

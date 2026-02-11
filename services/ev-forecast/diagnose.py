@@ -77,15 +77,16 @@ def check_config() -> dict:
             "MQTT_HOST": s.mqtt_host,
             "EV_BATTERY_CAPACITY_NET_KWH": str(s.ev_battery_capacity_net_kwh),
             "EV_CONSUMPTION_KWH_PER_100KM": str(s.ev_consumption_kwh_per_100km),
+            "EV_SOC_ENTITY": s.ev_soc_entity,
+            "EV_RANGE_ENTITY": s.ev_range_entity,
+            "EV_ACTIVE_ACCOUNT_ENTITY": s.ev_active_account_entity,
             "AUDI_ACCOUNT1_NAME": s.audi_account1_name,
-            "AUDI_ACCOUNT1_SOC_ENTITY": s.audi_account1_soc_entity,
             "AUDI_ACCOUNT1_VIN": s.audi_account1_vin[:4] + "..." if s.audi_account1_vin else "(empty)",
             "AUDI_ACCOUNT2_NAME": s.audi_account2_name,
-            "AUDI_ACCOUNT2_SOC_ENTITY": s.audi_account2_soc_entity,
             "AUDI_ACCOUNT2_VIN": s.audi_account2_vin[:4] + "..." if s.audi_account2_vin else "(empty)",
             "GOOGLE_CALENDAR_FAMILY_ID": s.google_calendar_family_id or "(not set)",
             "NICOLE_COMMUTE_KM": str(s.nicole_commute_km),
-            "HANS_TRAIN_THRESHOLD_KM": str(s.hans_train_threshold_km),
+            "HENNING_TRAIN_THRESHOLD_KM": str(s.henning_train_threshold_km),
             "HOME_LATITUDE": str(s.home_latitude),
             "HOME_LONGITUDE": str(s.home_longitude),
         }
@@ -159,65 +160,51 @@ async def check_audi(settings) -> None:
 
     ha = HomeAssistantClient(settings.ha_url, settings.ha_token)
     try:
-        for acct_name, entities in [
-            (settings.audi_account1_name, {
-                "SoC": settings.audi_account1_soc_entity,
-                "Range": settings.audi_account1_range_entity,
-                "Charging": settings.audi_account1_charging_entity,
-                "Plug": settings.audi_account1_plug_entity,
-                "Mileage": settings.audi_account1_mileage_entity,
-            }),
-            (settings.audi_account2_name, {
-                "SoC": settings.audi_account2_soc_entity,
-                "Range": settings.audi_account2_range_entity,
-                "Charging": settings.audi_account2_charging_entity,
-                "Plug": settings.audi_account2_plug_entity,
-                "Mileage": settings.audi_account2_mileage_entity,
-            }),
-        ]:
-            info(f"Account: {acct_name}")
-            valid_count = 0
-            for prop, entity_id in entities.items():
-                try:
-                    state = await ha.get_state(entity_id)
-                    val = state.get("state", "?")
-                    unit = state.get("attributes", {}).get("unit_of_measurement", "")
-                    is_valid = val not in ("unknown", "unavailable", "None", "")
-                    result(f"  {prop} ({entity_id})", is_valid, f"Value: {val} {unit}")
-                    if is_valid:
-                        valid_count += 1
-                except Exception as e:
-                    result(f"  {prop} ({entity_id})", False, str(e))
+        # Test combined template sensors
+        combined_entities = {
+            "SoC": settings.ev_soc_entity,
+            "Range": settings.ev_range_entity,
+            "Charging": settings.ev_charging_entity,
+            "Plug": settings.ev_plug_entity,
+            "Mileage": settings.ev_mileage_entity,
+            "Remaining Charge": settings.ev_remaining_charge_entity,
+            "Active Account": settings.ev_active_account_entity,
+        }
+        info("Combined HA template sensors:")
+        valid_count = 0
+        for prop, entity_id in combined_entities.items():
+            try:
+                state = await ha.get_state(entity_id)
+                val = state.get("state", "?")
+                unit = state.get("attributes", {}).get("unit_of_measurement", "")
+                is_valid = val not in ("unknown", "unavailable", "None", "")
+                result(f"  {prop} ({entity_id})", is_valid, f"Value: {val} {unit}")
+                if is_valid:
+                    valid_count += 1
+            except Exception as e:
+                result(f"  {prop} ({entity_id})", False, str(e))
 
-            if valid_count > 0:
-                info(f"  -> {acct_name} has {valid_count}/{len(entities)} valid sensors")
-            else:
-                warn(f"  -> {acct_name} has NO valid sensors (probably not the active driver)")
+        info(f"  -> {valid_count}/{len(combined_entities)} combined sensors have valid data")
 
-        # Test vehicle monitor (dual account switching)
-        info("Testing dual-account vehicle monitor...")
-        from vehicle import AccountConfig, VehicleMonitor
-        account1 = AccountConfig(
-            name=settings.audi_account1_name,
-            soc_entity=settings.audi_account1_soc_entity,
-            range_entity=settings.audi_account1_range_entity,
-            charging_entity=settings.audi_account1_charging_entity,
-            plug_entity=settings.audi_account1_plug_entity,
-            mileage_entity=settings.audi_account1_mileage_entity,
-            remaining_charge_entity=settings.audi_account1_remaining_charge_entity,
-            vin=settings.audi_account1_vin,
+        # Test vehicle monitor (combined sensor reading)
+        info("Testing vehicle monitor with combined sensors...")
+        from vehicle import RefreshConfig, VehicleConfig, VehicleMonitor
+        vehicle_config = VehicleConfig(
+            soc_entity=settings.ev_soc_entity,
+            range_entity=settings.ev_range_entity,
+            charging_entity=settings.ev_charging_entity,
+            plug_entity=settings.ev_plug_entity,
+            mileage_entity=settings.ev_mileage_entity,
+            remaining_charge_entity=settings.ev_remaining_charge_entity,
+            active_account_entity=settings.ev_active_account_entity,
         )
-        account2 = AccountConfig(
-            name=settings.audi_account2_name,
-            soc_entity=settings.audi_account2_soc_entity,
-            range_entity=settings.audi_account2_range_entity,
-            charging_entity=settings.audi_account2_charging_entity,
-            plug_entity=settings.audi_account2_plug_entity,
-            mileage_entity=settings.audi_account2_mileage_entity,
-            remaining_charge_entity=settings.audi_account2_remaining_charge_entity,
-            vin=settings.audi_account2_vin,
+        refresh_configs = [
+            RefreshConfig(name=settings.audi_account1_name, vin=settings.audi_account1_vin),
+            RefreshConfig(name=settings.audi_account2_name, vin=settings.audi_account2_vin),
+        ]
+        monitor = VehicleMonitor(
+            ha, vehicle_config, refresh_configs, settings.ev_battery_capacity_net_kwh,
         )
-        monitor = VehicleMonitor(ha, account1, account2, settings.ev_battery_capacity_net_kwh)
         state = await monitor.read_state()
         result("Vehicle monitor", state.is_valid,
                f"Active account: {state.active_account}\n"
@@ -406,35 +393,30 @@ async def check_geocoding(settings) -> None:
 async def check_plan(settings) -> None:
     header("Plan Dry Run")
     from shared.ha_client import HomeAssistantClient
-    from vehicle import AccountConfig, VehicleMonitor
+    from vehicle import RefreshConfig, VehicleConfig, VehicleMonitor
     from trips import GeoDistance, TripPredictor
     from planner import ChargingPlanner
 
     ha = HomeAssistantClient(settings.ha_url, settings.ha_token)
 
     try:
-        # Read vehicle state
-        account1 = AccountConfig(
-            name=settings.audi_account1_name,
-            soc_entity=settings.audi_account1_soc_entity,
-            range_entity=settings.audi_account1_range_entity,
-            charging_entity=settings.audi_account1_charging_entity,
-            plug_entity=settings.audi_account1_plug_entity,
-            mileage_entity=settings.audi_account1_mileage_entity,
-            remaining_charge_entity=settings.audi_account1_remaining_charge_entity,
-            vin=settings.audi_account1_vin,
+        # Read vehicle state via combined sensors
+        vehicle_config = VehicleConfig(
+            soc_entity=settings.ev_soc_entity,
+            range_entity=settings.ev_range_entity,
+            charging_entity=settings.ev_charging_entity,
+            plug_entity=settings.ev_plug_entity,
+            mileage_entity=settings.ev_mileage_entity,
+            remaining_charge_entity=settings.ev_remaining_charge_entity,
+            active_account_entity=settings.ev_active_account_entity,
         )
-        account2 = AccountConfig(
-            name=settings.audi_account2_name,
-            soc_entity=settings.audi_account2_soc_entity,
-            range_entity=settings.audi_account2_range_entity,
-            charging_entity=settings.audi_account2_charging_entity,
-            plug_entity=settings.audi_account2_plug_entity,
-            mileage_entity=settings.audi_account2_mileage_entity,
-            remaining_charge_entity=settings.audi_account2_remaining_charge_entity,
-            vin=settings.audi_account2_vin,
+        refresh_configs = [
+            RefreshConfig(name=settings.audi_account1_name, vin=settings.audi_account1_vin),
+            RefreshConfig(name=settings.audi_account2_name, vin=settings.audi_account2_vin),
+        ]
+        monitor = VehicleMonitor(
+            ha, vehicle_config, refresh_configs, settings.ev_battery_capacity_net_kwh,
         )
-        monitor = VehicleMonitor(ha, account1, account2, settings.ev_battery_capacity_net_kwh)
         vehicle = await monitor.read_state()
         info(f"Vehicle SoC: {vehicle.soc_pct}%, Range: {vehicle.range_km} km, Plug: {vehicle.plug_state}")
 
@@ -463,7 +445,7 @@ async def check_plan(settings) -> None:
             nicole_commute_days=commute_days,
             nicole_departure_time=settings.nicole_departure_time,
             nicole_arrival_time=settings.nicole_arrival_time,
-            hans_train_threshold_km=settings.hans_train_threshold_km,
+            henning_train_threshold_km=settings.henning_train_threshold_km,
             timezone=settings.timezone,
             geo_distance=geo,
         )

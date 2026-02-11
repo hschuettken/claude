@@ -122,6 +122,21 @@ class BaseService:
         """Await this in your run() to block until shutdown signal."""
         await self._shutdown_event.wait()
 
+    async def is_safe_mode(self) -> bool:
+        """Check if global safe mode is active (blocks write actions).
+
+        Reads input_boolean.homelab_safe_mode (or whatever is configured).
+        Fail-open: if the check itself fails, allow actions.
+        """
+        entity = self.settings.safe_mode_entity
+        if not entity:
+            return False
+        try:
+            state = await self.ha.get_state(entity)
+            return state.get("state", "off") == "on"
+        except Exception:
+            return False  # Fail open — if we can't check, allow actions
+
     def publish(self, event_type: str, data: dict[str, Any]) -> None:
         """Publish an event on the service's MQTT topic."""
         topic = f"homelab/{self.name}/{event_type}"

@@ -26,6 +26,7 @@ from typing import Any
 import httpx
 
 from shared.log import get_logger
+from shared.retry import async_retry
 
 logger = get_logger("ha-client")
 
@@ -54,6 +55,7 @@ class HomeAssistantClient:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
 
+    @async_retry(max_retries=2, base_delay=1.0, exceptions=(httpx.ConnectError, httpx.ConnectTimeout))
     async def get_state(self, entity_id: str) -> dict[str, Any]:
         """Get the current state of an entity."""
         client = await self._get_client()
@@ -68,6 +70,7 @@ class HomeAssistantClient:
         resp.raise_for_status()
         return resp.json()
 
+    @async_retry(max_retries=2, base_delay=1.0, exceptions=(httpx.ConnectError, httpx.ConnectTimeout))
     async def call_service(
         self,
         domain: str,

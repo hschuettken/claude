@@ -84,11 +84,11 @@ Built and iterated the smart-ev-charging service:
 3. **Reasoning sensors** — rich JSON-attribute sensors in HA that expose the full reasoning/decision context. These are critical for debugging why a service made a particular decision, visible directly in the HA dashboard.
 
 ### EV Forecast (session 01wAxKxQ...)
-1. **Dual Audi Connect accounts** — Hans and Nicole each have an account for the same car. Only the person who last drove sees valid data. The service tries both and picks the one with valid sensors.
+1. **Dual Audi Connect accounts** — Henning and Nicole each have an account for the same car. Only the person who last drove sees valid data. The service tries both and picks the one with valid sensors.
 
-2. **Calendar-based trip prediction** — events parsed by prefix (`H:` = Hans, `N:` = Nicole). Known destinations mapped to distances via configurable lookup. Ambiguous trips trigger Telegram clarification via orchestrator.
+2. **Calendar-based trip prediction** — events parsed by prefix (`H:` = Henning, `N:` = Nicole). Known destinations mapped to distances via configurable lookup. Ambiguous trips trigger Telegram clarification via orchestrator.
 
-3. **Vehicle**: Audi A6 e-tron (83 kWh gross / 76 kWh net), ~22 kWh/100km. Previously Tesla Model 3 (listed in some older docs).
+3. **Vehicle**: Audi A6 Avant e-tron (83 kWh gross / 76 kWh net), ~22 kWh/100km. Previously Tesla Model 3 (listed in some older docs).
 
 ### General Learnings
 1. **MQTT auto-discovery** is the right pattern for HA integration — services register entities automatically on startup, no manual HA config needed.
@@ -98,6 +98,12 @@ Built and iterated the smart-ev-charging service:
 5. **PV energy sensors are `total_increasing` (cumulative)** — diff consecutive values for per-hour kWh, don't assume midnight resets.
 6. **Sunrise/sunset from Open-Meteo** replaces hardcoded 5–21 UTC range. Physics constraint: zero prediction when GHI < 5 W/m².
 7. **ML model versioning** — models saved with feature list. On load, validated against current features. Auto-retrain if features changed.
+
+### Combined Sensor Architecture (this session)
+1. **Mileage-based active account detection** — more reliable than SoC-based. Mileage always updates when driving.
+2. **Combined HA template sensors** — HA handles account combining, ev-forecast reads unified sensors. Simpler code, clearer separation of concerns.
+3. **PV surplus continuation** — after plan target reached, continue charging from PV surplus. PV into car > feed-in to grid.
+4. **Infrastructure hardening** — MQTT dead-letter errors, global safe mode, state persistence, correlation IDs, shared retry/backoff.
 
 ## Current Gaps / Opportunities
 1. Home Connect and Tuya integrations failing — need reconfiguration

@@ -34,6 +34,7 @@ This file provides guidance for AI assistants working with this repository.
 │   ├── ha_client.py                         #   Home Assistant async REST client
 │   ├── influx_client.py                     #   InfluxDB v2 query wrapper
 │   ├── mqtt_client.py                       #   MQTT pub/sub wrapper
+│   ├── retry.py                             #   Exponential backoff utility for external API calls
 │   └── service.py                           #   BaseService class (heartbeat, debugger, shutdown)
 ├── services/                                # One directory per microservice
 │   ├── orchestrator/                        #   AI-powered home brain & coordinator
@@ -329,6 +330,26 @@ class MySettings(BaseSettings):
 
 Environment variables map to field names: `MY_CUSTOM_VAR` env var → `my_custom_var` field.
 
+### MQTT dead-letter error topics
+
+Services publish errors to `homelab/errors/{service-name}` when MQTT message processing fails. Payload includes the original topic, payload, error message, traceback, and timestamp. This provides centralized error visibility without losing the context of what failed.
+
+### Global safe mode
+
+A global safe mode switch (`input_boolean.homelab_safe_mode`) blocks all write actions across all services when enabled. Services check the safe mode entity before calling HA services, writing to the wallbox, or setting HA input helpers. Useful during maintenance or when debugging unexpected behavior. Configure the entity ID via `SAFE_MODE_ENTITY` env var.
+
+### State persistence
+
+Services persist critical state to disk (`/app/data/state.json`) for faster restart recovery. On startup, the service loads persisted state instead of starting from scratch. This avoids re-querying slow external APIs (e.g., Audi Connect, weather) and preserves session energy counters, pending clarifications, and charging plans across container restarts.
+
+### Cross-service correlation IDs
+
+Services propagate a `trace_id` through MQTT messages to correlate related events across services. For example, an ev-forecast plan includes a `trace_id` that appears in the smart-ev-charging status messages, making it easy to trace a charging decision back to the forecast that triggered it.
+
+### Shared retry/backoff utility
+
+`shared/retry.py` provides an exponential backoff decorator for HA API calls and other external requests. Retries with configurable max attempts, base delay, and jitter. Used by `ha_client.py` and service-specific API calls to handle transient network failures gracefully.
+
 ## Home Assistant Setup
 
 Reference configuration is stored in `HomeAssistant_config/` for documentation purposes.
@@ -367,7 +388,7 @@ Two PV arrays connected to a single inverter:
 - **EV charging**: Amtron wallbox via Modbus — `sensor.amtron_meter_total_power_w`, `sensor.amtron_meter_total_energy_kwh`
 - **EV battery**: Audi Connect — SoC sensor (configurable via `EV_SOC_ENTITY`)
 - **Forecast.Solar**: Configured per array — `sensor.energy_production_today_east` / `west`, `sensor.energy_production_tomorrow_east` / `west`
-- **EV (Audi Connect)**: Dual-account setup — `sensor.ev_state_of_charge` (%, combined template), `sensor.ev_range` (km), `sensor.ev_charging_state`, `sensor.ev_plug_state`, `binary_sensor.ev_plugged_in`, `binary_sensor.ev_is_charging` (see `HomeAssistant_config/ev_audi_connect.yaml`)
+- **EV (Audi Connect)**: Dual-account setup with mileage-based active account detection — `sensor.ev_state_of_charge` (%, combined template), `sensor.ev_range` (km), `sensor.ev_charging_state`, `sensor.ev_plug_state`, `sensor.ev_mileage`, `sensor.ev_climatisation`, `binary_sensor.ev_plugged_in`, `binary_sensor.ev_is_charging`, `binary_sensor.ev_climatisation_active` (see `HomeAssistant_config/ev_audi_connect.yaml`)
 
 ## Services
 
@@ -562,7 +583,11 @@ EV charging based on PV surplus, user preferences, and departure deadlines.
 
 **Battery assist**: On top of PV-only surplus, the strategy allows limited battery discharge for EV charging. This is gated by: SoC > floor (20%), PV forecast quality (good day → more aggressive), and a max discharge rate cap (2 kW default) to protect battery longevity. Battery assist only kicks in when PV is producing but surplus alone isn't enough for the wallbox minimum.
 
+**PV surplus continuation**: After the plan target (energy/SoC) is reached, the service continues PV surplus charging opportunistically. PV into the car is more valuable than feeding back to the grid (25 ct/kWh reimbursement vs 7 ct/kWh feed-in), so the car acts as a profitable energy sink.
+
 **Economics**: Grid import 25 ct/kWh (fixed), feed-in 7 ct/kWh, employer reimburses 25 ct/kWh. No EPEX spot market. PV charging = +18 ct/kWh profit, grid charging = cost-neutral.
+
+**Energy priority order**: Home consumption > Home battery charging > EV surplus charging > Grid feed-in. The PV surplus formula ensures the EV only gets power that would otherwise be exported to the grid, never stealing from household loads or the home battery.
 
 **Control loop**: Every 30 s — read HA state → calculate target power → write HEMS limit → publish MQTT status.
 
@@ -584,7 +609,7 @@ EV charging based on PV surplus, user preferences, and departure deadlines.
 
 **MQTT events**: `homelab/smart-ev-charging/status`, `homelab/smart-ev-charging/heartbeat`
 
-**Config** (env vars): `EV_SOC_ENTITY`, `EV_GRID_PRICE_CT`, `EV_FEED_IN_TARIFF_CT`, `EV_REIMBURSEMENT_CT`, `WALLBOX_MAX_POWER_W`, `WALLBOX_MIN_POWER_W`, `ECO_CHARGE_POWER_W`, `GRID_RESERVE_W`, `CONTROL_INTERVAL_SECONDS`, `BATTERY_MIN_SOC_PCT`, `BATTERY_EV_ASSIST_MAX_W`, `PV_FORECAST_GOOD_KWH`. Entity IDs have sensible defaults matching the Amtron + Sungrow + Shelly setup.
+**Config** (env vars): `EV_SOC_ENTITY`, `EV_GRID_PRICE_CT`, `EV_FEED_IN_TARIFF_CT`, `EV_REIMBURSEMENT_CT`, `WALLBOX_MAX_POWER_W`, `WALLBOX_MIN_POWER_W`, `ECO_CHARGE_POWER_W`, `GRID_RESERVE_W`, `CONTROL_INTERVAL_SECONDS`, `BATTERY_MIN_SOC_PCT`, `BATTERY_EV_ASSIST_MAX_W`, `PV_FORECAST_GOOD_KWH`, `SAFE_MODE_ENTITY`. Entity IDs have sensible defaults matching the Amtron + Sungrow + Shelly setup.
 
 ### ev-forecast — EV Driving Forecast & Smart Charging Planner
 
@@ -592,15 +617,15 @@ Monitors the Audi A6 e-tron (83 kWh gross / 76 kWh net) via dual Audi Connect ac
 
 **Vehicle**: Audi A6 e-tron, ~22 kWh/100 km average consumption.
 
-**Dual Audi Connect accounts**: Hans and Nicole each have an Audi Connect account for the same car. Only the person who last drove sees valid sensor data — the other shows "unknown". The service:
-1. Tries both accounts' sensors, picks the one with valid data
-2. Triggers `audiconnect.refresh_cloud_data` to update stale data
-3. Creates "virtual" combined HA sensors via template sensors (see `HomeAssistant_config/ev_audi_connect.yaml`)
+**Dual Audi Connect accounts**: Henning and Nicole each have an Audi Connect account for the same car. Only the person who last drove sees valid sensor data — the other shows "unknown". HA template sensors (see `HomeAssistant_config/ev_audi_connect.yaml`) determine the active account via mileage-based comparison and expose combined entities. The service:
+1. Reads from combined HA template sensors (`sensor.ev_state_of_charge`, `sensor.ev_range`, `sensor.ev_charging_state`, `sensor.ev_plug_state`, `sensor.ev_mileage`, `sensor.ev_climatisation`, etc.) — HA handles active account selection
+2. Triggers `audiconnect.refresh_cloud_data` for both accounts to keep data fresh (account names + VINs still needed for cloud refresh)
+3. Individual account sensor config has been replaced with combined sensor entity IDs in the service config
 
 **Calendar-based trip prediction**: Reads the shared family calendar. Events are parsed by prefix:
-- `H: <destination>` — Hans drives (e.g., "H: Aachen", "H: STR")
+- `H: <destination>` — Henning drives (e.g., "H: Aachen", "H: STR")
 - `N: <destination>` — Nicole drives (e.g., "N: Münster")
-- Hans: trips >350 km → takes the train (no EV impact); 100–350 km → asks via Telegram
+- Henning: trips >350 km → takes the train (no EV impact); 100–350 km → asks via Telegram
 - Nicole: default commute Mon–Thu to Lengerich (22 km one way), departs 07:00, returns ~18:00
 - Known destinations are mapped to distances via a configurable lookup table
 
@@ -608,7 +633,7 @@ Monitors the Audi A6 e-tron (83 kWh gross / 76 kWh net) via dual Audi Connect ac
 
 **Known destinations** (configurable via `KNOWN_DESTINATIONS` JSON env var): Pre-mapped city→distance lookup for common trips (e.g., Münster 60 km, Aachen 80 km, STR 500 km). Falls back to geocoding for unknown destinations, then to a conservative 50 km default.
 
-**Trip clarification**: When the ev-forecast service can't determine if someone will use the EV (Hans for 100–350 km trips, unknown destinations), it publishes questions in German to `homelab/ev-forecast/clarification-needed`. Each clarification includes an `event_id` for tracking. The orchestrator forwards these to Telegram and routes user responses back via `homelab/ev-forecast/trip-response`.
+**Trip clarification**: When the ev-forecast service can't determine if someone will use the EV (Henning for 100–350 km trips, unknown destinations), it publishes questions in German to `homelab/ev-forecast/clarification-needed`. Each clarification includes an `event_id` for tracking. The orchestrator forwards these to Telegram and routes user responses back via `homelab/ev-forecast/trip-response`.
 
 **Smart charging plan** (demand-focused): The planner expresses **demand** ("need X kWh by time Y"), not supply. PV optimization is left to the smart-ev-charging service. For the next 3 days, the planner:
 1. Calculates energy needed for each day's trips (distance × 22 kWh/100km)
@@ -621,6 +646,15 @@ Monitors the Audi A6 e-tron (83 kWh gross / 76 kWh net) via dual Audi Connect ac
    - **Fast/Eco** — urgent, departure imminent (<2 hours)
 6. Automatically sets the HA input helpers (`ev_charge_mode`, `ev_target_energy_kwh`, `ev_departure_time`, `ev_full_by_morning`) for the smart-ev-charging service
 
+**Urgency parameters** (configurable via env vars):
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `CRITICAL_URGENCY_HOURS` | 2.0 | Departure within 2h — switches to Fast or Eco mode |
+| `HIGH_URGENCY_HOURS` | 6.0 | Departure within 6h — switches to Smart mode |
+| `FAST_MODE_THRESHOLD_KWH` | 15.0 | In critical urgency, deficit >15 kWh → Fast instead of Eco |
+| `EARLY_DEPARTURE_HOUR` | 10 | Tomorrow departure before 10 AM → charge overnight (Smart + Full by Morning) |
+
 **Data flow**: Audi Connect (SoC/range) + Google Calendar (trips) + PV Forecast (solar) → Charging Plan → HA Helpers → smart-ev-charging (wallbox control)
 
 **Schedule**: Vehicle state check every 15 min, plan update every 30 min.
@@ -632,11 +666,11 @@ Monitors the Audi A6 e-tron (83 kWh gross / 76 kWh net) via dual Audi Connect ac
 
 **MQTT events**: `homelab/ev-forecast/vehicle`, `homelab/ev-forecast/plan`, `homelab/ev-forecast/clarification-needed`, `homelab/ev-forecast/heartbeat`
 
-**MQTT integration with orchestrator**: When a trip needs clarification (unknown distance or Hans's ambiguous trips), publishes to `homelab/ev-forecast/clarification-needed`. The orchestrator can ask via Telegram and respond on `homelab/ev-forecast/trip-response`.
+**MQTT integration with orchestrator**: When a trip needs clarification (unknown distance or Henning's ambiguous trips), publishes to `homelab/ev-forecast/clarification-needed`. The orchestrator can ask via Telegram and respond on `homelab/ev-forecast/trip-response`.
 
-**HA YAML** (`HomeAssistant_config/ev_audi_connect.yaml`): Template sensors that combine both Audi Connect accounts into unified entities (`sensor.ev_state_of_charge`, `sensor.ev_range`, `sensor.ev_charging_state`, `sensor.ev_plug_state`, `sensor.ev_mileage`, `sensor.ev_active_account`, `binary_sensor.ev_plugged_in`, `binary_sensor.ev_is_charging`).
+**HA YAML** (`HomeAssistant_config/ev_audi_connect.yaml`): Template sensors that combine both Audi Connect accounts into unified entities. Active account is determined by mileage comparison (higher mileage = last driver). Combined entities: `sensor.ev_state_of_charge`, `sensor.ev_range`, `sensor.ev_charging_state`, `sensor.ev_plug_state`, `sensor.ev_mileage`, `sensor.ev_active_account`, `sensor.ev_climatisation`, `binary_sensor.ev_plugged_in`, `binary_sensor.ev_is_charging`, `binary_sensor.ev_climatisation_active`.
 
-**Config** (env vars): `EV_BATTERY_CAPACITY_GROSS_KWH`, `EV_BATTERY_CAPACITY_NET_KWH`, `EV_CONSUMPTION_KWH_PER_100KM`, `AUDI_ACCOUNT1_*` / `AUDI_ACCOUNT2_*` (entity IDs per account), `NICOLE_COMMUTE_KM`, `NICOLE_COMMUTE_DAYS`, `HANS_TRAIN_THRESHOLD_KM`, `KNOWN_DESTINATIONS` (JSON), `MIN_SOC_PCT`, `BUFFER_SOC_PCT`, `PLAN_UPDATE_MINUTES`, `VEHICLE_CHECK_MINUTES`. Uses same `GOOGLE_CALENDAR_*` credentials as the orchestrator.
+**Config** (env vars): `EV_BATTERY_CAPACITY_GROSS_KWH`, `EV_BATTERY_CAPACITY_NET_KWH`, `EV_CONSUMPTION_KWH_PER_100KM`, `EV_SOC_ENTITY`, `EV_RANGE_ENTITY`, `EV_CHARGING_STATE_ENTITY`, `EV_PLUG_STATE_ENTITY`, `EV_MILEAGE_ENTITY`, `EV_CLIMATISATION_ENTITY` (combined sensor entity IDs — HA handles active account selection), `AUDI_ACCOUNT1_NAME` / `AUDI_ACCOUNT1_VIN`, `AUDI_ACCOUNT2_NAME` / `AUDI_ACCOUNT2_VIN` (needed for cloud refresh only), `NICOLE_COMMUTE_KM`, `NICOLE_COMMUTE_DAYS`, `HENNING_TRAIN_THRESHOLD_KM`, `KNOWN_DESTINATIONS` (JSON), `MIN_SOC_PCT`, `BUFFER_SOC_PCT`, `CRITICAL_URGENCY_HOURS`, `HIGH_URGENCY_HOURS`, `FAST_MODE_THRESHOLD_KWH`, `EARLY_DEPARTURE_HOUR`, `PLAN_UPDATE_MINUTES`, `VEHICLE_CHECK_MINUTES`, `SAFE_MODE_ENTITY`. Uses same `GOOGLE_CALENDAR_*` credentials as the orchestrator.
 
 ### health-monitor — Health Monitoring & Telegram Alerting
 
@@ -696,7 +730,7 @@ The ev-forecast service writes HA input helpers (`ev_charge_mode`, `ev_target_en
 ### EV Trip Clarification Flow
 
 Full lifecycle for ambiguous trip resolution:
-1. **ev-forecast** parses calendar, finds ambiguous trip (e.g., Hans 100–350 km)
+1. **ev-forecast** parses calendar, finds ambiguous trip (e.g., Henning 100–350 km)
 2. **ev-forecast** publishes to `homelab/ev-forecast/clarification-needed` with question in German
 3. **orchestrator** receives via MQTT, stores in `ev_state["pending_clarifications"]`
 4. **orchestrator** forwards question to Telegram via `ProactiveEngine.on_ev_clarification_needed()`

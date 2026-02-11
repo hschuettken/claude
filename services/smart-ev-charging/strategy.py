@@ -147,8 +147,19 @@ class ChargingStrategy:
             self._reset()
             return ChargingDecision(0, "No vehicle connected")
 
-        # --- Target SoC reached (applies to all modes when SoC is available) ---
+        # --- Target SoC reached — continue with PV surplus if available ---
         if ctx.target_reached:
+            # Plan target met — if PV surplus available, keep charging opportunistically
+            # (PV into car is more valuable than feeding back to grid)
+            if ctx.mode in (ChargeMode.PV_SURPLUS, ChargeMode.SMART) and ctx.pv_power_w > 100:
+                surplus_decision = self._pv_surplus(ctx)
+                if surplus_decision.target_power_w > 0:
+                    surplus_decision.reason = (
+                        f"Plan target reached — continuing with PV surplus: "
+                        f"{surplus_decision.reason}"
+                    )
+                    return surplus_decision
+
             self._reset()
             if ctx.ev_soc_pct is not None:
                 return ChargingDecision(
