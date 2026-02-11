@@ -114,7 +114,10 @@ class OrchestratorService(BaseService):
         self.mqtt.connect_background()
 
         # --- Initialize components ---
-        memory = Memory(max_history=self.settings.max_conversation_history)
+        memory = Memory(
+            max_history=self.settings.max_conversation_history,
+            max_decisions=self.settings.max_decisions,
+        )
 
         llm = create_provider(self.settings)
         self.logger.info(
@@ -129,7 +132,13 @@ class OrchestratorService(BaseService):
                 provider=self.settings.llm_provider,
                 settings=self.settings,
             )
-            semantic = SemanticMemory(embedder)
+            semantic = SemanticMemory(
+                embedder,
+                max_entries=self.settings.semantic_memory_max_entries,
+                text_max_len=self.settings.semantic_memory_text_max_len,
+                recency_weight=self.settings.semantic_memory_recency_weight,
+                recency_half_life_days=self.settings.semantic_memory_recency_half_life_days,
+            )
             self.logger.info(
                 "semantic_memory_enabled",
                 entries=semantic.entry_count,

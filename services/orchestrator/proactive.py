@@ -189,8 +189,9 @@ class ProactiveEngine:
         interval = self._settings.proactive_check_interval_minutes * 60
 
         # Initial delay — don't fire immediately on startup
+        startup_delay = self._settings.proactive_startup_delay_seconds
         try:
-            await asyncio.wait_for(shutdown_event.wait(), timeout=120)
+            await asyncio.wait_for(shutdown_event.wait(), timeout=startup_delay)
             return
         except asyncio.TimeoutError:
             pass
@@ -225,13 +226,17 @@ class ProactiveEngine:
     async def _memory_consolidation_loop(
         self, shutdown_event: asyncio.Event,
     ) -> None:
-        """Run memory consolidation once per day at 3 AM."""
+        """Run memory consolidation once per day at configurable hour."""
         from zoneinfo import ZoneInfo
         tz = ZoneInfo(self._settings.timezone)
 
+        consolidation_hour = self._settings.memory_consolidation_hour
+        startup_delay = self._settings.consolidation_startup_delay_seconds
+        check_interval = self._settings.consolidation_check_interval_seconds
+
         # Initial delay — let the service stabilize
         try:
-            await asyncio.wait_for(shutdown_event.wait(), timeout=300)
+            await asyncio.wait_for(shutdown_event.wait(), timeout=startup_delay)
             return
         except asyncio.TimeoutError:
             pass
@@ -241,8 +246,8 @@ class ProactiveEngine:
                 now = datetime.now(tz)
                 today_str = now.strftime("%Y-%m-%d")
 
-                # Run at 3 AM, once per day
-                if now.hour == 3 and self._last_consolidation_date != today_str:
+                # Run at configured hour, once per day
+                if now.hour == consolidation_hour and self._last_consolidation_date != today_str:
                     self._last_consolidation_date = today_str
                     logger.info("memory_consolidation_starting")
                     merged = await self._brain.consolidate_memories()
@@ -250,9 +255,9 @@ class ProactiveEngine:
             except Exception:
                 logger.exception("memory_consolidation_error")
 
-            # Check every 10 minutes
+            # Check periodically
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=600)
+                await asyncio.wait_for(shutdown_event.wait(), timeout=check_interval)
                 break
             except asyncio.TimeoutError:
                 pass

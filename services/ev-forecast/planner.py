@@ -123,6 +123,11 @@ class ChargingPlanner:
         buffer_soc_pct: float = 10.0,
         min_arrival_soc_pct: float = 15.0,
         timezone: str = "Europe/Berlin",
+        default_assumed_soc_pct: float = 50.0,
+        critical_urgency_hours: float = 2.0,
+        high_urgency_hours: float = 6.0,
+        fast_mode_threshold_kwh: float = 15.0,
+        early_departure_hour: int = 10,
     ) -> None:
         self._ha = ha
         self._net_capacity = net_capacity_kwh
@@ -130,6 +135,11 @@ class ChargingPlanner:
         self._buffer_soc = buffer_soc_pct
         self._min_arrival_soc = min_arrival_soc_pct
         self._tz = ZoneInfo(timezone)
+        self._default_assumed_soc = default_assumed_soc_pct
+        self._critical_urgency_hours = critical_urgency_hours
+        self._high_urgency_hours = high_urgency_hours
+        self._fast_mode_threshold_kwh = fast_mode_threshold_kwh
+        self._early_departure_hour = early_departure_hour
 
     async def generate_plan(
         self,
@@ -154,8 +164,9 @@ class ChargingPlanner:
         )
 
         # Track running SoC through the planning horizon
-        running_soc = current_soc if current_soc is not None else 50.0
-        running_energy = current_energy if current_energy is not None else self._soc_to_kwh(50.0)
+        default_soc = self._default_assumed_soc
+        running_soc = current_soc if current_soc is not None else default_soc
+        running_energy = current_energy if current_energy is not None else self._soc_to_kwh(default_soc)
 
         for i, day_plan in enumerate(day_plans):
             rec = self._plan_day(
@@ -350,9 +361,9 @@ class ChargingPlanner:
                 reason=f"Past departure — need {deficit_kwh:.1f} kWh urgently",
             )
 
-        # Less than 2 hours — critical
-        if hours_until <= 2:
-            mode = "Fast" if deficit_kwh > 15 else "Eco"
+        # Critical urgency — departure imminent
+        if hours_until <= self._critical_urgency_hours:
+            mode = "Fast" if deficit_kwh > self._fast_mode_threshold_kwh else "Eco"
             return DayChargingRecommendation(
                 date=day_plan.date,
                 trips=day_plan.trips,
@@ -369,8 +380,8 @@ class ChargingPlanner:
                 ),
             )
 
-        # 2-6 hours — high urgency, Smart mode with deadline
-        if hours_until <= 6:
+        # High urgency — Smart mode with deadline
+        if hours_until <= self._high_urgency_hours:
             return DayChargingRecommendation(
                 date=day_plan.date,
                 trips=day_plan.trips,
@@ -417,7 +428,7 @@ class ChargingPlanner:
     ) -> DayChargingRecommendation:
         """Plan charging for tomorrow (may need overnight charging)."""
 
-        early_departure = departure_time and departure_time.hour < 10
+        early_departure = departure_time and departure_time.hour < self._early_departure_hour
 
         if early_departure:
             # Need to charge tonight

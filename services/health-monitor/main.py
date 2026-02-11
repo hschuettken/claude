@@ -202,6 +202,7 @@ class HealthMonitorService(BaseService):
             # Home Assistant
             ha_result = await check_home_assistant(
                 self.settings.ha_url, self.settings.ha_token,
+                timeout=self.settings.http_check_timeout_seconds,
             )
             prev_ha = self._infra_status.get("ha")
             self._infra_status["ha"] = ha_result.ok
@@ -221,6 +222,7 @@ class HealthMonitorService(BaseService):
             # InfluxDB
             influx_result = await check_influxdb(
                 self.settings.influxdb_url, self.settings.influxdb_token,
+                timeout=self.settings.http_check_timeout_seconds,
             )
             prev_influx = self._infra_status.get("influx")
             self._infra_status["influx"] = influx_result.ok
@@ -399,6 +401,7 @@ class HealthMonitorService(BaseService):
                     self.settings.ha_url,
                     self.settings.ha_token,
                     self._watched_entities,
+                    timeout=self.settings.http_check_timeout_seconds,
                 )
                 for r in results:
                     entity_key = r.name.replace("Entity ", "")

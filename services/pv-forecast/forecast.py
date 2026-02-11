@@ -110,8 +110,19 @@ class ForecastEngine:
 
     def _init_models(self) -> None:
         """Initialize or load persisted models."""
+        s = self.settings
         for array_name in ("east", "west"):
-            model = PVModel(array_name, model_dir=self.settings.model_dir)
+            model = PVModel(
+                array_name,
+                model_dir=s.model_dir,
+                n_estimators=s.model_n_estimators,
+                max_depth=s.model_max_depth,
+                learning_rate=s.model_learning_rate,
+                subsample=s.model_subsample,
+                min_samples_leaf=s.model_min_samples_leaf,
+                min_training_samples=s.model_min_training_samples,
+                cv_folds=s.model_cv_folds,
+            )
             if model.load():
                 logger.info("model_restored", array=array_name)
             self.models[array_name] = model
@@ -355,6 +366,8 @@ class ForecastEngine:
                     azimuth,
                     tilt,
                     self.settings.pv_latitude,
+                    system_efficiency=self.settings.fallback_system_efficiency,
+                    peak_irradiance=self.settings.fallback_peak_irradiance,
                 )
 
             # Physics constraint: zero out predictions where GHI ≈ 0 (dark hours).

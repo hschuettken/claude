@@ -39,6 +39,7 @@ def create_provider(settings: OrchestratorSettings) -> LLMProvider:
             api_key=settings.anthropic_api_key,
             model=settings.anthropic_model,
             temperature=settings.llm_temperature,
+            max_tokens=settings.llm_max_tokens,
         )
 
     if name == "ollama":

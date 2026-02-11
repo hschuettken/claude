@@ -32,11 +32,12 @@ from shared.log import get_logger
 logger = get_logger("semantic-memory")
 
 STORE_FILE = Path("/app/data/memory/semantic_store.json")
-MAX_ENTRIES = 5000  # cap to keep file size reasonable (~20 MB)
 
-# Time-weighted scoring parameters
-RECENCY_WEIGHT = 0.15  # 0 = pure similarity, 1 = pure recency
-RECENCY_HALF_LIFE_DAYS = 30  # after 30 days, recency score = 0.5
+# Defaults — overridden by OrchestratorSettings when passed to SemanticMemory
+DEFAULT_MAX_ENTRIES = 5000
+DEFAULT_TEXT_MAX_LEN = 2000
+DEFAULT_RECENCY_WEIGHT = 0.15
+DEFAULT_RECENCY_HALF_LIFE_DAYS = 30
 
 
 # ------------------------------------------------------------------
@@ -69,14 +70,17 @@ class EmbeddingProvider:
         if not api_key:
             raise RuntimeError("No Gemini API key")
 
+        model = getattr(s, "gemini_embedding_model", "gemini-embedding-001")
+        dims = getattr(s, "gemini_embedding_dims", 768)
+
         from google import genai
         from google.genai import types
 
         client = genai.Client(api_key=api_key)
         result = await client.aio.models.embed_content(
-            model="gemini-embedding-001",
+            model=model,
             contents=text,
-            config=types.EmbedContentConfig(output_dimensionality=768),
+            config=types.EmbedContentConfig(output_dimensionality=dims),
         )
         return list(result.embeddings[0].values)
 
@@ -84,12 +88,12 @@ class EmbeddingProvider:
         s = self._settings
         api_key = s.openai_api_key
         base_url = None
-        model = "text-embedding-3-small"
+        model = getattr(s, "openai_embedding_model", "text-embedding-3-small")
 
         if not api_key and self._provider == "ollama":
             api_key = "ollama"
             base_url = f"{s.ollama_url}/v1"
-            model = "nomic-embed-text"
+            model = getattr(s, "ollama_embedding_model", "nomic-embed-text")
         if not api_key:
             raise RuntimeError("No OpenAI API key")
 
@@ -127,8 +131,19 @@ class SemanticMemory:
         decision     — orchestrator decisions and their outcomes
     """
 
-    def __init__(self, embedder: EmbeddingProvider) -> None:
+    def __init__(
+        self,
+        embedder: EmbeddingProvider,
+        max_entries: int = DEFAULT_MAX_ENTRIES,
+        text_max_len: int = DEFAULT_TEXT_MAX_LEN,
+        recency_weight: float = DEFAULT_RECENCY_WEIGHT,
+        recency_half_life_days: int = DEFAULT_RECENCY_HALF_LIFE_DAYS,
+    ) -> None:
         self._embedder = embedder
+        self._max_entries = max_entries
+        self._text_max_len = text_max_len
+        self._recency_weight = recency_weight
+        self._recency_half_life_days = recency_half_life_days
         self._entries: list[dict[str, Any]] = []
         self._load()
 
@@ -143,8 +158,9 @@ class SemanticMemory:
         metadata: dict[str, Any] | None = None,
     ) -> str:
         """Embed and store a text entry.  Returns the entry ID."""
+        max_len = self._text_max_len
         try:
-            embedding = await self._embedder.embed(text[:2000])
+            embedding = await self._embedder.embed(text[:max_len])
         except Exception:
             logger.warning("embedding_failed", text_len=len(text))
             return ""
@@ -152,7 +168,7 @@ class SemanticMemory:
         entry_id = uuid.uuid4().hex[:12]
         entry: dict[str, Any] = {
             "id": entry_id,
-            "text": text[:2000],
+            "text": text[:max_len],
             "embedding": embedding,
             "category": category,
             "metadata": metadata or {},
@@ -161,8 +177,8 @@ class SemanticMemory:
         self._entries.append(entry)
 
         # Trim oldest entries if over limit
-        if len(self._entries) > MAX_ENTRIES:
-            self._entries = self._entries[-MAX_ENTRIES:]
+        if len(self._entries) > self._max_entries:
+            self._entries = self._entries[-self._max_entries:]
 
         self._save()
         logger.debug("memory_stored", id=entry_id, category=category, text_len=len(text))
@@ -183,7 +199,7 @@ class SemanticMemory:
             return []
 
         try:
-            query_embedding = await self._embedder.embed(query[:2000])
+            query_embedding = await self._embedder.embed(query[:self._text_max_len])
         except Exception:
             logger.warning("search_embedding_failed")
             return []
@@ -197,8 +213,8 @@ class SemanticMemory:
         for entry in candidates:
             sim = _cosine_similarity(query_embedding, entry["embedding"])
             age_days = (now - entry["timestamp"]) / 86400
-            recency = math.exp(-0.693 * age_days / RECENCY_HALF_LIFE_DAYS)
-            combined = (1 - RECENCY_WEIGHT) * sim + RECENCY_WEIGHT * recency
+            recency = math.exp(-0.693 * age_days / self._recency_half_life_days)
+            combined = (1 - self._recency_weight) * sim + self._recency_weight * recency
             scored.append((combined, sim, entry))
 
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -248,8 +264,9 @@ class SemanticMemory:
         if not old_ids:
             return ""
 
+        max_len = self._text_max_len
         try:
-            embedding = await self._embedder.embed(consolidated_text[:2000])
+            embedding = await self._embedder.embed(consolidated_text[:max_len])
         except Exception:
             logger.warning("consolidation_embedding_failed")
             return ""
@@ -262,7 +279,7 @@ class SemanticMemory:
         entry_id = uuid.uuid4().hex[:12]
         entry: dict[str, Any] = {
             "id": entry_id,
-            "text": consolidated_text[:2000],
+            "text": consolidated_text[:max_len],
             "embedding": embedding,
             "category": category,
             "metadata": {"consolidated": True, "merged_count": len(old_ids)},

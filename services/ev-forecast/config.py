@@ -74,9 +74,16 @@ class EVForecastSettings(BaseSettings):
     min_soc_pct: float = 20.0         # Never plan below this SoC
     buffer_soc_pct: float = 10.0      # Extra buffer above minimum needed
     min_arrival_soc_pct: float = 15.0  # Min SoC when arriving at destination
+    default_assumed_soc_pct: float = 50.0  # Assumed SoC when actual is unknown
 
     # How far ahead to plan (days)
     planning_horizon_days: int = 3
+
+    # --- Urgency thresholds ---
+    critical_urgency_hours: float = 2.0  # departure within this → critical
+    high_urgency_hours: float = 6.0      # departure within this → high urgency
+    fast_mode_threshold_kwh: float = 15.0  # deficit above this → Fast instead of Eco
+    early_departure_hour: int = 10  # tomorrow departure before this hour → charge overnight
 
     # --- HA helper entities (written by this service) ---
     charge_mode_entity: str = "input_select.ev_charge_mode"

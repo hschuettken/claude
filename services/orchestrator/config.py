@@ -19,6 +19,13 @@ class OrchestratorSettings(BaseSettings):
     ollama_model: str = "llama3"
     llm_max_tool_rounds: int = 10
     llm_temperature: float = 0.7
+    llm_max_tokens: int = 4096  # max tokens for LLM response
+
+    # --- Embedding models (for semantic memory) ---
+    gemini_embedding_model: str = "gemini-embedding-001"
+    gemini_embedding_dims: int = 768
+    openai_embedding_model: str = "text-embedding-3-small"
+    ollama_embedding_model: str = "nomic-embed-text"
 
     # --- Telegram ---
     telegram_bot_token: str = ""
@@ -31,6 +38,9 @@ class OrchestratorSettings(BaseSettings):
     enable_proactive_suggestions: bool = True
     enable_morning_briefing: bool = True
     enable_evening_briefing: bool = False
+    proactive_startup_delay_seconds: int = 120  # delay before optimization suggestions start
+    consolidation_startup_delay_seconds: int = 300  # delay before memory consolidation starts
+    consolidation_check_interval_seconds: int = 600  # how often to check if consolidation is due
 
     # --- Energy entities (defaults match CLAUDE.md setup) ---
     grid_power_entity: str = "sensor.power_meter_active_power"
@@ -73,7 +83,24 @@ class OrchestratorSettings(BaseSettings):
 
     # --- Memory ---
     max_conversation_history: int = 50
+    max_decisions: int = 500  # max decision log entries
     enable_semantic_memory: bool = True  # vector-based long-term memory
+
+    # --- Semantic memory tuning ---
+    semantic_memory_max_entries: int = 5000  # cap to keep file size reasonable
+    semantic_memory_text_max_len: int = 2000  # truncate text before embedding
+    semantic_memory_search_top_k: int = 5  # default number of search results
+    semantic_memory_recency_weight: float = 0.15  # 0=pure similarity, 1=pure recency
+    semantic_memory_recency_half_life_days: int = 30  # recency decay half-life
+    memory_similarity_threshold: float = 0.5  # min similarity for context injection
+    memory_context_results: int = 3  # semantic results injected into LLM context
+
+    # --- Memory consolidation ---
+    memory_consolidation_hour: int = 3  # hour (local time) for nightly consolidation
+    memory_consolidation_min_age_days: float = 1.0  # min age before consolidation
+    memory_consolidation_batch_limit: int = 50  # max entries per consolidation run
+    memory_consolidation_batch_size: int = 10  # entries per consolidation batch
+    memory_consolidation_min_batch_size: int = 5  # min entries to trigger consolidation
 
     # --- Household info ---
     household_users: str = "Hans,Nicole"  # comma-separated
