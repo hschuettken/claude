@@ -359,7 +359,9 @@ The central intelligence layer that coordinates all services, communicates with 
 - Embeds conversation snippets, learned facts, and decisions as vectors for later semantic retrieval
 - Uses the configured LLM provider's embedding API: Gemini `text-embedding-004` (default), OpenAI `text-embedding-3-small`, or Ollama `nomic-embed-text`
 - Pure-Python cosine similarity — no heavy dependencies (ChromaDB, FAISS, PyTorch not needed)
-- Auto-stores conversation summaries after each exchange — the orchestrator "remembers" past topics
+- **LLM summarization** — conversations are distilled into concise memory entries before storage (not raw text dumps), producing better search results and less noise
+- **Time-weighted scoring** — search results blend cosine similarity (85%) with recency (15%, 30-day half-life), so recent memories rank higher when equally relevant
+- **Nightly consolidation** — at 3 AM, older conversation memories are grouped and merged by the LLM into denser entries (e.g. 50 EV charging conversations → 2-3 consolidated knowledge entries), reducing bloat while preserving important patterns
 - LLM can explicitly store facts via `store_fact` tool and search via `recall_memory` tool
 - Relevant memories are automatically injected into the LLM context before each response (similarity ≥ 0.5)
 - Categories: `conversation` (auto-stored exchanges), `fact` (explicitly stored knowledge), `decision` (orchestrator decisions)

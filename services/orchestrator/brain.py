@@ -280,7 +280,12 @@ class Brain:
     async def _auto_store_conversation(
         self, user_message: str, assistant_response: str, user_name: str,
     ) -> None:
-        """Store a summary of the conversation turn in semantic memory."""
+        """Summarize and store the conversation turn in semantic memory.
+
+        Uses the LLM to distill the exchange into a concise memory entry
+        instead of storing raw text — produces better search results and
+        uses less storage.
+        """
         if not self._semantic:
             return
 
@@ -288,7 +293,13 @@ class Brain:
         if len(user_message) < 15 and len(assistant_response) < 50:
             return
 
-        summary = f"User ({user_name}): {user_message[:500]}\nAssistant: {assistant_response[:500]}"
+        # Use LLM to extract the key takeaway
+        summary = await self._summarize_for_memory(
+            user_message, assistant_response, user_name,
+        )
+        if not summary:
+            return
+
         try:
             await self._semantic.store(
                 summary,
@@ -297,3 +308,91 @@ class Brain:
             )
         except Exception:
             logger.debug("auto_store_failed")
+
+    async def _summarize_for_memory(
+        self, user_message: str, assistant_response: str, user_name: str,
+    ) -> str:
+        """Use the LLM to distill a conversation into a concise memory entry."""
+        prompt = (
+            "Summarize this conversation exchange in 1-2 sentences for long-term memory storage. "
+            "Focus on: key facts learned, decisions made, user preferences revealed, or actions taken. "
+            "Be specific — include names, numbers, entity names, and concrete details. "
+            "Write in third person. If nothing noteworthy happened, write 'trivial exchange'.\n\n"
+            f"User ({user_name}): {user_message[:600]}\n"
+            f"Assistant: {assistant_response[:600]}"
+        )
+        try:
+            response = await self._llm.chat(
+                [Message(role="user", content=prompt)],
+                tools=None,
+            )
+            summary = (response.content or "").strip()
+            # Fall back to raw text if LLM returns empty or very short
+            if len(summary) < 10 or summary.lower() == "trivial exchange":
+                return ""
+            return summary
+        except Exception:
+            logger.debug("summarization_failed_using_raw")
+            # Fall back to truncated raw text
+            return f"User ({user_name}): {user_message[:300]}\nAssistant: {assistant_response[:300]}"
+
+    async def consolidate_memories(self) -> int:
+        """Consolidate older conversation memories into denser entries.
+
+        Groups related memories and asks the LLM to merge them.
+        Returns the number of entries that were consolidated.
+        """
+        if not self._semantic:
+            return 0
+
+        entries = self._semantic.get_entries_for_consolidation(
+            category="conversation", min_age_days=1.0, limit=50,
+        )
+        if len(entries) < 5:
+            return 0  # not enough to consolidate
+
+        # Group entries into batches of ~10 for consolidation
+        batch_size = 10
+        total_consolidated = 0
+
+        for i in range(0, len(entries), batch_size):
+            batch = entries[i : i + batch_size]
+            if len(batch) < 3:
+                break
+
+            texts = "\n---\n".join(
+                f"[{e.get('category', 'conversation')}] {e['text']}" for e in batch
+            )
+            prompt = (
+                "You are consolidating long-term memory entries for a smart home orchestrator. "
+                "Below are several related memory entries from past conversations. "
+                "Merge them into 1-3 concise, information-dense summaries that preserve "
+                "all important facts, preferences, patterns, and decisions. "
+                "Drop redundant or trivial information. "
+                "Write each summary as a separate paragraph.\n\n"
+                f"Entries to consolidate:\n{texts}"
+            )
+
+            try:
+                response = await self._llm.chat(
+                    [Message(role="user", content=prompt)],
+                    tools=None,
+                )
+                consolidated_text = (response.content or "").strip()
+                if len(consolidated_text) < 20:
+                    continue
+
+                old_ids = [e["id"] for e in batch]
+                await self._semantic.replace_with_consolidated(
+                    old_ids, consolidated_text, category="conversation",
+                )
+                total_consolidated += len(old_ids)
+                logger.info(
+                    "batch_consolidated",
+                    merged=len(old_ids),
+                    summary_len=len(consolidated_text),
+                )
+            except Exception:
+                logger.exception("consolidation_batch_failed")
+
+        return total_consolidated

@@ -11,6 +11,11 @@ cosine similarity.  Storage is a simple JSON file.
 
 Typical scale: a few thousand entries over months → fits comfortably in
 memory and searches in milliseconds.
+
+Features:
+- Time-weighted scoring — blends cosine similarity with recency
+- LLM-powered summarization — conversations are distilled before storage
+- Periodic consolidation — merges related memories to reduce noise
 """
 
 from __future__ import annotations
@@ -29,6 +34,10 @@ logger = get_logger("semantic-memory")
 
 STORE_FILE = Path("/app/data/memory/semantic_store.json")
 MAX_ENTRIES = 5000  # cap to keep file size reasonable (~20 MB)
+
+# Time-weighted scoring parameters
+RECENCY_WEIGHT = 0.15  # 0 = pure similarity, 1 = pure recency
+RECENCY_HALF_LIFE_DAYS = 30  # after 30 days, recency score = 0.5
 
 
 # ------------------------------------------------------------------
@@ -163,7 +172,11 @@ class SemanticMemory:
         top_k: int = 5,
         category: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Semantic search — return the most relevant past entries."""
+        """Semantic search with time-weighted scoring.
+
+        Final score = (1 - w) * similarity + w * recency
+        where recency decays exponentially with a configurable half-life.
+        """
         if not self._entries:
             return []
 
@@ -177,28 +190,92 @@ class SemanticMemory:
         if category:
             candidates = [e for e in candidates if e.get("category") == category]
 
-        scored: list[tuple[float, dict[str, Any]]] = []
+        now = time.time()
+        scored: list[tuple[float, float, dict[str, Any]]] = []
         for entry in candidates:
             sim = _cosine_similarity(query_embedding, entry["embedding"])
-            scored.append((sim, entry))
+            age_days = (now - entry["timestamp"]) / 86400
+            recency = math.exp(-0.693 * age_days / RECENCY_HALF_LIFE_DAYS)
+            combined = (1 - RECENCY_WEIGHT) * sim + RECENCY_WEIGHT * recency
+            scored.append((combined, sim, entry))
 
         scored.sort(key=lambda x: x[0], reverse=True)
 
         results: list[dict[str, Any]] = []
-        for score, entry in scored[:top_k]:
+        for combined, sim, entry in scored[:top_k]:
             results.append({
                 "id": entry["id"],
                 "text": entry["text"],
                 "category": entry["category"],
                 "metadata": entry["metadata"],
-                "similarity": round(score, 3),
-                "age_days": round((time.time() - entry["timestamp"]) / 86400, 1),
+                "similarity": round(sim, 3),
+                "score": round(combined, 3),
+                "age_days": round((now - entry["timestamp"]) / 86400, 1),
             })
         return results
 
     @property
     def entry_count(self) -> int:
         return len(self._entries)
+
+    def get_entries_for_consolidation(
+        self,
+        category: str = "conversation",
+        min_age_days: float = 1.0,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return older entries suitable for consolidation."""
+        cutoff = time.time() - min_age_days * 86400
+        candidates = [
+            e for e in self._entries
+            if e.get("category") == category
+            and e["timestamp"] < cutoff
+            and not e.get("metadata", {}).get("consolidated")
+        ]
+        # Oldest first
+        candidates.sort(key=lambda e: e["timestamp"])
+        return candidates[:limit]
+
+    async def replace_with_consolidated(
+        self,
+        old_ids: list[str],
+        consolidated_text: str,
+        category: str = "conversation",
+    ) -> str:
+        """Replace multiple entries with a single consolidated entry."""
+        if not old_ids:
+            return ""
+
+        try:
+            embedding = await self._embedder.embed(consolidated_text[:2000])
+        except Exception:
+            logger.warning("consolidation_embedding_failed")
+            return ""
+
+        # Remove old entries
+        old_set = set(old_ids)
+        self._entries = [e for e in self._entries if e["id"] not in old_set]
+
+        # Add consolidated entry
+        entry_id = uuid.uuid4().hex[:12]
+        entry: dict[str, Any] = {
+            "id": entry_id,
+            "text": consolidated_text[:2000],
+            "embedding": embedding,
+            "category": category,
+            "metadata": {"consolidated": True, "merged_count": len(old_ids)},
+            "timestamp": time.time(),
+        }
+        self._entries.append(entry)
+        self._save()
+
+        logger.info(
+            "memories_consolidated",
+            merged=len(old_ids),
+            new_id=entry_id,
+            total=len(self._entries),
+        )
+        return entry_id
 
     # ------------------------------------------------------------------
     # Persistence

@@ -80,6 +80,7 @@ class ProactiveEngine:
         self._tasks: list[asyncio.Task] = []
         self._last_morning_date: str = ""
         self._last_evening_date: str = ""
+        self._last_consolidation_date: str = ""
 
     async def start(self, shutdown_event: asyncio.Event) -> None:
         """Start all proactive background tasks."""
@@ -91,6 +92,11 @@ class ProactiveEngine:
         if self._settings.enable_proactive_suggestions:
             self._tasks.append(
                 asyncio.create_task(self._optimization_loop(shutdown_event))
+            )
+
+        if self._settings.enable_semantic_memory:
+            self._tasks.append(
+                asyncio.create_task(self._memory_consolidation_loop(shutdown_event))
             )
 
         logger.info(
@@ -195,6 +201,45 @@ class ProactiveEngine:
 
             try:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=interval)
+                break
+            except asyncio.TimeoutError:
+                pass
+
+    # ------------------------------------------------------------------
+    # Memory consolidation (nightly)
+    # ------------------------------------------------------------------
+
+    async def _memory_consolidation_loop(
+        self, shutdown_event: asyncio.Event,
+    ) -> None:
+        """Run memory consolidation once per day at 3 AM."""
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(self._settings.timezone)
+
+        # Initial delay — let the service stabilize
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=300)
+            return
+        except asyncio.TimeoutError:
+            pass
+
+        while not shutdown_event.is_set():
+            try:
+                now = datetime.now(tz)
+                today_str = now.strftime("%Y-%m-%d")
+
+                # Run at 3 AM, once per day
+                if now.hour == 3 and self._last_consolidation_date != today_str:
+                    self._last_consolidation_date = today_str
+                    logger.info("memory_consolidation_starting")
+                    merged = await self._brain.consolidate_memories()
+                    logger.info("memory_consolidation_done", merged=merged)
+            except Exception:
+                logger.exception("memory_consolidation_error")
+
+            # Check every 10 minutes
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=600)
                 break
             except asyncio.TimeoutError:
                 pass
