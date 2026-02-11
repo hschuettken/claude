@@ -44,6 +44,7 @@ This file provides guidance for AI assistants working with this repository.
 │   │   ├── brain.py                         #   Core reasoning engine (LLM + tool loop)
 │   │   ├── tools.py                         #   LLM tool definitions & execution
 │   │   ├── memory.py                        #   Persistent conversations, profiles, preferences
+│   │   ├── semantic_memory.py               #   Vector-based long-term memory (embeddings + search)
 │   │   ├── calendar.py                      #   Google Calendar integration (read family, write own)
 │   │   ├── proactive.py                     #   Scheduled briefings, alerts, suggestions
 │   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
@@ -339,6 +340,8 @@ The central intelligence layer that coordinates all services, communicates with 
 - `get_calendar_events` — Read family or orchestrator Google Calendar events
 - `check_household_availability` — Check who is home/away (absences, business trips)
 - `create_calendar_event` — Create reminders/events on orchestrator's own calendar
+- `recall_memory` — Semantic search over long-term memory (past conversations, facts, decisions)
+- `store_fact` — Store knowledge/facts in long-term semantic memory for future recall
 
 **Communication**: Telegram bot with commands `/start`, `/status`, `/forecast`, `/clear`, `/whoami`, `/help` plus free-text LLM conversation.
 
@@ -351,6 +354,17 @@ The central intelligence layer that coordinates all services, communicates with 
 - Per-user conversation history (with configurable max length)
 - User profiles with learned preferences (sauna days, wake times, departure times)
 - Decision log (what the orchestrator decided and why)
+
+**Semantic Memory** (vector-based long-term recall, persistent in `/app/data/memory/semantic_store.json`):
+- Embeds conversation snippets, learned facts, and decisions as vectors for later semantic retrieval
+- Uses the configured LLM provider's embedding API: Gemini `text-embedding-004` (default), OpenAI `text-embedding-3-small`, or Ollama `nomic-embed-text`
+- Pure-Python cosine similarity — no heavy dependencies (ChromaDB, FAISS, PyTorch not needed)
+- Auto-stores conversation summaries after each exchange — the orchestrator "remembers" past topics
+- LLM can explicitly store facts via `store_fact` tool and search via `recall_memory` tool
+- Relevant memories are automatically injected into the LLM context before each response (similarity ≥ 0.5)
+- Categories: `conversation` (auto-stored exchanges), `fact` (explicitly stored knowledge), `decision` (orchestrator decisions)
+- Scale: up to 5000 entries (~20 MB JSON file), searches in milliseconds
+- Enabled by default (`ENABLE_SEMANTIC_MEMORY=true`), disable if no embedding API key is available
 
 **Google Calendar** (optional, via Service Account):
 - Family calendar (read-only) — absences, business trips, appointments
@@ -404,7 +418,7 @@ The central intelligence layer that coordinates all services, communicates with 
 - `binary_sensor` — Service online/offline
 - `sensor` — Uptime, LLM Provider
 
-**Config** (env vars): `LLM_PROVIDER`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`, `MORNING_BRIEFING_TIME`, `ENABLE_PROACTIVE_SUGGESTIONS`, `GRID_PRICE_CT`, `FEED_IN_TARIFF_CT`, `OIL_PRICE_PER_KWH_CT`, `HOUSEHOLD_USERS`, `GOOGLE_CALENDAR_CREDENTIALS_FILE`, `GOOGLE_CALENDAR_FAMILY_ID`, `GOOGLE_CALENDAR_ORCHESTRATOR_ID`. Most entity IDs have sensible defaults matching the existing HA setup.
+**Config** (env vars): `LLM_PROVIDER`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`, `MORNING_BRIEFING_TIME`, `ENABLE_PROACTIVE_SUGGESTIONS`, `ENABLE_SEMANTIC_MEMORY`, `GRID_PRICE_CT`, `FEED_IN_TARIFF_CT`, `OIL_PRICE_PER_KWH_CT`, `HOUSEHOLD_USERS`, `GOOGLE_CALENDAR_CREDENTIALS_FILE`, `GOOGLE_CALENDAR_FAMILY_ID`, `GOOGLE_CALENDAR_ORCHESTRATOR_ID`. Most entity IDs have sensible defaults matching the existing HA setup.
 
 **Example use cases**:
 - "Do you need to charge your car tomorrow?" → checks PV forecast, EV battery, schedule
