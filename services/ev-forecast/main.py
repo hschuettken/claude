@@ -163,6 +163,13 @@ class EVForecastService:
             self._on_trip_response,
         )
 
+        # Subscribe to orchestrator commands
+        self._loop = asyncio.get_event_loop()
+        self.mqtt.subscribe(
+            "homelab/orchestrator/command/ev-forecast",
+            self._on_orchestrator_command,
+        )
+
         # Initialize Google Calendar
         self._init_google_calendar()
 
@@ -252,8 +259,10 @@ class EVForecastService:
             plan = await self.planner.generate_plan(vehicle, day_plans)
             self._last_plan = plan
 
-            # Publish plan to MQTT
-            self.mqtt.publish("homelab/ev-forecast/plan", plan.to_dict())
+            # Publish plan to MQTT (with reasoning for the rich sensor)
+            plan_payload = plan.to_dict()
+            plan_payload["reasoning"] = self._compose_plan_reasoning(plan, vehicle)
+            self.mqtt.publish("homelab/ev-forecast/plan", plan_payload)
 
             # Apply immediate action to HA helpers
             await self.planner.apply_plan(
@@ -358,6 +367,18 @@ class EVForecastService:
     # ------------------------------------------------------------------
     # MQTT callbacks
     # ------------------------------------------------------------------
+
+    def _on_orchestrator_command(self, topic: str, payload: dict) -> None:
+        """Handle commands from the orchestrator service."""
+        command = payload.get("command", "")
+        logger.info("orchestrator_command", command=command)
+
+        if command == "refresh" and self._loop:
+            asyncio.run_coroutine_threadsafe(self._update_plan(), self._loop)
+        elif command == "refresh_vehicle" and self._loop:
+            asyncio.run_coroutine_threadsafe(self._update_vehicle(), self._loop)
+        else:
+            logger.debug("unknown_command", command=command)
 
     def _on_trip_response(self, topic: str, payload: dict[str, Any]) -> None:
         """Handle trip clarification response from orchestrator."""
@@ -594,7 +615,83 @@ class EVForecastService:
             },
         )
 
-        logger.info("ha_discovery_registered", entity_count=11)
+        # Uptime (diagnostic)
+        self.mqtt.publish_ha_discovery(
+            "sensor", "uptime", node_id=node, config={
+                "name": "EV Forecast Uptime",
+                "device": device,
+                "state_topic": "homelab/ev-forecast/heartbeat",
+                "value_template": "{{ value_json.uptime_seconds | round(0) }}",
+                "unit_of_measurement": "s",
+                "device_class": "duration",
+                "entity_category": "diagnostic",
+                "icon": "mdi:timer-outline",
+            },
+        )
+
+        # Rich reasoning sensor with full plan details as JSON attributes
+        self.mqtt.publish_ha_discovery(
+            "sensor", "plan_reasoning", node_id=node, config={
+                "name": "Plan Reasoning",
+                "device": device,
+                "state_topic": plan_topic,
+                "value_template": (
+                    "{% if value_json.days and value_json.days | length > 0 %}"
+                    "{{ value_json.days[0].charge_mode }}: "
+                    "{{ value_json.days[0].energy_needed_kwh }} kWh needed"
+                    "{% else %}No plan{% endif %}"
+                ),
+                "json_attributes_topic": plan_topic,
+                "json_attributes_template": (
+                    '{{ {"full_reasoning": value_json.reasoning | default(""), '
+                    '"current_soc_pct": value_json.current_soc_pct | default(0), '
+                    '"vehicle_plugged_in": value_json.vehicle_plugged_in | default(false), '
+                    '"total_energy_needed_kwh": value_json.total_energy_needed_kwh | default(0), '
+                    '"plan_days": value_json.days | default([]) | length, '
+                    '"today_charge_mode": (value_json.days[0].charge_mode if value_json.days and value_json.days | length > 0 else "none"), '
+                    '"today_energy_kwh": (value_json.days[0].energy_needed_kwh if value_json.days and value_json.days | length > 0 else 0), '
+                    '"today_urgency": (value_json.days[0].urgency if value_json.days and value_json.days | length > 0 else "none")} | tojson }}'
+                ),
+                "icon": "mdi:head-cog-outline",
+            },
+        )
+
+        logger.info("ha_discovery_registered", entity_count=13)
+
+    # ------------------------------------------------------------------
+    # Reasoning
+    # ------------------------------------------------------------------
+
+    def _compose_plan_reasoning(self, plan: ChargingPlan, vehicle: VehicleState) -> str:
+        """Compose detailed human-readable reasoning for the current plan."""
+        lines: list[str] = []
+
+        lines.append(
+            f"Vehicle: SoC {vehicle.soc_pct}% | Range {vehicle.range_km} km | "
+            f"Account: {vehicle.active_account} | Plug: {vehicle.plug_state}"
+        )
+        lines.append(
+            f"Plan: {plan.current_soc_pct}% SoC | "
+            f"Plugged: {plan.vehicle_plugged_in} | "
+            f"Total need: {plan.total_energy_needed_kwh:.1f} kWh"
+        )
+
+        for day in plan.days:
+            trip_list = ", ".join(
+                f"{t.person}: {t.destination} ({t.distance_km}km)"
+                for t in day.trips
+            ) or "no trips"
+            dep = day.departure_time.strftime("%H:%M") if day.departure_time else "none"
+            lines.append(
+                f"  {day.date}: [{day.urgency}] {day.charge_mode} | "
+                f"need {day.energy_needed_kwh:.1f} kWh, "
+                f"charge {day.energy_to_charge_kwh:.1f} kWh | "
+                f"depart {dep}"
+            )
+            lines.append(f"    Trips: {trip_list}")
+            lines.append(f"    Reason: {day.reason}")
+
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Heartbeat

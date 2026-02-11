@@ -5,12 +5,18 @@ This service demonstrates:
   - Subscribing to MQTT topics
   - Querying Home Assistant
   - Publishing MQTT events
+  - Healthcheck file for Docker HEALTHCHECK
+  - Listening to orchestrator commands
   - Graceful shutdown
 """
 
 import asyncio
+import time
+from pathlib import Path
 
 from shared.service import BaseService
+
+HEALTHCHECK_FILE = Path("/app/data/healthcheck")
 
 
 class ExampleService(BaseService):
@@ -30,6 +36,12 @@ class ExampleService(BaseService):
             ),
         )
 
+        # Listen to orchestrator commands
+        self.mqtt.subscribe(
+            "homelab/orchestrator/command/example-service",
+            self._on_orchestrator_command,
+        )
+
         # Example: read a HA sensor on startup
         # state = await self.ha.get_state("sensor.temperature_living_room")
         # self.logger.info("sensor_state", state=state["state"])
@@ -46,8 +58,23 @@ class ExampleService(BaseService):
         # Example: publish an event
         self.publish("started", {"status": "ok"})
 
+        # Touch healthcheck on startup
+        self._touch_healthcheck()
+
         # Keep running until shutdown signal
         await self.wait_for_shutdown()
+
+    def _on_orchestrator_command(self, topic: str, payload: dict) -> None:
+        """Handle commands from the orchestrator service."""
+        command = payload.get("command", "")
+        self.logger.info("orchestrator_command", command=command)
+
+    def _touch_healthcheck(self) -> None:
+        try:
+            HEALTHCHECK_FILE.parent.mkdir(parents=True, exist_ok=True)
+            HEALTHCHECK_FILE.write_text(str(time.time()))
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":
