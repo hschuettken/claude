@@ -72,39 +72,13 @@ class EmbeddingProvider:
         from google import genai
         from google.genai import types
 
-        # Try multiple model names and API versions
-        attempts = [
-            {"model": "gemini-embedding-001", "api_version": None},
-            {"model": "text-embedding-004", "api_version": None},
-            {"model": "gemini-embedding-001", "api_version": "v1"},
-            {"model": "text-embedding-004", "api_version": "v1"},
-        ]
-
-        last_err: Exception | None = None
-        for attempt in attempts:
-            try:
-                kwargs: dict[str, Any] = {"api_key": api_key}
-                if attempt["api_version"]:
-                    kwargs["http_options"] = types.HttpOptions(
-                        api_version=attempt["api_version"],
-                    )
-                client = genai.Client(**kwargs)
-                result = await client.aio.models.embed_content(
-                    model=attempt["model"],
-                    contents=text,
-                    config=types.EmbedContentConfig(output_dimensionality=768),
-                )
-                logger.info(
-                    "embedding_model_found",
-                    model=attempt["model"],
-                    api_version=attempt["api_version"] or "default",
-                )
-                return list(result.embeddings[0].values)
-            except Exception as exc:
-                last_err = exc
-                continue
-
-        raise last_err or RuntimeError("All Gemini embedding attempts failed")
+        client = genai.Client(api_key=api_key)
+        result = await client.aio.models.embed_content(
+            model="gemini-embedding-001",
+            contents=text,
+            config=types.EmbedContentConfig(output_dimensionality=768),
+        )
+        return list(result.embeddings[0].values)
 
     async def _embed_openai(self, text: str) -> list[float]:
         s = self._settings
