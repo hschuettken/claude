@@ -5,9 +5,13 @@
 - HA config files are in `HomeAssistant_config/` on main branch (capital H)
 - KNX config is split into separate files under `KNX/` directory (referenced by HA config)
 - InfluxDB token is exposed in configuration.yaml — should be moved to secrets.yaml
+- Documentation lives in `docs/` in the repo AND in Claude memory files — always update both
+- py-ha-automations (192.168.0.72) listed in IP sheet but not in Proxmox — possibly retired/replaced by this repo
 
 ## User Preferences
 - Prefers Docker or Proxmox helper script LXCs for new services
+- Prefers working on main branch — finds branch-per-session merging annoying
+- Wants all learnings/decisions stored in BOTH `docs/` (repo) AND memory files — always keep in sync
 - Already has extensive AI stack: Ollama, Open WebUI, ComfyUI, Flowise AI, SearXNG
 - Uses n8n for workflow automation alongside Node-RED
 - Has both CheckMK and LibreNMS for monitoring (dual monitoring stack)
@@ -15,6 +19,9 @@
 - Pi-hole for DNS ad-blocking
 - Vaultwarden for password management
 - Heimdall as service dashboard
+- MikroTik networking (MT24 core switch + MT8 PoE), TP-Link Omada WiFi APs (3 floors)
+- Dual NAS: TrueNAS (VM 108, primary storage) + Synology DS214 (192.168.0.21, legacy)
+- 3 weather data sources in HA: Open-Meteo, Met.no, OpenWeatherMap
 
 ## Current Gaps / Opportunities
 1. Docker VMs (102/105) are underutilized — only Traefik + Portainer on prod
