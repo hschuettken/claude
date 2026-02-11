@@ -400,8 +400,9 @@ The central intelligence layer that coordinates all services, communicates with 
 - **Morning briefing** (configurable time) — weather, PV forecast, energy plan for the day
 - **Evening summary** — today's production, grid usage, savings
 - **Optimization alerts** — excess PV, idle EV, battery strategy opportunities
-- **EV charging calendar events** — auto-creates/updates events on orchestrator calendar when charging is needed
-- **EV trip clarification** — forwards ambiguous trip questions from ev-forecast to Telegram, routes answers back
+- **EV charging calendar events** — auto-creates/updates all-day events on orchestrator calendar when ev-forecast reports charging needs. German summaries (e.g., "EV: 15 kWh laden bis 07:00 (Nicole → Lengerich)"). Events are deduplicated by tracking `{date: {event_id, summary}}` — only updated when the summary text changes. Stale events are deleted when a date no longer needs charging.
+- **EV trip clarification** — forwards ambiguous trip questions from ev-forecast to Telegram users. When users respond in natural language, the Brain LLM recognizes the context (pending clarifications are injected into the system prompt) and calls the `respond_to_ev_trip_clarification` tool to route the answer back via MQTT.
+- **Memory consolidation** — at 3 AM nightly, older conversation memories are grouped and merged by the LLM into denser entries
 
 **Memory** (persistent in `/app/data/memory/`):
 - Per-user conversation history (with configurable max length)
@@ -590,15 +591,22 @@ Monitors the Audi A6 e-tron (83 kWh gross / 76 kWh net) via dual Audi Connect ac
 - Nicole: default commute Mon–Thu to Lengerich (22 km one way), departs 07:00, returns ~18:00
 - Known destinations are mapped to distances via a configurable lookup table
 
-**Smart charging plan**: For the next 3 days, the planner:
+**Geocoding** (for unknown destinations): Uses OpenStreetMap Nominatim (free, no API key) to estimate distances. Flow: destination name → geocode to coordinates → haversine straight-line distance → multiply by road factor (default 1.3) → estimated road km. Results are cached per session.
+
+**Known destinations** (configurable via `KNOWN_DESTINATIONS` JSON env var): Pre-mapped city→distance lookup for common trips (e.g., Münster 60 km, Aachen 80 km, STR 500 km). Falls back to geocoding for unknown destinations, then to a conservative 50 km default.
+
+**Trip clarification**: When the ev-forecast service can't determine if someone will use the EV (Hans for 100–350 km trips, unknown destinations), it publishes questions in German to `homelab/ev-forecast/clarification-needed`. Each clarification includes an `event_id` for tracking. The orchestrator forwards these to Telegram and routes user responses back via `homelab/ev-forecast/trip-response`.
+
+**Smart charging plan** (demand-focused): The planner expresses **demand** ("need X kWh by time Y"), not supply. PV optimization is left to the smart-ev-charging service. For the next 3 days, the planner:
 1. Calculates energy needed for each day's trips (distance × 22 kWh/100km)
-2. Adds safety buffer (min SoC at arrival + reserve)
-3. Compares to current SoC and PV forecast
-4. Chooses the best charge mode:
+2. Adds safety buffer (min SoC 20% + buffer 10% + min arrival SoC 15%)
+3. Compares required SoC to current SoC, tracks running SoC across days
+4. Assigns urgency: none → low → medium → high → critical (based on time-to-deadline)
+5. Chooses the best charge mode:
    - **PV Surplus** — no trips or SoC already sufficient
    - **Smart** — PV surplus + grid fill by departure deadline
-   - **Fast/Eco** — urgent, departure imminent
-5. Automatically sets the HA input helpers (`ev_charge_mode`, `ev_target_energy_kwh`, `ev_departure_time`, `ev_full_by_morning`) for the smart-ev-charging service
+   - **Fast/Eco** — urgent, departure imminent (<2 hours)
+6. Automatically sets the HA input helpers (`ev_charge_mode`, `ev_target_energy_kwh`, `ev_departure_time`, `ev_full_by_morning`) for the smart-ev-charging service
 
 **Data flow**: Audi Connect (SoC/range) + Google Calendar (trips) + PV Forecast (solar) → Charging Plan → HA Helpers → smart-ev-charging (wallbox control)
 
@@ -616,6 +624,47 @@ Monitors the Audi A6 e-tron (83 kWh gross / 76 kWh net) via dual Audi Connect ac
 **HA YAML** (`HomeAssistant_config/ev_audi_connect.yaml`): Template sensors that combine both Audi Connect accounts into unified entities (`sensor.ev_state_of_charge`, `sensor.ev_range`, `sensor.ev_charging_state`, `sensor.ev_plug_state`, `sensor.ev_mileage`, `sensor.ev_active_account`, `binary_sensor.ev_plugged_in`, `binary_sensor.ev_is_charging`).
 
 **Config** (env vars): `EV_BATTERY_CAPACITY_GROSS_KWH`, `EV_BATTERY_CAPACITY_NET_KWH`, `EV_CONSUMPTION_KWH_PER_100KM`, `AUDI_ACCOUNT1_*` / `AUDI_ACCOUNT2_*` (entity IDs per account), `NICOLE_COMMUTE_KM`, `NICOLE_COMMUTE_DAYS`, `HANS_TRAIN_THRESHOLD_KM`, `KNOWN_DESTINATIONS` (JSON), `MIN_SOC_PCT`, `BUFFER_SOC_PCT`, `PLAN_UPDATE_MINUTES`, `VEHICLE_CHECK_MINUTES`. Uses same `GOOGLE_CALENDAR_*` credentials as the orchestrator.
+
+## Inter-Service Integration Patterns
+
+### Demand Publisher / Intelligent Coordinator
+
+Services follow a separation-of-concerns model: **data services publish demand**, the **orchestrator decides what to do**.
+
+Example: ev-forecast publishes "need 15 kWh by 07:00" via MQTT. The orchestrator decides whether to create a calendar event, send a Telegram notification, or both. The ev-forecast service never writes to the calendar directly — it only sets HA input helpers for the smart-ev-charging controller.
+
+### MQTT Thread → Asyncio Bridge
+
+MQTT callbacks (paho) run on a background thread, but services use asyncio. The orchestrator bridges this with:
+```python
+asyncio.run_coroutine_threadsafe(coro, self._loop)
+```
+This safely schedules async work (e.g., calendar API calls, Telegram messages) from synchronous MQTT handlers.
+
+### Shared State Dict
+
+Cross-component state within a service is shared via reference to a mutable dict:
+```python
+self._ev_state = {"plan": None, "pending_clarifications": []}
+```
+This dict is passed to Brain, ToolExecutor, and ProactiveEngine — all read/write the same object. MQTT handlers update it, LLM tools read it, and the proactive engine reacts to changes.
+
+### Service Chain: ev-forecast → smart-ev-charging
+
+The ev-forecast service writes HA input helpers (`ev_charge_mode`, `ev_target_energy_kwh`, `ev_departure_time`, `ev_full_by_morning`), which the smart-ev-charging service reads on its 30-second control loop. This decouples planning from execution — no direct MQTT dependency between the two.
+
+### EV Trip Clarification Flow
+
+Full lifecycle for ambiguous trip resolution:
+1. **ev-forecast** parses calendar, finds ambiguous trip (e.g., Hans 100–350 km)
+2. **ev-forecast** publishes to `homelab/ev-forecast/clarification-needed` with question in German
+3. **orchestrator** receives via MQTT, stores in `ev_state["pending_clarifications"]`
+4. **orchestrator** forwards question to Telegram via `ProactiveEngine.on_ev_clarification_needed()`
+5. **Brain** injects pending clarifications into LLM system prompt (with `event_id`)
+6. **User** responds naturally in Telegram chat
+7. **Brain** (LLM) recognizes context, calls `respond_to_ev_trip_clarification` tool with `event_id`
+8. **orchestrator** publishes answer to `homelab/ev-forecast/trip-response`
+9. **ev-forecast** receives response, calls `TripPredictor.resolve_clarification()`, updates plan
 
 ## Code Conventions
 
