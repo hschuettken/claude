@@ -102,11 +102,18 @@ class TelegramChannel(Channel):
             return
         # Split long messages
         for chunk in self._split_message(text):
-            await self._app.bot.send_message(
-                chat_id=chat_id,
-                text=chunk,
-                parse_mode=ParseMode.MARKDOWN,
-            )
+            try:
+                await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            except Exception:
+                # Markdown parse error — retry as plain text
+                await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk,
+                )
 
     # ------------------------------------------------------------------
     # Security
