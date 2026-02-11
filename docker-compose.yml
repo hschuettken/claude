@@ -96,6 +96,20 @@ services:
     networks:
       - homelab
 
+  ev-forecast:
+    build:
+      context: .
+      dockerfile: services/ev-forecast/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./shared:/app/shared:ro
+      - ev_forecast_data:/app/data
+    depends_on:
+      - mqtt
+    networks:
+      - homelab
+
   example-service:
     build:
       context: .
@@ -130,6 +144,7 @@ services:
 volumes:
   pv_forecast_data:
   smart_ev_charging_data:
+  ev_forecast_data:
   orchestrator_data:
   mosquitto_data:
   # influxdb_data:
