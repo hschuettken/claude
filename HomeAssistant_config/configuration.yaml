@@ -879,6 +879,14 @@ input_number:
     unit_of_measurement: kWh
     initial: 40
     icon: mdi:battery-charging
+  ev_target_soc_pct:
+    name: EV Target SoC
+    min: 10
+    max: 100
+    step: 5
+    unit_of_measurement: "%"
+    initial: 80
+    icon: mdi:battery-charging-80
   ev_battery_capacity_kwh:
     name: EV Battery Capacity
     min: 10
