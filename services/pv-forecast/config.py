@@ -50,7 +50,7 @@ class PVForecastSettings(BaseSettings):
     fallback_peak_irradiance: float = 1000.0  # W/m² STC irradiance
 
     # --- Data collection ---
-    data_history_days: int = 90  # days of historical data for training
+    data_history_days: int = 3650  # days of historical data for training (matches InfluxDB retention)
 
     # --- HA output sensor prefix ---
     ha_sensor_prefix: str = "sensor.pv_ai_forecast"
