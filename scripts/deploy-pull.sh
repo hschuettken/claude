@@ -62,9 +62,10 @@ echo "==> Rebuilding base image ..."
 ./scripts/build-base.sh
 echo ""
 
-# --- Step 4: Rebuild and start all services ---
+# --- Step 4: Rebuild and start all services (except example-service) ---
 echo "==> Rebuilding and starting all services ..."
-docker compose up --build -d
+SERVICES=$(docker compose config --services | grep -v '^example-service$')
+docker compose up --build -d $SERVICES
 echo ""
 
 echo "Done. All services are starting."
