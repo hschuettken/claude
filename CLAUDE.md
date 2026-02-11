@@ -45,7 +45,7 @@ This file provides guidance for AI assistants working with this repository.
 │   │   ├── tools.py                         #   LLM tool definitions & execution
 │   │   ├── memory.py                        #   Persistent conversations, profiles, preferences
 │   │   ├── semantic_memory.py               #   Vector-based long-term memory (embeddings + search)
-│   │   ├── calendar.py                      #   Google Calendar integration (read family, write own)
+│   │   ├── gcal.py                          #   Google Calendar integration (read family, write own)
 │   │   ├── proactive.py                     #   Scheduled briefings, alerts, suggestions
 │   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
 │   │   ├── diagnose.py                      #   Step-by-step connectivity diagnostic
@@ -363,8 +363,9 @@ Two PV arrays connected to a single inverter:
 - **PV DC input**: `sensor.inverter_input_power` (W) — raw solar panel output
 - **Inverter AC output**: `sensor.inverter_active_power` (W) — combined PV + battery AC output
 - **Home battery**: `sensor.batteries_charge_discharge_power` (W, positive = charging, negative = discharging), `sensor.batteries_state_of_capacity` (%, SoC) — 7 kWh / 3.5 kW max
-- **Energy pricing**: EPEX spot market (`sensor.epex_spot_data_price_2`), `input_number.price_per_kwh_electricity_grid`, `input_number.price_per_kwh_electricity_pv`
+- **Energy pricing**: Fixed rates — grid import 25 ct/kWh, feed-in 7 ct/kWh, EV reimbursement 25 ct/kWh. No EPEX spot market used.
 - **EV charging**: Amtron wallbox via Modbus — `sensor.amtron_meter_total_power_w`, `sensor.amtron_meter_total_energy_kwh`
+- **EV battery**: Audi Connect — SoC sensor (configurable via `EV_SOC_ENTITY`)
 - **Forecast.Solar**: Configured per array — `sensor.energy_production_today_east` / `west`, `sensor.energy_production_tomorrow_east` / `west`
 - **EV (Audi Connect)**: Dual-account setup — `sensor.ev_state_of_charge` (%, combined template), `sensor.ev_range` (km), `sensor.ev_charging_state`, `sensor.ev_plug_state`, `binary_sensor.ev_plugged_in`, `binary_sensor.ev_is_charging` (see `HomeAssistant_config/ev_audi_connect.yaml`)
 
@@ -412,8 +413,9 @@ The central intelligence layer that coordinates all services, communicates with 
 - **Morning briefing** (configurable time) — weather, PV forecast, energy plan for the day
 - **Evening summary** — today's production, grid usage, savings
 - **Optimization alerts** — excess PV, idle EV, battery strategy opportunities
-- **EV charging calendar events** — auto-creates/updates events on orchestrator calendar when charging is needed
-- **EV trip clarification** — forwards ambiguous trip questions from ev-forecast to Telegram, routes answers back
+- **EV charging calendar events** — auto-creates/updates all-day events on orchestrator calendar when ev-forecast reports charging needs. German summaries (e.g., "EV: 15 kWh laden bis 07:00 (Nicole → Lengerich)"). Events are deduplicated by tracking `{date: {event_id, summary}}` — only updated when the summary text changes. Stale events are deleted when a date no longer needs charging.
+- **EV trip clarification** — forwards ambiguous trip questions from ev-forecast to Telegram users. When users respond in natural language, the Brain LLM recognizes the context (pending clarifications are injected into the system prompt) and calls the `respond_to_ev_trip_clarification` tool to route the answer back via MQTT.
+- **Memory consolidation** — at 3 AM nightly, older conversation memories are grouped and merged by the LLM into denser entries
 
 **Memory** (persistent in `/app/data/memory/`):
 - Per-user conversation history (with configurable max length)
@@ -499,9 +501,13 @@ The central intelligence layer that coordinates all services, communicates with 
 Predicts PV output (kWh) for east and west arrays using a Gradient Boosting model
 trained on historical production data (InfluxDB) correlated with weather features (Open-Meteo).
 
-**Data flow**: InfluxDB (actual production) + Open-Meteo (radiation/clouds/temp) + Forecast.Solar (optional) → ML model → HA sensors
+**Data flow**: InfluxDB (actual production) + Open-Meteo (radiation/clouds/temp/sunrise/sunset) + Forecast.Solar (optional) → ML model → HA sensors
 
 **Important**: The input energy sensors (`sensor.inverter_pv_east_energy`, `sensor.inverter_pv_west_energy`) are `total_increasing` cumulative sensors. The data collector diffs consecutive hourly values to derive per-hour kWh — it does **not** assume midnight resets.
+
+**Daylight filtering**: Uses actual sunrise/sunset times from Open-Meteo (daily API) to filter training data and forecast hours. A physics constraint also zeros out any prediction where GHI < 5 W/m² (no sun = no power). This replaces an earlier hardcoded 5–21 UTC range that included many dark hours in winter at 52°N.
+
+**Model versioning**: Models are saved as `{"model": ..., "features": [...]}` dicts. On load, the feature list is validated against current `FEATURE_COLS`. If features have changed (e.g., new features added), the old model is automatically discarded and retrained.
 
 **Falls back** to radiation-based estimation when <14 days of training data exist.
 
@@ -527,15 +533,14 @@ Each sensor includes an `hourly` attribute with per-hour breakdown.
 
 **MQTT events**: `homelab/pv-forecast/updated`, `homelab/pv-forecast/model-trained`, `homelab/pv-forecast/heartbeat`
 
+**ML features** (19 total): `hour`, `day_of_year`, `month`, `shortwave_radiation` (GHI), `direct_radiation`, `diffuse_radiation`, `direct_normal_irradiance` (DNI), `cloud_cover` (total/low/mid/high), `temperature_2m`, `relative_humidity_2m`, `wind_speed_10m`, `sunshine_duration`, `capacity_kwp`, `forecast_solar_kwh`, `sunrise_hour`, `sunset_hour`
+
 **Config** (env vars): `PV_EAST_ENERGY_ENTITY_ID`, `PV_EAST_CAPACITY_KWP`, `PV_EAST_AZIMUTH`, `PV_EAST_TILT` (same for west). `FORECAST_SOLAR_EAST_ENTITY_ID` / `WEST` (optional — used as ML feature). Location auto-detected from HA if not set.
 
 ### smart-ev-charging — Smart EV Charging Controller
 
 Controls the Amtron wallbox via HEMS power limit (Modbus register 1002) to optimize
 EV charging based on PV surplus, user preferences, and departure deadlines.
-
-**Economics**: Grid buy 25 ct/kWh (fixed), feed-in 7 ct/kWh, employer reimburses 25 ct/kWh.
-Charging from PV surplus = +18 ct/kWh profit. Grid charging = cost-neutral.
 
 **Charge modes** (selected via `input_select.ev_charge_mode`):
 
@@ -550,10 +555,14 @@ Charging from PV surplus = +18 ct/kWh profit. Grid charging = cost-neutral.
 
 **"Full by Morning"** modifier (`input_boolean.ev_full_by_morning`): When enabled with PV Surplus or Smart mode, the service calculates if the target energy can be reached by departure time. If not, it escalates to grid charging as the deadline approaches.
 
+**EV SoC integration** (Audi Connect): When `EV_SOC_ENTITY` is configured, the service reads the car's actual SoC and computes energy needed: `(target_soc% - current_soc%) × capacity`. Charging stops automatically when target SoC is reached (any mode). Falls back to manual `target_energy_kwh` vs session energy when SoC is unavailable.
+
 **PV surplus formula** (grid meter: positive = exporting, negative = importing):
 `pv_available = grid_power + ev_power + battery_power - reserve`. The grid meter sees the net of everything behind it. When the battery charges (battery_power > 0), the EV reclaims that power. When discharging (< 0), available is reduced to only count real PV surplus.
 
 **Battery assist**: On top of PV-only surplus, the strategy allows limited battery discharge for EV charging. This is gated by: SoC > floor (20%), PV forecast quality (good day → more aggressive), and a max discharge rate cap (2 kW default) to protect battery longevity. Battery assist only kicks in when PV is producing but surplus alone isn't enough for the wallbox minimum.
+
+**Economics**: Grid import 25 ct/kWh (fixed), feed-in 7 ct/kWh, employer reimburses 25 ct/kWh. No EPEX spot market. PV charging = +18 ct/kWh profit, grid charging = cost-neutral.
 
 **Control loop**: Every 30 s — read HA state → calculate target power → write HEMS limit → publish MQTT status.
 
@@ -561,19 +570,21 @@ Charging from PV surplus = +18 ct/kWh profit. Grid charging = cost-neutral.
 - `input_select.ev_charge_mode` — Charge mode selector
 - `input_boolean.ev_full_by_morning` — Deadline mode
 - `input_datetime.ev_departure_time` — When the car leaves
-- `input_number.ev_target_energy_kwh` — Energy to add this session
+- `input_number.ev_target_soc_pct` — Target SoC % (default 80)
+- `input_number.ev_target_energy_kwh` — Fallback manual energy target
 - `input_number.ev_battery_capacity_kwh` — Total EV battery capacity
 
-**HA output sensors** (via MQTT auto-discovery, "Smart EV Charging" device, 22 entities):
+**HA output sensors** (via MQTT auto-discovery, "Smart EV Charging" device, 24 entities):
 - `binary_sensor` — Service online/offline, Vehicle Connected, Full by Morning active
 - `sensor` (core) — Charge Mode, Target Power (W), Actual Power (W), Session Energy (kWh), PV Available (W), Status text, Home Battery Power (W), Home Battery SoC (%), House Power (W)
+- `sensor` (EV) — EV SoC (%), Energy Needed (kWh)
 - `sensor` (decision context) — PV Surplus before assist (W), Battery Assist Power (W), Battery Assist Reason, PV DC Power (W), Grid Power (W), PV Forecast Remaining (kWh), Energy Remaining to Target (kWh), Target Energy (kWh)
 - `sensor` (deadline) — Deadline Hours Left, Deadline Required Power (W)
 - `sensor` (reasoning) — Decision Reasoning (with full_reasoning, battery_assist_reason, deadline details as JSON attributes)
 
 **MQTT events**: `homelab/smart-ev-charging/status`, `homelab/smart-ev-charging/heartbeat`
 
-**Config** (env vars): `EV_GRID_PRICE_CT`, `EV_FEED_IN_TARIFF_CT`, `EV_REIMBURSEMENT_CT`, `WALLBOX_MAX_POWER_W`, `WALLBOX_MIN_POWER_W`, `ECO_CHARGE_POWER_W`, `GRID_RESERVE_W`, `CONTROL_INTERVAL_SECONDS`, `BATTERY_MIN_SOC_PCT`, `BATTERY_EV_ASSIST_MAX_W`, `PV_FORECAST_GOOD_KWH`. Entity IDs have sensible defaults matching the Amtron + Sungrow + Shelly setup.
+**Config** (env vars): `EV_SOC_ENTITY`, `EV_GRID_PRICE_CT`, `EV_FEED_IN_TARIFF_CT`, `EV_REIMBURSEMENT_CT`, `WALLBOX_MAX_POWER_W`, `WALLBOX_MIN_POWER_W`, `ECO_CHARGE_POWER_W`, `GRID_RESERVE_W`, `CONTROL_INTERVAL_SECONDS`, `BATTERY_MIN_SOC_PCT`, `BATTERY_EV_ASSIST_MAX_W`, `PV_FORECAST_GOOD_KWH`. Entity IDs have sensible defaults matching the Amtron + Sungrow + Shelly setup.
 
 ### ev-forecast — EV Driving Forecast & Smart Charging Planner
 
@@ -593,15 +604,22 @@ Monitors the Audi A6 e-tron (83 kWh gross / 76 kWh net) via dual Audi Connect ac
 - Nicole: default commute Mon–Thu to Lengerich (22 km one way), departs 07:00, returns ~18:00
 - Known destinations are mapped to distances via a configurable lookup table
 
-**Smart charging plan**: For the next 3 days, the planner:
+**Geocoding** (for unknown destinations): Uses OpenStreetMap Nominatim (free, no API key) to estimate distances. Flow: destination name → geocode to coordinates → haversine straight-line distance → multiply by road factor (default 1.3) → estimated road km. Results are cached per session.
+
+**Known destinations** (configurable via `KNOWN_DESTINATIONS` JSON env var): Pre-mapped city→distance lookup for common trips (e.g., Münster 60 km, Aachen 80 km, STR 500 km). Falls back to geocoding for unknown destinations, then to a conservative 50 km default.
+
+**Trip clarification**: When the ev-forecast service can't determine if someone will use the EV (Hans for 100–350 km trips, unknown destinations), it publishes questions in German to `homelab/ev-forecast/clarification-needed`. Each clarification includes an `event_id` for tracking. The orchestrator forwards these to Telegram and routes user responses back via `homelab/ev-forecast/trip-response`.
+
+**Smart charging plan** (demand-focused): The planner expresses **demand** ("need X kWh by time Y"), not supply. PV optimization is left to the smart-ev-charging service. For the next 3 days, the planner:
 1. Calculates energy needed for each day's trips (distance × 22 kWh/100km)
-2. Adds safety buffer (min SoC at arrival + reserve)
-3. Compares to current SoC and PV forecast
-4. Chooses the best charge mode:
+2. Adds safety buffer (min SoC 20% + buffer 10% + min arrival SoC 15%)
+3. Compares required SoC to current SoC, tracks running SoC across days
+4. Assigns urgency: none → low → medium → high → critical (based on time-to-deadline)
+5. Chooses the best charge mode:
    - **PV Surplus** — no trips or SoC already sufficient
    - **Smart** — PV surplus + grid fill by departure deadline
-   - **Fast/Eco** — urgent, departure imminent
-5. Automatically sets the HA input helpers (`ev_charge_mode`, `ev_target_energy_kwh`, `ev_departure_time`, `ev_full_by_morning`) for the smart-ev-charging service
+   - **Fast/Eco** — urgent, departure imminent (<2 hours)
+6. Automatically sets the HA input helpers (`ev_charge_mode`, `ev_target_energy_kwh`, `ev_departure_time`, `ev_full_by_morning`) for the smart-ev-charging service
 
 **Data flow**: Audi Connect (SoC/range) + Google Calendar (trips) + PV Forecast (solar) → Charging Plan → HA Helpers → smart-ev-charging (wallbox control)
 
@@ -646,6 +664,47 @@ Continuously monitors all homelab services and infrastructure. Sends Telegram al
 **MQTT events**: `homelab/health-monitor/status`, `homelab/health-monitor/heartbeat`
 
 **Config** (env vars): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALERT_CHAT_IDS` (comma-separated chat IDs), `MONITORED_SERVICES` (comma-separated, default: all 4 services), `HEARTBEAT_TIMEOUT_SECONDS` (5 min), `INFRASTRUCTURE_CHECK_MINUTES` (5), `DIAGNOSTIC_RUN_MINUTES` (30), `DOCKER_CHECK_MINUTES` (2), `ALERT_COOLDOWN_MINUTES` (30), `DAILY_SUMMARY_HOUR` (8, -1 to disable), `WATCHED_ENTITIES` (comma-separated HA entity IDs to check for staleness).
+
+## Inter-Service Integration Patterns
+
+### Demand Publisher / Intelligent Coordinator
+
+Services follow a separation-of-concerns model: **data services publish demand**, the **orchestrator decides what to do**.
+
+Example: ev-forecast publishes "need 15 kWh by 07:00" via MQTT. The orchestrator decides whether to create a calendar event, send a Telegram notification, or both. The ev-forecast service never writes to the calendar directly — it only sets HA input helpers for the smart-ev-charging controller.
+
+### MQTT Thread → Asyncio Bridge
+
+MQTT callbacks (paho) run on a background thread, but services use asyncio. The orchestrator bridges this with:
+```python
+asyncio.run_coroutine_threadsafe(coro, self._loop)
+```
+This safely schedules async work (e.g., calendar API calls, Telegram messages) from synchronous MQTT handlers.
+
+### Shared State Dict
+
+Cross-component state within a service is shared via reference to a mutable dict:
+```python
+self._ev_state = {"plan": None, "pending_clarifications": []}
+```
+This dict is passed to Brain, ToolExecutor, and ProactiveEngine — all read/write the same object. MQTT handlers update it, LLM tools read it, and the proactive engine reacts to changes.
+
+### Service Chain: ev-forecast → smart-ev-charging
+
+The ev-forecast service writes HA input helpers (`ev_charge_mode`, `ev_target_energy_kwh`, `ev_departure_time`, `ev_full_by_morning`), which the smart-ev-charging service reads on its 30-second control loop. This decouples planning from execution — no direct MQTT dependency between the two.
+
+### EV Trip Clarification Flow
+
+Full lifecycle for ambiguous trip resolution:
+1. **ev-forecast** parses calendar, finds ambiguous trip (e.g., Hans 100–350 km)
+2. **ev-forecast** publishes to `homelab/ev-forecast/clarification-needed` with question in German
+3. **orchestrator** receives via MQTT, stores in `ev_state["pending_clarifications"]`
+4. **orchestrator** forwards question to Telegram via `ProactiveEngine.on_ev_clarification_needed()`
+5. **Brain** injects pending clarifications into LLM system prompt (with `event_id`)
+6. **User** responds naturally in Telegram chat
+7. **Brain** (LLM) recognizes context, calls `respond_to_ev_trip_clarification` tool with `event_id`
+8. **orchestrator** publishes answer to `homelab/ev-forecast/trip-response`
+9. **ev-forecast** receives response, calls `TripPredictor.resolve_clarification()`, updates plan
 
 ## Code Conventions
 

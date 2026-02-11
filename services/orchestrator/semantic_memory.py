@@ -20,7 +20,6 @@ Features:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import math
 import time
@@ -54,13 +53,15 @@ class EmbeddingProvider:
 
     async def embed(self, text: str) -> list[float]:
         """Return an embedding vector for *text*."""
-        # Try providers in preference order
+        errors: list[str] = []
         for fn in (self._embed_gemini, self._embed_openai):
             try:
                 return await fn(text)
-            except Exception:
+            except Exception as exc:
+                errors.append(f"{fn.__name__}: {exc}")
                 continue
-        raise RuntimeError("No embedding provider available")
+        logger.warning("all_embedding_providers_failed", errors=errors)
+        raise RuntimeError(f"No embedding provider available: {'; '.join(errors)}")
 
     async def _embed_gemini(self, text: str) -> list[float]:
         s = self._settings
@@ -68,15 +69,16 @@ class EmbeddingProvider:
         if not api_key:
             raise RuntimeError("No Gemini API key")
 
-        import google.generativeai as genai
+        from google import genai
+        from google.genai import types
 
-        genai.configure(api_key=api_key)
-        result = await asyncio.to_thread(
-            genai.embed_content,
-            model="models/text-embedding-004",
-            content=text,
+        client = genai.Client(api_key=api_key)
+        result = await client.aio.models.embed_content(
+            model="gemini-embedding-001",
+            contents=text,
+            config=types.EmbedContentConfig(output_dimensionality=768),
         )
-        return result["embedding"]
+        return list(result.embeddings[0].values)
 
     async def _embed_openai(self, text: str) -> list[float]:
         s = self._settings

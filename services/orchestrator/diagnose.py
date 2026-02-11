@@ -222,9 +222,10 @@ async def check_llm(settings) -> None:
 
         # Try a simple test call
         info("Testing LLM with a simple prompt...")
-        messages = [{"role": "user", "content": "Reply with exactly: OK"}]
-        response = await provider.generate(messages, tools=[])
-        text = response.get("text", "")
+        from llm.base import Message
+        messages = [Message(role="user", content="Reply with exactly: OK")]
+        response = await provider.chat(messages, tools=None)
+        text = response.content or ""
         result("LLM response", bool(text), f"Response: {text[:100]}")
 
     except ImportError as e:
@@ -278,7 +279,7 @@ async def check_telegram(settings) -> None:
 async def check_calendar(settings) -> None:
     header("Google Calendar")
     try:
-        from calendar import GoogleCalendarClient
+        from gcal import GoogleCalendarClient
         gcal = GoogleCalendarClient(
             credentials_file=settings.google_calendar_credentials_file,
             credentials_json=settings.google_calendar_credentials_json,

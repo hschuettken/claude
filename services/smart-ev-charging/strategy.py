@@ -35,9 +35,31 @@ class ChargingContext:
     pv_forecast_remaining_kwh: float  # remaining PV kWh expected today
     full_by_morning: bool
     departure_time: time | None
-    target_energy_kwh: float
+    target_energy_kwh: float   # manual fallback target (kWh to add)
     session_energy_kwh: float
+    ev_soc_pct: float | None           # EV battery SoC from car (None = unavailable)
+    ev_battery_capacity_kwh: float     # EV battery capacity (e.g. 77 kWh)
+    ev_target_soc_pct: float           # target SoC % (e.g. 80)
     now: datetime
+
+    @property
+    def energy_needed_kwh(self) -> float:
+        """kWh still needed to reach target.
+
+        Prefers SoC-based calculation when EV SoC is available;
+        falls back to manual target_energy_kwh vs session_energy_kwh.
+        """
+        if self.ev_soc_pct is not None and self.ev_battery_capacity_kwh > 0:
+            delta_pct = max(0.0, self.ev_target_soc_pct - self.ev_soc_pct)
+            return delta_pct / 100.0 * self.ev_battery_capacity_kwh
+        return max(0.0, self.target_energy_kwh - self.session_energy_kwh)
+
+    @property
+    def target_reached(self) -> bool:
+        """Whether the charging target has been reached."""
+        if self.ev_soc_pct is not None:
+            return self.ev_soc_pct >= self.ev_target_soc_pct
+        return self.session_energy_kwh >= self.target_energy_kwh
 
 
 @dataclass
@@ -125,9 +147,15 @@ class ChargingStrategy:
             self._reset()
             return ChargingDecision(0, "No vehicle connected")
 
-        # --- Target reached (when full-by-morning is set) ---
-        if ctx.full_by_morning and ctx.session_energy_kwh >= ctx.target_energy_kwh:
+        # --- Target SoC reached (applies to all modes when SoC is available) ---
+        if ctx.target_reached:
             self._reset()
+            if ctx.ev_soc_pct is not None:
+                return ChargingDecision(
+                    0,
+                    f"Target SoC reached ({ctx.ev_soc_pct:.0f}%"
+                    f" >= {ctx.ev_target_soc_pct:.0f}%)",
+                )
             return ChargingDecision(
                 0,
                 f"Target reached ({ctx.session_energy_kwh:.1f}"
@@ -242,7 +270,7 @@ class ChargingStrategy:
         if not ctx.departure_time:
             return base
 
-        remaining_kwh = max(0.0, ctx.target_energy_kwh - ctx.session_energy_kwh)
+        remaining_kwh = ctx.energy_needed_kwh
         if remaining_kwh <= 0:
             return base  # already handled by target-reached check above
 
