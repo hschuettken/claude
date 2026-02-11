@@ -123,6 +123,21 @@ services:
     networks:
       - homelab
 
+  health-monitor:
+    build:
+      context: .
+      dockerfile: services/health-monitor/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./shared:/app/shared:ro
+      - health_monitor_data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - mqtt
+    networks:
+      - homelab
+
   # --- Template for new services ---
   # my-new-service:
   #   build:
@@ -146,6 +161,7 @@ volumes:
   smart_ev_charging_data:
   ev_forecast_data:
   orchestrator_data:
+  health_monitor_data:
   mosquitto_data:
   # influxdb_data:
   # ollama_data:
