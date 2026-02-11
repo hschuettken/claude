@@ -207,6 +207,35 @@ class GoogleCalendarClient:
         return self._simplify_event(created)
 
     # ------------------------------------------------------------------
+    # Delete events
+    # ------------------------------------------------------------------
+
+    async def delete_event(
+        self,
+        calendar_id: str,
+        event_id: str,
+    ) -> bool:
+        """Delete an event from a calendar.
+
+        Returns True if deleted, False on error.
+        """
+        return await asyncio.to_thread(
+            self._delete_event_sync, calendar_id, event_id,
+        )
+
+    def _delete_event_sync(self, calendar_id: str, event_id: str) -> bool:
+        service = self._get_service()
+        try:
+            service.events().delete(
+                calendarId=calendar_id, eventId=event_id,
+            ).execute()
+            logger.info("calendar_event_deleted", calendar=calendar_id, event_id=event_id)
+            return True
+        except Exception:
+            logger.debug("calendar_event_delete_failed", event_id=event_id)
+            return False
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 

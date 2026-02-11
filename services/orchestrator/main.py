@@ -104,8 +104,13 @@ class OrchestratorService(BaseService):
         self.settings: OrchestratorSettings
         self._activity = ActivityTracker()
         self._service_states: dict[str, dict[str, Any]] = {}
+        # Shared EV state — updated by MQTT, read by tools and brain
+        self._ev_state: dict = {"plan": None, "pending_clarifications": []}
+        self._proactive: ProactiveEngine | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def run(self) -> None:
+        self._loop = asyncio.get_event_loop()
         self.mqtt.connect_background()
 
         # --- Initialize components ---
@@ -155,6 +160,7 @@ class OrchestratorService(BaseService):
             settings=self.settings,
             gcal=gcal if gcal.available else None,
             semantic=semantic,
+            ev_state=self._ev_state,
         )
 
         brain = Brain(
@@ -163,6 +169,7 @@ class OrchestratorService(BaseService):
             memory=memory,
             settings=self.settings,
             semantic=semantic,
+            ev_state=self._ev_state,
         )
 
         # Wire activity tracking into brain and tool executor
@@ -178,13 +185,24 @@ class OrchestratorService(BaseService):
             brain=brain,
             telegram=telegram,
             settings=self.settings,
+            gcal=gcal if gcal.available else None,
+            ev_state=self._ev_state,
         )
         # Wire activity tracker into proactive engine
         proactive._activity_tracker = self._activity
+        self._proactive = proactive
 
         # --- Subscribe to service events via MQTT ---
         self.mqtt.subscribe("homelab/+/heartbeat", self._on_service_heartbeat)
         self.mqtt.subscribe("homelab/+/updated", self._on_service_update)
+
+        # --- Subscribe to EV forecast events ---
+        self.mqtt.subscribe(
+            "homelab/ev-forecast/plan", self._on_ev_plan,
+        )
+        self.mqtt.subscribe(
+            "homelab/ev-forecast/clarification-needed", self._on_ev_clarification,
+        )
 
         # --- Register HA discovery entities ---
         self._register_ha_discovery()
@@ -232,6 +250,32 @@ class OrchestratorService(BaseService):
         """React to updates from other services (e.g. new PV forecast)."""
         self.logger.debug("service_update", topic=topic)
         self._touch_healthcheck()
+
+    def _on_ev_plan(self, topic: str, payload: dict) -> None:
+        """Handle new EV charging plan — update state and trigger calendar events."""
+        self._ev_state["plan"] = payload
+        self.logger.info(
+            "ev_plan_received",
+            days=len(payload.get("days", [])),
+            total_kwh=payload.get("total_energy_needed_kwh", 0),
+        )
+        if self._proactive and self._loop:
+            asyncio.run_coroutine_threadsafe(
+                self._proactive.on_ev_plan_update(payload), self._loop,
+            )
+
+    def _on_ev_clarification(self, topic: str, payload: dict) -> None:
+        """Handle EV trip clarification request — forward to users via Telegram."""
+        clarifications = payload.get("clarifications", [])
+        self._ev_state["pending_clarifications"] = clarifications
+        self.logger.info(
+            "ev_clarification_received", count=len(clarifications),
+        )
+        if self._proactive and self._loop:
+            asyncio.run_coroutine_threadsafe(
+                self._proactive.on_ev_clarification_needed(clarifications),
+                self._loop,
+            )
 
     # ------------------------------------------------------------------
     # Activity publishing

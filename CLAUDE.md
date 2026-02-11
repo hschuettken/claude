@@ -347,6 +347,8 @@ The central intelligence layer that coordinates all services, communicates with 
 - `get_pv_forecast` — Today/tomorrow solar forecast with hourly breakdown
 - `get_ev_charging_status` — Current EV charge mode, power, session energy
 - `set_ev_charge_mode` — Change EV charge mode (with user confirmation)
+- `get_ev_forecast_plan` — EV driving forecast, predicted trips, and charging plan (from ev-forecast service via MQTT)
+- `respond_to_ev_trip_clarification` — Forward user's answer to ev-forecast trip question
 - `get_weather_forecast` — Current weather and short-term forecast
 - `query_energy_history` — Historical data from InfluxDB (trends/analysis)
 - `call_ha_service` — Control any HA device (with user confirmation)
@@ -365,6 +367,8 @@ The central intelligence layer that coordinates all services, communicates with 
 - **Morning briefing** (configurable time) — weather, PV forecast, energy plan for the day
 - **Evening summary** — today's production, grid usage, savings
 - **Optimization alerts** — excess PV, idle EV, battery strategy opportunities
+- **EV charging calendar events** — auto-creates/updates events on orchestrator calendar when charging is needed
+- **EV trip clarification** — forwards ambiguous trip questions from ev-forecast to Telegram, routes answers back
 
 **Memory** (persistent in `/app/data/memory/`):
 - Per-user conversation history (with configurable max length)
@@ -430,7 +434,7 @@ The central intelligence layer that coordinates all services, communicates with 
 
 6. **Verify**: `docker compose restart orchestrator && docker compose logs -f orchestrator` → look for `google_calendar_enabled  family_cal=True  orchestrator_cal=True`
 
-**MQTT**: Subscribes to `homelab/+/heartbeat` and `homelab/+/updated` to track all service states.
+**MQTT**: Subscribes to `homelab/+/heartbeat` and `homelab/+/updated` to track all service states. Also subscribes to `homelab/ev-forecast/plan` (creates calendar events for charging needs) and `homelab/ev-forecast/clarification-needed` (forwards trip questions to users via Telegram).
 
 **HA entities** (via MQTT auto-discovery, "Home Orchestrator" device, 14 entities):
 - `binary_sensor` — Service online/offline, Proactive Suggestions enabled, Morning/Evening Briefing enabled
