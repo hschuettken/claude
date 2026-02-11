@@ -222,9 +222,10 @@ async def check_llm(settings) -> None:
 
         # Try a simple test call
         info("Testing LLM with a simple prompt...")
-        messages = [{"role": "user", "content": "Reply with exactly: OK"}]
-        response = await provider.generate(messages, tools=[])
-        text = response.get("text", "")
+        from llm.base import Message
+        messages = [Message(role="user", content="Reply with exactly: OK")]
+        response = await provider.chat(messages, tools=None)
+        text = response.content or ""
         result("LLM response", bool(text), f"Response: {text[:100]}")
 
     except ImportError as e:
