@@ -50,12 +50,14 @@ RANGE_STOP = "2025-10-08T00:00:00Z"
 OUTLIER_THRESHOLD_KWH = 500.0
 
 
-def query_sensor_data(client: InfluxDBClient, entity_id: str) -> list[dict]:
+def query_sensor_data(
+    client: InfluxDBClient, entity_id: str, range_start: str, range_stop: str,
+) -> list[dict]:
     """Query all data points for a sensor in the analysis window."""
     query_api = client.query_api()
     flux = f"""
 from(bucket: "{BUCKET}")
-  |> range(start: {RANGE_START}, stop: {RANGE_STOP})
+  |> range(start: {range_start}, stop: {range_stop})
   |> filter(fn: (r) => r["entity_id"] == "{entity_id}")
   |> filter(fn: (r) => r["_field"] == "value")
   |> sort(columns: ["_time"])
@@ -158,13 +160,16 @@ def delete_points(client: InfluxDBClient, entity_id: str, outliers: list[dict]) 
     return deleted
 
 
-def analyze_and_fix(client: InfluxDBClient, entity_id: str, apply: bool) -> int:
+def analyze_and_fix(
+    client: InfluxDBClient, entity_id: str, apply: bool,
+    range_start: str, range_stop: str, threshold: float,
+) -> int:
     """Analyze one sensor and optionally fix outliers. Returns outlier count."""
     print(f"\n{'='*60}")
     print(f"Sensor: {entity_id}")
     print(f"{'='*60}")
 
-    records = query_sensor_data(client, entity_id)
+    records = query_sensor_data(client, entity_id, range_start, range_stop)
     print(f"Data points in window: {len(records)}")
 
     if not records:
@@ -176,7 +181,7 @@ def analyze_and_fix(client: InfluxDBClient, entity_id: str, apply: bool) -> int:
     if values:
         print(f"Value range: {min(values):.2f} – {max(values):.2f} kWh")
 
-    outliers = find_outliers(records, OUTLIER_THRESHOLD_KWH)
+    outliers = find_outliers(records, threshold)
 
     if not outliers:
         print("No outliers found.")
@@ -230,10 +235,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    global RANGE_START, RANGE_STOP, OUTLIER_THRESHOLD_KWH
-    RANGE_START = args.start
-    RANGE_STOP = args.stop
-    OUTLIER_THRESHOLD_KWH = args.threshold
+    range_start = args.start
+    range_stop = args.stop
+    threshold = args.threshold
 
     if not INFLUXDB_TOKEN:
         print("ERROR: INFLUXDB_TOKEN not set. Check your .env file.", file=sys.stderr)
@@ -241,8 +245,8 @@ def main() -> None:
 
     print(f"InfluxDB: {INFLUXDB_URL}")
     print(f"Bucket:   {BUCKET}")
-    print(f"Window:   {RANGE_START} → {RANGE_STOP}")
-    print(f"Threshold: {OUTLIER_THRESHOLD_KWH} kWh")
+    print(f"Window:   {range_start} → {range_stop}")
+    print(f"Threshold: {threshold} kWh")
     print(f"Mode:     {'APPLY (will delete!)' if args.apply else 'DRY RUN'}")
 
     client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
@@ -251,12 +255,16 @@ def main() -> None:
         total_outliers = 0
 
         # Check total energy sensor
-        total_outliers += analyze_and_fix(client, ENTITY_ID, args.apply)
+        total_outliers += analyze_and_fix(
+            client, ENTITY_ID, args.apply, range_start, range_stop, threshold,
+        )
 
         # Check per-phase sensors
         if not args.total_only:
             for phase_entity in PHASE_ENTITIES:
-                total_outliers += analyze_and_fix(client, phase_entity, args.apply)
+                total_outliers += analyze_and_fix(
+                    client, phase_entity, args.apply, range_start, range_stop, threshold,
+                )
 
         print(f"\n{'='*60}")
         print(f"Total outliers found: {total_outliers}")
