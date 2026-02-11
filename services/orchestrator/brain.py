@@ -16,6 +16,7 @@ from shared.log import get_logger
 from config import OrchestratorSettings
 from llm.base import LLMProvider, LLMResponse, Message, ToolCall
 from memory import Memory
+from semantic_memory import SemanticMemory
 from tools import TOOL_DEFINITIONS, ToolExecutor
 
 logger = get_logger("brain")
@@ -51,6 +52,8 @@ Use the available tools to query real-time data. Do NOT guess sensor values.
 - Check and control EV charging (always confirm actions with user!)
 - Read weather forecasts
 - Store and recall user preferences (learn over time)
+- Search your long-term memory for past conversations, facts, and decisions (recall_memory)
+- Store important facts and knowledge for future recall (store_fact)
 - Send notifications to household members
 - Read the family Google Calendar (absences, business trips, appointments) — READ ONLY
 - Write to the orchestrator's own Google Calendar (reminders, scheduled actions)
@@ -81,11 +84,13 @@ class Brain:
         tool_executor: ToolExecutor,
         memory: Memory,
         settings: OrchestratorSettings,
+        semantic: SemanticMemory | None = None,
     ) -> None:
         self._llm = llm
         self._tools = tool_executor
         self._memory = memory
         self._settings = settings
+        self._semantic = semantic
         self._tz = ZoneInfo(settings.timezone)
         # Injected by OrchestratorService after construction
         self._activity_tracker: Any = None
@@ -111,9 +116,13 @@ class Brain:
         raw_history = self._memory.get_history(chat_id)
         history_msgs = self._history_to_messages(raw_history)
 
-        messages = [system_msg] + history_msgs + [
-            Message(role="user", content=user_message),
-        ]
+        # Inject relevant semantic memories as context
+        memory_context = await self._get_memory_context(user_message)
+
+        messages = [system_msg] + history_msgs
+        if memory_context:
+            messages.append(Message(role="system", content=memory_context))
+        messages.append(Message(role="user", content=user_message))
 
         logger.info(
             "processing_message",
@@ -121,6 +130,7 @@ class Brain:
             user=user_name,
             msg_len=len(user_message),
             history_len=len(history_msgs),
+            has_memory_context=bool(memory_context),
         )
 
         # Track message activity
@@ -133,6 +143,9 @@ class Brain:
         # Save conversation (only user + assistant text, not tool internals)
         self._memory.append_message(chat_id, "user", user_message)
         self._memory.append_message(chat_id, "assistant", final_text)
+
+        # Auto-store conversation in semantic memory (fire-and-forget)
+        await self._auto_store_conversation(user_message, final_text, user_name)
 
         return final_text
 
@@ -237,3 +250,157 @@ class Brain:
             if role in ("user", "assistant") and content:
                 messages.append(Message(role=role, content=content))
         return messages
+
+    # ------------------------------------------------------------------
+    # Semantic memory helpers
+    # ------------------------------------------------------------------
+
+    async def _get_memory_context(self, user_message: str) -> str:
+        """Search semantic memory for relevant context to inject."""
+        if not self._semantic or self._semantic.entry_count == 0:
+            return ""
+
+        try:
+            results = await self._semantic.search(user_message, top_k=3)
+        except Exception:
+            logger.debug("semantic_search_failed")
+            return ""
+
+        # Only include results with reasonable similarity
+        relevant = [r for r in results if r["similarity"] >= 0.5]
+        if not relevant:
+            return ""
+
+        lines = ["## Relevant memories from past conversations"]
+        for r in relevant:
+            age = r["age_days"]
+            age_str = f"{age:.0f}d ago" if age >= 1 else "today"
+            lines.append(
+                f"- [{r['category']}] ({age_str}, similarity={r['similarity']}): "
+                f"{r['text'][:300]}"
+            )
+        lines.append(
+            "\nUse these memories as context if relevant. "
+            "You can also use the recall_memory tool for more specific searches."
+        )
+        return "\n".join(lines)
+
+    async def _auto_store_conversation(
+        self, user_message: str, assistant_response: str, user_name: str,
+    ) -> None:
+        """Summarize and store the conversation turn in semantic memory.
+
+        Uses the LLM to distill the exchange into a concise memory entry
+        instead of storing raw text — produces better search results and
+        uses less storage.
+        """
+        if not self._semantic:
+            return
+
+        # Only store substantive exchanges (skip very short messages)
+        if len(user_message) < 15 and len(assistant_response) < 50:
+            return
+
+        # Use LLM to extract the key takeaway
+        summary = await self._summarize_for_memory(
+            user_message, assistant_response, user_name,
+        )
+        if not summary:
+            return
+
+        try:
+            await self._semantic.store(
+                summary,
+                category="conversation",
+                metadata={"user": user_name},
+            )
+        except Exception:
+            logger.debug("auto_store_failed")
+
+    async def _summarize_for_memory(
+        self, user_message: str, assistant_response: str, user_name: str,
+    ) -> str:
+        """Use the LLM to distill a conversation into a concise memory entry."""
+        prompt = (
+            "Summarize this conversation exchange in 1-2 sentences for long-term memory storage. "
+            "Focus on: key facts learned, decisions made, user preferences revealed, or actions taken. "
+            "Be specific — include names, numbers, entity names, and concrete details. "
+            "Write in third person. If nothing noteworthy happened, write 'trivial exchange'.\n\n"
+            f"User ({user_name}): {user_message[:600]}\n"
+            f"Assistant: {assistant_response[:600]}"
+        )
+        try:
+            response = await self._llm.chat(
+                [Message(role="user", content=prompt)],
+                tools=None,
+            )
+            summary = (response.content or "").strip()
+            # Fall back to raw text if LLM returns empty or very short
+            if len(summary) < 10 or summary.lower() == "trivial exchange":
+                return ""
+            return summary
+        except Exception:
+            logger.debug("summarization_failed_using_raw")
+            # Fall back to truncated raw text
+            return f"User ({user_name}): {user_message[:300]}\nAssistant: {assistant_response[:300]}"
+
+    async def consolidate_memories(self) -> int:
+        """Consolidate older conversation memories into denser entries.
+
+        Groups related memories and asks the LLM to merge them.
+        Returns the number of entries that were consolidated.
+        """
+        if not self._semantic:
+            return 0
+
+        entries = self._semantic.get_entries_for_consolidation(
+            category="conversation", min_age_days=1.0, limit=50,
+        )
+        if len(entries) < 5:
+            return 0  # not enough to consolidate
+
+        # Group entries into batches of ~10 for consolidation
+        batch_size = 10
+        total_consolidated = 0
+
+        for i in range(0, len(entries), batch_size):
+            batch = entries[i : i + batch_size]
+            if len(batch) < 3:
+                break
+
+            texts = "\n---\n".join(
+                f"[{e.get('category', 'conversation')}] {e['text']}" for e in batch
+            )
+            prompt = (
+                "You are consolidating long-term memory entries for a smart home orchestrator. "
+                "Below are several related memory entries from past conversations. "
+                "Merge them into 1-3 concise, information-dense summaries that preserve "
+                "all important facts, preferences, patterns, and decisions. "
+                "Drop redundant or trivial information. "
+                "Write each summary as a separate paragraph.\n\n"
+                f"Entries to consolidate:\n{texts}"
+            )
+
+            try:
+                response = await self._llm.chat(
+                    [Message(role="user", content=prompt)],
+                    tools=None,
+                )
+                consolidated_text = (response.content or "").strip()
+                if len(consolidated_text) < 20:
+                    continue
+
+                old_ids = [e["id"] for e in batch]
+                await self._semantic.replace_with_consolidated(
+                    old_ids, consolidated_text, category="conversation",
+                )
+                total_consolidated += len(old_ids)
+                logger.info(
+                    "batch_consolidated",
+                    merged=len(old_ids),
+                    summary_len=len(consolidated_text),
+                )
+            except Exception:
+                logger.exception("consolidation_batch_failed")
+
+        return total_consolidated

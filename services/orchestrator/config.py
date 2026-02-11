@@ -73,6 +73,7 @@ class OrchestratorSettings(BaseSettings):
 
     # --- Memory ---
     max_conversation_history: int = 50
+    enable_semantic_memory: bool = True  # vector-based long-term memory
 
     # --- Household info ---
     household_users: str = "Hans,Nicole"  # comma-separated

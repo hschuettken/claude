@@ -29,6 +29,7 @@ from config import OrchestratorSettings
 from llm import create_provider
 from memory import Memory
 from proactive import ProactiveEngine
+from semantic_memory import EmbeddingProvider, SemanticMemory
 from tools import ToolExecutor
 
 HEALTHCHECK_FILE = Path("/app/data/healthcheck")
@@ -116,6 +117,21 @@ class OrchestratorService(BaseService):
             provider=self.settings.llm_provider,
         )
 
+        # --- Semantic memory (optional) ---
+        semantic: SemanticMemory | None = None
+        if self.settings.enable_semantic_memory:
+            embedder = EmbeddingProvider(
+                provider=self.settings.llm_provider,
+                settings=self.settings,
+            )
+            semantic = SemanticMemory(embedder)
+            self.logger.info(
+                "semantic_memory_enabled",
+                entries=semantic.entry_count,
+            )
+        else:
+            self.logger.info("semantic_memory_disabled")
+
         # --- Google Calendar (optional) ---
         gcal = GoogleCalendarClient(
             credentials_file=self.settings.google_calendar_credentials_file,
@@ -138,6 +154,7 @@ class OrchestratorService(BaseService):
             memory=memory,
             settings=self.settings,
             gcal=gcal if gcal.available else None,
+            semantic=semantic,
         )
 
         brain = Brain(
@@ -145,6 +162,7 @@ class OrchestratorService(BaseService):
             tool_executor=tool_executor,
             memory=memory,
             settings=self.settings,
+            semantic=semantic,
         )
 
         # Wire activity tracking into brain and tool executor

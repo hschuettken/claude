@@ -21,6 +21,7 @@ from shared.mqtt_client import MQTTClient
 from calendar import GoogleCalendarClient
 from config import OrchestratorSettings
 from memory import Memory
+from semantic_memory import SemanticMemory
 
 logger = get_logger("tools")
 
@@ -343,6 +344,78 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "recall_memory",
+            "description": (
+                "Search your long-term semantic memory for relevant past conversations, "
+                "learned facts, and previous decisions. Use this when the user references "
+                "something from the past ('last time', 'remember when', 'as I said before') "
+                "or when you need historical context to answer a question better."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "What to search for — a natural-language description of the "
+                            "information you need (e.g. 'Hans sauna preferences', "
+                            "'EV charging decisions last week', 'Nicole business trips')."
+                        ),
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": ["conversation", "fact", "decision"],
+                        "description": (
+                            "Optional category filter: 'conversation' for past exchanges, "
+                            "'fact' for stored knowledge, 'decision' for past orchestrator decisions."
+                        ),
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of results to return (default: 5)",
+                        "default": 5,
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "store_fact",
+            "description": (
+                "Store an important fact, user preference, or piece of knowledge in long-term "
+                "semantic memory. Use this when you learn something worth remembering across "
+                "conversations — e.g. user habits, important decisions, household rules. "
+                "This is different from set_user_preference (key-value pairs) — store_fact "
+                "stores free-text knowledge that can be semantically searched later."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": (
+                            "The fact or knowledge to store. Be specific and include context. "
+                            "Example: 'Hans prefers to charge the EV overnight when electricity "
+                            "is cheaper, unless there is enough PV forecast for tomorrow.'"
+                        ),
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": ["fact", "decision"],
+                        "description": "Category: 'fact' for knowledge, 'decision' for orchestrator decisions",
+                        "default": "fact",
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+    },
 ]
 
 
@@ -362,6 +435,7 @@ class ToolExecutor:
         memory: Memory,
         settings: OrchestratorSettings,
         gcal: GoogleCalendarClient | None = None,
+        semantic: SemanticMemory | None = None,
         send_notification_fn: Any = None,
     ) -> None:
         self.ha = ha
@@ -370,6 +444,7 @@ class ToolExecutor:
         self.memory = memory
         self.settings = settings
         self.gcal = gcal
+        self.semantic = semantic
         self._send_notification = send_notification_fn
         self._tz = ZoneInfo(settings.timezone)
         # Injected by OrchestratorService after construction
@@ -720,6 +795,34 @@ class ToolExecutor:
         except Exception:
             result["epex_spot_ct_kwh"] = "unavailable"
         return result
+
+    async def _tool_recall_memory(
+        self, query: str, category: str | None = None, top_k: int = 5,
+    ) -> dict[str, Any]:
+        if not self.semantic:
+            return {"error": "Semantic memory not enabled"}
+        results = await self.semantic.search(query, top_k=top_k, category=category)
+        return {
+            "query": query,
+            "result_count": len(results),
+            "memories": results,
+            "total_stored": self.semantic.entry_count,
+        }
+
+    async def _tool_store_fact(
+        self, text: str, category: str = "fact",
+    ) -> dict[str, Any]:
+        if not self.semantic:
+            return {"error": "Semantic memory not enabled"}
+        entry_id = await self.semantic.store(text, category=category)
+        if not entry_id:
+            return {"error": "Failed to store — embedding provider unavailable"}
+        return {
+            "success": True,
+            "id": entry_id,
+            "category": category,
+            "total_stored": self.semantic.entry_count,
+        }
 
     # ------------------------------------------------------------------
     # Helpers
