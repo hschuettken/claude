@@ -50,6 +50,8 @@ Use the available tools to query real-time data. Do NOT guess sensor values.
 - Query historical energy data from InfluxDB
 - Get PV production forecasts (today, tomorrow, per-hour)
 - Check and control EV charging (always confirm actions with user!)
+- Read the EV forecast plan (predicted trips, energy needs, charging recommendations)
+- Respond to EV trip clarification requests from the ev-forecast service
 - Read weather forecasts
 - Store and recall user preferences (learn over time)
 - Search your long-term memory for past conversations, facts, and decisions (recall_memory)
@@ -85,12 +87,14 @@ class Brain:
         memory: Memory,
         settings: OrchestratorSettings,
         semantic: SemanticMemory | None = None,
+        ev_state: dict[str, Any] | None = None,
     ) -> None:
         self._llm = llm
         self._tools = tool_executor
         self._memory = memory
         self._settings = settings
         self._semantic = semantic
+        self._ev_state = ev_state or {}
         self._tz = ZoneInfo(settings.timezone)
         # Injected by OrchestratorService after construction
         self._activity_tracker: Any = None
@@ -227,7 +231,7 @@ class Brain:
         day_en = now.strftime("%A")
         day_name = f"{day_en} ({days_de.get(day_en, day_en)})"
 
-        return SYSTEM_PROMPT_TEMPLATE.format(
+        prompt = SYSTEM_PROMPT_TEMPLATE.format(
             user_profiles=self._memory.get_all_profiles_summary(),
             grid_price=self._settings.grid_price_ct,
             feed_in=self._settings.feed_in_tariff_ct,
@@ -236,9 +240,40 @@ class Brain:
             day_of_week=day_name,
         )
 
+        ev_ctx = self._build_ev_context()
+        if ev_ctx:
+            prompt += "\n" + ev_ctx
+
+        return prompt
+
     # ------------------------------------------------------------------
     # History conversion
     # ------------------------------------------------------------------
+
+    def _build_ev_context(self) -> str:
+        """Build system prompt context for pending EV trip clarifications."""
+        if not self._ev_state:
+            return ""
+
+        pending = self._ev_state.get("pending_clarifications", [])
+        if not pending:
+            return ""
+
+        lines = [
+            "## Pending EV Trip Clarifications",
+            f"The ev-forecast service has {len(pending)} pending question(s):",
+        ]
+        for c in pending:
+            lines.append(
+                f"- {c.get('person', '?')} \u2192 {c.get('destination', '?')} "
+                f"on {c.get('date', '?')} (est. {c.get('estimated_distance_km', '?')} km "
+                f"one way, event_id: \"{c.get('event_id', '')}\")"
+            )
+        lines.append(
+            "When a user responds to one of these, use the "
+            "respond_to_ev_trip_clarification tool with the event_id."
+        )
+        return "\n".join(lines)
 
     @staticmethod
     def _history_to_messages(raw: list[dict[str, Any]]) -> list[Message]:

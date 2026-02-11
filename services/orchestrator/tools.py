@@ -309,6 +309,50 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "get_ev_forecast_plan",
+            "description": (
+                "Get the current EV driving forecast and charging plan from the ev-forecast "
+                "service. Shows predicted trips (who, where, when, km), energy needs per day, "
+                "charging urgency, and recommended charge modes for the next 3 days. "
+                "This is the demand-side plan — the smart-ev-charging service handles wallbox control."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "respond_to_ev_trip_clarification",
+            "description": (
+                "Respond to a pending EV trip clarification from the ev-forecast service. "
+                "When the service is unsure whether someone will use the EV for a trip "
+                "(e.g., Hans for medium-distance trips), it sends a question via Telegram. "
+                "Use this tool to forward the user's answer back to the ev-forecast service."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event_id": {
+                        "type": "string",
+                        "description": "The event_id from the pending clarification",
+                    },
+                    "use_ev": {
+                        "type": "boolean",
+                        "description": "Whether the person will use the EV for this trip",
+                    },
+                    "distance_km": {
+                        "type": "number",
+                        "description": "One-way distance in km (if the user provides it, otherwise 0)",
+                        "default": 0,
+                    },
+                },
+                "required": ["event_id", "use_ev"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_calendar_event",
             "description": (
                 "Create an event on the orchestrator's calendar. Use for reminders, "
@@ -437,6 +481,7 @@ class ToolExecutor:
         gcal: GoogleCalendarClient | None = None,
         semantic: SemanticMemory | None = None,
         send_notification_fn: Any = None,
+        ev_state: dict[str, Any] | None = None,
     ) -> None:
         self.ha = ha
         self.influx = influx
@@ -446,6 +491,7 @@ class ToolExecutor:
         self.gcal = gcal
         self.semantic = semantic
         self._send_notification = send_notification_fn
+        self._ev_state = ev_state or {}
         self._tz = ZoneInfo(settings.timezone)
         # Injected by OrchestratorService after construction
         self._activity_tracker: Any = None
@@ -776,6 +822,58 @@ class ToolExecutor:
             reasoning="User requested via orchestrator",
         )
         return {"success": True, "event": event}
+
+    async def _tool_get_ev_forecast_plan(self) -> dict[str, Any]:
+        plan = self._ev_state.get("plan")
+        if not plan:
+            return {
+                "error": (
+                    "No EV forecast plan available. "
+                    "The ev-forecast service may not be running."
+                ),
+            }
+        return plan
+
+    async def _tool_respond_to_ev_trip_clarification(
+        self,
+        event_id: str,
+        use_ev: bool,
+        distance_km: float = 0,
+    ) -> dict[str, Any]:
+        self.mqtt.publish("homelab/ev-forecast/trip-response", {
+            "event_id": event_id,
+            "use_ev": use_ev,
+            "distance_km": distance_km,
+        })
+
+        # Find the clarification details for logging
+        pending = self._ev_state.get("pending_clarifications", [])
+        clarification = next(
+            (c for c in pending if c.get("event_id") == event_id), {},
+        )
+        # Remove resolved clarification from state
+        self._ev_state["pending_clarifications"] = [
+            c for c in pending if c.get("event_id") != event_id
+        ]
+
+        person = clarification.get("person", "?")
+        destination = clarification.get("destination", "?")
+        action = "uses" if use_ev else "does not use"
+
+        self.memory.log_decision(
+            context=f"EV trip clarification: {person} \u2192 {destination}",
+            decision=f"{person} {action} EV for trip to {destination}",
+            reasoning=f"User confirmed via Telegram (distance: {distance_km} km)",
+        )
+
+        return {
+            "success": True,
+            "event_id": event_id,
+            "person": person,
+            "destination": destination,
+            "use_ev": use_ev,
+            "distance_km": distance_km,
+        }
 
     async def _tool_get_energy_prices(self) -> dict[str, Any]:
         s = self.settings
