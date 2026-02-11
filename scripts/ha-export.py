@@ -210,6 +210,118 @@ def _fmt_extra_attrs(attrs: dict[str, Any], domain: str) -> str:
     return "; ".join(parts)
 
 
+def _fmt_selector(selector: dict[str, Any] | None) -> str:
+    """Extract a human-readable type string from a HA service field selector."""
+    if not selector:
+        return ""
+    parts: list[str] = []
+    for sel_type, sel_val in selector.items():
+        if sel_type == "number":
+            info = sel_type
+            constraints: list[str] = []
+            if isinstance(sel_val, dict):
+                if "min" in sel_val:
+                    constraints.append(f"min={sel_val['min']}")
+                if "max" in sel_val:
+                    constraints.append(f"max={sel_val['max']}")
+                if "step" in sel_val:
+                    constraints.append(f"step={sel_val['step']}")
+                if "unit_of_measurement" in sel_val:
+                    constraints.append(sel_val["unit_of_measurement"])
+            if constraints:
+                info += f" ({', '.join(constraints)})"
+            parts.append(info)
+        elif sel_type == "select":
+            if isinstance(sel_val, dict) and "options" in sel_val:
+                opts = sel_val["options"]
+                # Options can be strings or dicts with "value"/"label"
+                labels = []
+                for o in opts[:6]:
+                    labels.append(o.get("value", str(o)) if isinstance(o, dict) else str(o))
+                text = ", ".join(labels)
+                if len(opts) > 6:
+                    text += f" (+{len(opts) - 6})"
+                parts.append(f"select [{text}]")
+            else:
+                parts.append("select")
+        elif sel_type == "boolean":
+            parts.append("boolean")
+        elif sel_type == "text":
+            if isinstance(sel_val, dict) and sel_val.get("multiline"):
+                parts.append("text (multiline)")
+            else:
+                parts.append("text")
+        elif sel_type == "time":
+            parts.append("time")
+        elif sel_type == "date":
+            parts.append("date")
+        elif sel_type == "datetime":
+            parts.append("datetime")
+        elif sel_type == "color_rgb":
+            parts.append("RGB color")
+        elif sel_type == "color_temp":
+            info = "color_temp"
+            if isinstance(sel_val, dict):
+                constraints = []
+                if "min_mireds" in sel_val:
+                    constraints.append(f"min={sel_val['min_mireds']}")
+                if "max_mireds" in sel_val:
+                    constraints.append(f"max={sel_val['max_mireds']}")
+                if constraints:
+                    info += f" mireds ({', '.join(constraints)})"
+            parts.append(info)
+        elif sel_type == "entity":
+            if isinstance(sel_val, dict) and "domain" in sel_val:
+                dom = sel_val["domain"]
+                if isinstance(dom, list):
+                    dom = ", ".join(dom)
+                parts.append(f"entity ({dom})")
+            else:
+                parts.append("entity")
+        elif sel_type == "device":
+            parts.append("device")
+        elif sel_type == "area":
+            parts.append("area")
+        elif sel_type == "target":
+            parts.append("target")
+        elif sel_type == "object":
+            parts.append("object")
+        elif sel_type == "action":
+            parts.append("action")
+        else:
+            parts.append(sel_type)
+    return ", ".join(parts)
+
+
+def _fmt_target(target: dict[str, Any] | None) -> str:
+    """Format the target specification of a service."""
+    if not target:
+        return ""
+    parts: list[str] = []
+    if "entity" in target:
+        entities = target["entity"]
+        if isinstance(entities, list):
+            domains = []
+            for e in entities:
+                if isinstance(e, dict) and "domain" in e:
+                    d = e["domain"]
+                    if isinstance(d, list):
+                        domains.extend(d)
+                    else:
+                        domains.append(d)
+            if domains:
+                parts.append(f"entity: {', '.join(domains)}")
+            else:
+                parts.append("entity")
+        else:
+            parts.append("entity")
+    if "device" in target:
+        parts.append("device")
+    if "area" in target:
+        parts.append("area")
+    return "; ".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Lookup builders
 # ---------------------------------------------------------------------------
@@ -385,20 +497,67 @@ def generate_markdown(
 
         lines.append(f"### {domain}\n")
         lines.append(f"{len(svcs)} services\n")
-        lines.append("| Service | Description | Fields |")
-        lines.append("|---------|-------------|--------|")
 
         for svc_name, svc_info in sorted(svcs.items()):
-            desc = _esc(_trunc(svc_info.get("description", ""), 80))
-            fields = svc_info.get("fields", {})
-            field_names = ", ".join(sorted(fields.keys())[:10])
-            if len(fields) > 10:
-                field_names += f", … (+{len(fields) - 10})"
-            lines.append(
-                f"| `{domain}.{svc_name}` | {desc} | {_esc(field_names)} |"
-            )
+            svc_display_name = svc_info.get("name", svc_name)
+            desc = svc_info.get("description", "")
 
-        lines.append("")
+            lines.append(f"#### `{domain}.{svc_name}`")
+            if svc_display_name and svc_display_name != svc_name:
+                lines.append(f"**{_esc(svc_display_name)}**\n")
+            else:
+                lines.append("")
+
+            if desc:
+                lines.append(f"{_esc(desc)}\n")
+
+            # Target info
+            target = svc_info.get("target")
+            target_str = _fmt_target(target)
+            if target_str:
+                lines.append(f"**Target**: {target_str}\n")
+
+            # Fields table
+            fields = svc_info.get("fields", {})
+            if fields:
+                lines.append("| Field | Description | Required | Type |")
+                lines.append("|-------|-------------|----------|------|")
+
+                for fname, finfo in sorted(fields.items()):
+                    if not isinstance(finfo, dict):
+                        continue
+                    fdesc = _esc(_trunc(finfo.get("description", ""), 60))
+                    freq = "yes" if finfo.get("required") else ""
+                    fsel = _esc(_fmt_selector(finfo.get("selector")))
+
+                    # Handle "advanced_fields" or "fields" sub-groups
+                    # (HA nests some fields under a group key)
+                    if "fields" in finfo and "selector" not in finfo:
+                        # This is a field group — expand its children
+                        sub_fields = finfo.get("fields", {})
+                        if sub_fields:
+                            group_desc = _esc(_trunc(finfo.get("description", fname), 60))
+                            lines.append(
+                                f"| **{fname}** | *{group_desc}* | | *group* |"
+                            )
+                            for sf_name, sf_info in sorted(sub_fields.items()):
+                                if not isinstance(sf_info, dict):
+                                    continue
+                                sf_desc = _esc(_trunc(sf_info.get("description", ""), 55))
+                                sf_req = "yes" if sf_info.get("required") else ""
+                                sf_sel = _esc(_fmt_selector(sf_info.get("selector")))
+                                lines.append(
+                                    f"|  ↳ {sf_name} | {sf_desc} | {sf_req} | {sf_sel} |"
+                                )
+                        continue
+
+                    lines.append(
+                        f"| {fname} | {fdesc} | {freq} | {fsel} |"
+                    )
+
+                lines.append("")
+            else:
+                lines.append("*No fields*\n")
 
     # ===== Devices =====
     if devices_list:
