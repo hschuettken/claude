@@ -1,0 +1,3 @@
+# Health monitor service dependencies.
+# Base dependencies (httpx, paho-mqtt, pydantic, structlog) are in the base image.
+# No additional dependencies needed — Docker API is accessed via raw HTTP over Unix socket.

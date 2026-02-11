@@ -90,6 +90,15 @@ This file provides guidance for AI assistants working with this repository.
 │   │   ├── planner.py                       #   Smart charging plan generator
 │   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
 │   │   └── diagnose.py                      #   Step-by-step connectivity/data diagnostic
+│   ├── health-monitor/                      #   Health monitoring & alerting
+│   │   ├── Dockerfile
+│   │   ├── requirements.txt                 #   No extra deps (uses httpx for Docker API)
+│   │   ├── main.py                          #   Entry point (HealthMonitorService)
+│   │   ├── config.py                        #   Health monitor settings
+│   │   ├── checks.py                        #   Infrastructure + Docker + diagnostic checks
+│   │   ├── alerts.py                        #   Telegram alerting with cooldown
+│   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
+│   │   └── diagnose.py                      #   Self-diagnostic
 │   └── example-service/                     #   Template service
 │       ├── Dockerfile
 │       ├── requirements.txt                 #   Service-specific deps only
@@ -172,12 +181,16 @@ docker compose run --rm smart-ev-charging python diagnose.py --step wallbox  # t
 
 docker compose run --rm ev-forecast python diagnose.py               # test everything
 docker compose run --rm ev-forecast python diagnose.py --step audi   # test just Audi Connect
+
+docker compose run --rm health-monitor python diagnose.py            # test everything
+docker compose run --rm health-monitor python diagnose.py --step docker  # test just Docker
 ```
 
 orchestrator steps: `config`, `ha`, `mqtt`, `llm`, `telegram`, `calendar`, `memory`, `services`, `all`
 pv-forecast steps: `config`, `ha`, `influx`, `mqtt`, `weather`, `forecast`, `all`
 smart-ev-charging steps: `config`, `ha`, `wallbox`, `energy`, `mqtt`, `cycle`, `all`
 ev-forecast steps: `config`, `ha`, `audi`, `mqtt`, `calendar`, `geocoding`, `plan`, `all`
+health-monitor steps: `config`, `ha`, `mqtt`, `docker`, `telegram`, `all`
 
 ### Debugging with VS Code
 
@@ -606,6 +619,33 @@ Monitors the Audi A6 e-tron (83 kWh gross / 76 kWh net) via dual Audi Connect ac
 **HA YAML** (`HomeAssistant_config/ev_audi_connect.yaml`): Template sensors that combine both Audi Connect accounts into unified entities (`sensor.ev_state_of_charge`, `sensor.ev_range`, `sensor.ev_charging_state`, `sensor.ev_plug_state`, `sensor.ev_mileage`, `sensor.ev_active_account`, `binary_sensor.ev_plugged_in`, `binary_sensor.ev_is_charging`).
 
 **Config** (env vars): `EV_BATTERY_CAPACITY_GROSS_KWH`, `EV_BATTERY_CAPACITY_NET_KWH`, `EV_CONSUMPTION_KWH_PER_100KM`, `AUDI_ACCOUNT1_*` / `AUDI_ACCOUNT2_*` (entity IDs per account), `NICOLE_COMMUTE_KM`, `NICOLE_COMMUTE_DAYS`, `HANS_TRAIN_THRESHOLD_KM`, `KNOWN_DESTINATIONS` (JSON), `MIN_SOC_PCT`, `BUFFER_SOC_PCT`, `PLAN_UPDATE_MINUTES`, `VEHICLE_CHECK_MINUTES`. Uses same `GOOGLE_CALENDAR_*` credentials as the orchestrator.
+
+### health-monitor — Health Monitoring & Telegram Alerting
+
+Continuously monitors all homelab services and infrastructure. Sends Telegram alerts when issues are detected and daily health summaries.
+
+**Monitoring capabilities:**
+- **MQTT heartbeats** — tracks all services via `homelab/+/heartbeat`, detects offline transitions (no heartbeat for 5 min)
+- **Docker container health** — checks container status (healthy/unhealthy/restarting) and restart counts via Docker socket
+- **Infrastructure connectivity** — periodically tests HA API and InfluxDB health endpoint
+- **HA entity staleness** — monitors key entities for `unavailable`/`unknown` states
+- **Diagnostic execution** — runs `diagnose.py --step all` inside each service's container via `docker exec`
+
+**Alert behaviour:**
+- Per-issue cooldown (default 30 min) to avoid spam
+- Recovery notifications when issues resolve
+- Daily health summary at configurable hour (default 08:00)
+- Severity levels: critical (service down, HA unreachable), warning (unhealthy container, stale entity), info (startup)
+
+**Docker socket**: Requires `/var/run/docker.sock` mounted read-only. Used to check container health status and exec diagnose.py inside running containers. Without the socket, heartbeat and infrastructure monitoring still work.
+
+**HA entities** (via MQTT auto-discovery, "Health Monitor" device, 8 entities):
+- `binary_sensor` — Service online/offline, HA Connectivity, InfluxDB Connectivity
+- `sensor` — Services Online, Services Monitored, Active Issues, Uptime, Last Health Check
+
+**MQTT events**: `homelab/health-monitor/status`, `homelab/health-monitor/heartbeat`
+
+**Config** (env vars): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALERT_CHAT_IDS` (comma-separated chat IDs), `MONITORED_SERVICES` (comma-separated, default: all 4 services), `HEARTBEAT_TIMEOUT_SECONDS` (5 min), `INFRASTRUCTURE_CHECK_MINUTES` (5), `DIAGNOSTIC_RUN_MINUTES` (30), `DOCKER_CHECK_MINUTES` (2), `ALERT_COOLDOWN_MINUTES` (30), `DAILY_SUMMARY_HOUR` (8, -1 to disable), `WATCHED_ENTITIES` (comma-separated HA entity IDs to check for staleness).
 
 ## Code Conventions
 
