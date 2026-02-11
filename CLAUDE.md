@@ -85,7 +85,8 @@ This file provides guidance for AI assistants working with this repository.
 │   │   ├── vehicle.py                       #   Dual Audi Connect account handling
 │   │   ├── trips.py                         #   Calendar-based trip prediction
 │   │   ├── planner.py                       #   Smart charging plan generator
-│   │   └── healthcheck.py                   #   Docker HEALTHCHECK script
+│   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
+│   │   └── diagnose.py                      #   Step-by-step connectivity/data diagnostic
 │   └── example-service/                     #   Template service
 │       ├── Dockerfile
 │       ├── requirements.txt                 #   Service-specific deps only
@@ -158,9 +159,13 @@ docker compose logs -f pv-forecast       # watch output
 ```bash
 docker compose run --rm pv-forecast python diagnose.py            # test everything
 docker compose run --rm pv-forecast python diagnose.py --step ha  # test just HA
+
+docker compose run --rm ev-forecast python diagnose.py            # test everything
+docker compose run --rm ev-forecast python diagnose.py --step audi  # test just Audi Connect
 ```
 
-Steps: `config`, `ha`, `influx`, `mqtt`, `weather`, `forecast`, `all`
+pv-forecast steps: `config`, `ha`, `influx`, `mqtt`, `weather`, `forecast`, `all`
+ev-forecast steps: `config`, `ha`, `audi`, `mqtt`, `calendar`, `geocoding`, `plan`, `all`
 
 ### Debugging with VS Code
 

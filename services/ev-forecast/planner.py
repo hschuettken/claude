@@ -1,14 +1,18 @@
 """Smart charging plan generator.
 
-Takes vehicle state, predicted trips, PV forecast, and generates an optimal
-charging plan that:
-- Ensures enough SoC for each day's driving with safety buffer
-- Maximizes PV self-consumption (charge during solar hours)
-- Falls back to grid charging when needed (overnight before departure)
-- Sets HA input helpers for the smart-ev-charging service
+Takes vehicle state and predicted trips to generate a demand-focused
+charging plan. The planner calculates:
+- How much energy is needed for each day's trips
+- When the car needs to be ready (departure time)
+- The urgency level based on current SoC vs. required SoC
 
-The planner outputs a ChargingPlan with day-by-day recommendations and
-directly sets the HA helpers (charge mode, target energy, departure time).
+It then sets the HA input helpers (charge mode, target energy, departure
+time, full-by-morning) for the smart-ev-charging service, which handles
+the actual PV surplus optimization and wallbox control.
+
+Design principle: This service expresses DEMAND ("need X kWh by time Y"),
+not supply decisions. The smart-ev-charging service and orchestrator
+handle the supply side (PV surplus, grid charging, timing).
 """
 
 from __future__ import annotations
@@ -40,15 +44,14 @@ class DayChargingRecommendation:
     charge_mode: str               # Recommended charge mode
     departure_time: time | None    # When car leaves
     charge_by: time | None         # Must be charged by this time
-    pv_expected_kwh: float         # PV forecast for the day
-    use_pv_charging: bool          # Can we rely on PV?
+    urgency: str                   # "none" | "low" | "medium" | "high" | "critical"
     reason: str                    # Human-readable explanation
 
     @property
     def label(self) -> str:
         trips_str = ", ".join(t.label for t in self.trips)
         return (
-            f"{self.date}: {self.charge_mode} | "
+            f"{self.date}: {self.charge_mode} [{self.urgency}] | "
             f"need {self.energy_needed_kwh:.1f} kWh, "
             f"charge {self.energy_to_charge_kwh:.1f} kWh | "
             f"{trips_str or 'no trips'}"
@@ -101,8 +104,7 @@ class ChargingPlan:
                     "energy_to_charge_kwh": round(d.energy_to_charge_kwh, 1),
                     "charge_mode": d.charge_mode,
                     "departure_time": d.departure_time.strftime("%H:%M") if d.departure_time else None,
-                    "pv_expected_kwh": round(d.pv_expected_kwh, 1),
-                    "use_pv_charging": d.use_pv_charging,
+                    "urgency": d.urgency,
                     "reason": d.reason,
                 }
                 for d in self.days
@@ -111,7 +113,7 @@ class ChargingPlan:
 
 
 class ChargingPlanner:
-    """Generates optimal charging plans from vehicle state and trip predictions."""
+    """Generates demand-focused charging plans from vehicle state and trips."""
 
     def __init__(
         self,
@@ -133,14 +135,12 @@ class ChargingPlanner:
         self,
         vehicle: VehicleState,
         day_plans: list[DayPlan],
-        pv_forecast: dict[str, float],
     ) -> ChargingPlan:
-        """Generate a multi-day charging plan.
+        """Generate a multi-day charging plan based purely on demand.
 
         Args:
             vehicle: Current vehicle state (SoC, plug, etc.)
             day_plans: Trip predictions per day
-            pv_forecast: {"today": kWh, "today_remaining": kWh, "tomorrow": kWh}
         """
         now = datetime.now(self._tz)
         current_soc = vehicle.soc_pct
@@ -158,24 +158,10 @@ class ChargingPlanner:
         running_energy = current_energy if current_energy is not None else self._soc_to_kwh(50.0)
 
         for i, day_plan in enumerate(day_plans):
-            # Get PV forecast for this day
-            if i == 0:
-                pv_kwh = pv_forecast.get("today_remaining", 0.0)
-                pv_total = pv_forecast.get("today", 0.0)
-            elif i == 1:
-                pv_kwh = pv_forecast.get("tomorrow", 0.0)
-                pv_total = pv_kwh
-            else:
-                # Beyond tomorrow — estimate from today as rough baseline
-                pv_kwh = pv_forecast.get("tomorrow", 0.0) * 0.8
-                pv_total = pv_kwh
-
             rec = self._plan_day(
                 day_plan=day_plan,
                 running_soc=running_soc,
                 running_energy=running_energy,
-                pv_kwh=pv_kwh,
-                pv_total=pv_total,
                 is_today=(i == 0),
                 is_tomorrow=(i == 1),
                 now=now,
@@ -216,7 +202,7 @@ class ChargingPlanner:
         except Exception:
             logger.exception("set_charge_mode_failed")
 
-        # Set full-by-morning
+        # Set full-by-morning (enable when Smart mode needs charging)
         enable_fbm = immediate.charge_mode == "Smart" and immediate.energy_to_charge_kwh > 0
         try:
             service = "turn_on" if enable_fbm else "turn_off"
@@ -251,6 +237,7 @@ class ChargingPlanner:
             mode=immediate.charge_mode,
             target_kwh=round(immediate.energy_to_charge_kwh, 1),
             departure=immediate.departure_time.strftime("%H:%M") if immediate.departure_time else "none",
+            urgency=immediate.urgency,
             reason=immediate.reason,
         )
 
@@ -259,13 +246,11 @@ class ChargingPlanner:
         day_plan: DayPlan,
         running_soc: float,
         running_energy: float,
-        pv_kwh: float,
-        pv_total: float,
         is_today: bool,
         is_tomorrow: bool,
         now: datetime,
     ) -> DayChargingRecommendation:
-        """Plan charging for a single day."""
+        """Plan charging for a single day based on demand."""
 
         energy_needed = day_plan.total_energy_kwh
         departure_time = day_plan.earliest_departure
@@ -278,11 +263,9 @@ class ChargingPlanner:
 
         # How much energy deficit do we have?
         deficit_kwh = max(0, required_energy - running_energy)
-        deficit_soc = max(0, required_soc - running_soc)
 
-        # Determine charge strategy
+        # No trips — opportunistic PV charging
         if not day_plan.has_trips:
-            # No trips — just use PV surplus if available
             return DayChargingRecommendation(
                 date=day_plan.date,
                 trips=[],
@@ -292,13 +275,12 @@ class ChargingPlanner:
                 charge_mode="PV Surplus",
                 departure_time=None,
                 charge_by=None,
-                pv_expected_kwh=pv_kwh,
-                use_pv_charging=True,
+                urgency="none",
                 reason="No trips planned — opportunistic PV charging",
             )
 
+        # SoC already sufficient
         if deficit_kwh <= 0:
-            # Enough charge already — just top up with PV if available
             return DayChargingRecommendation(
                 date=day_plan.date,
                 trips=day_plan.trips,
@@ -308,26 +290,24 @@ class ChargingPlanner:
                 charge_mode="PV Surplus",
                 departure_time=departure_time,
                 charge_by=departure_time,
-                pv_expected_kwh=pv_kwh,
-                use_pv_charging=True,
+                urgency="none",
                 reason=f"SoC sufficient ({running_soc:.0f}% >= {required_soc:.0f}% needed)",
             )
 
-        # We need to charge — decide how
-        # For today: check if we have time for PV charging
+        # We need to charge — determine urgency and mode
         if is_today:
             return self._plan_today(
                 day_plan, departure_time, deficit_kwh, required_soc,
-                energy_needed, running_soc, pv_kwh, pv_total, now,
+                energy_needed, running_soc, now,
             )
 
         if is_tomorrow:
             return self._plan_tomorrow(
                 day_plan, departure_time, deficit_kwh, required_soc,
-                energy_needed, running_soc, pv_kwh,
+                energy_needed, running_soc,
             )
 
-        # Future days — just note the need, PV Surplus for now
+        # Future days — note demand, use Smart mode
         return DayChargingRecommendation(
             date=day_plan.date,
             trips=day_plan.trips,
@@ -337,8 +317,7 @@ class ChargingPlanner:
             charge_mode="PV Surplus",
             departure_time=departure_time,
             charge_by=departure_time,
-            pv_expected_kwh=pv_kwh,
-            use_pv_charging=True,
+            urgency="low",
             reason=f"Future day — need {deficit_kwh:.1f} kWh, planning ahead",
         )
 
@@ -350,17 +329,14 @@ class ChargingPlanner:
         required_soc: float,
         energy_needed: float,
         running_soc: float,
-        pv_remaining_kwh: float,
-        pv_total_kwh: float,
         now: datetime,
     ) -> DayChargingRecommendation:
-        """Plan charging for today."""
+        """Plan charging for today based on time until departure."""
 
-        # Check if departure is soon
-        hours_until_departure = self._hours_until_time(departure_time, now) if departure_time else 24.0
+        hours_until = self._hours_until_time(departure_time, now) if departure_time else 24.0
 
-        if hours_until_departure <= 0:
-            # Already past departure — maybe they're still home?
+        # Already past departure
+        if hours_until <= 0:
             return DayChargingRecommendation(
                 date=day_plan.date,
                 trips=day_plan.trips,
@@ -370,17 +346,31 @@ class ChargingPlanner:
                 charge_mode="Fast",
                 departure_time=departure_time,
                 charge_by=departure_time,
-                pv_expected_kwh=pv_remaining_kwh,
-                use_pv_charging=False,
-                reason=f"Past departure time — fast charging {deficit_kwh:.1f} kWh needed",
+                urgency="critical",
+                reason=f"Past departure — need {deficit_kwh:.1f} kWh urgently",
             )
 
-        # Is there enough PV today to cover the deficit?
-        # Assume ~60% of remaining PV can go to EV (rest for house/battery)
-        pv_for_ev = pv_remaining_kwh * 0.6
+        # Less than 2 hours — critical
+        if hours_until <= 2:
+            mode = "Fast" if deficit_kwh > 15 else "Eco"
+            return DayChargingRecommendation(
+                date=day_plan.date,
+                trips=day_plan.trips,
+                soc_needed_pct=required_soc,
+                energy_needed_kwh=energy_needed,
+                energy_to_charge_kwh=deficit_kwh,
+                charge_mode=mode,
+                departure_time=departure_time,
+                charge_by=departure_time,
+                urgency="critical",
+                reason=(
+                    f"Departure in {hours_until:.1f}h — "
+                    f"need {deficit_kwh:.1f} kWh ({mode} mode)"
+                ),
+            )
 
-        if pv_for_ev >= deficit_kwh and hours_until_departure > 3:
-            # PV should cover it
+        # 2-6 hours — high urgency, Smart mode with deadline
+        if hours_until <= 6:
             return DayChargingRecommendation(
                 date=day_plan.date,
                 trips=day_plan.trips,
@@ -390,31 +380,15 @@ class ChargingPlanner:
                 charge_mode="Smart",
                 departure_time=departure_time,
                 charge_by=departure_time,
-                pv_expected_kwh=pv_remaining_kwh,
-                use_pv_charging=True,
+                urgency="high",
                 reason=(
-                    f"PV surplus expected ({pv_remaining_kwh:.1f} kWh remaining), "
-                    f"Smart mode with {departure_time.strftime('%H:%M') if departure_time else '?'} deadline"
+                    f"Need {deficit_kwh:.1f} kWh by "
+                    f"{departure_time.strftime('%H:%M') if departure_time else '?'} "
+                    f"({hours_until:.1f}h remaining)"
                 ),
             )
 
-        if hours_until_departure <= 2:
-            # Urgent — use fast/eco
-            return DayChargingRecommendation(
-                date=day_plan.date,
-                trips=day_plan.trips,
-                soc_needed_pct=required_soc,
-                energy_needed_kwh=energy_needed,
-                energy_to_charge_kwh=deficit_kwh,
-                charge_mode="Fast" if deficit_kwh > 15 else "Eco",
-                departure_time=departure_time,
-                charge_by=departure_time,
-                pv_expected_kwh=pv_remaining_kwh,
-                use_pv_charging=False,
-                reason=f"Departure in {hours_until_departure:.1f}h — need {deficit_kwh:.1f} kWh urgently",
-            )
-
-        # Use Smart mode: PV surplus + grid fill by departure
+        # Plenty of time — Smart mode, PV can help
         return DayChargingRecommendation(
             date=day_plan.date,
             trips=day_plan.trips,
@@ -424,12 +398,11 @@ class ChargingPlanner:
             charge_mode="Smart",
             departure_time=departure_time,
             charge_by=departure_time,
-            pv_expected_kwh=pv_remaining_kwh,
-            use_pv_charging=pv_for_ev >= deficit_kwh * 0.5,
+            urgency="medium",
             reason=(
-                f"Smart mode: need {deficit_kwh:.1f} kWh by "
-                f"{departure_time.strftime('%H:%M') if departure_time else '?'}, "
-                f"PV remaining {pv_remaining_kwh:.1f} kWh"
+                f"Need {deficit_kwh:.1f} kWh by "
+                f"{departure_time.strftime('%H:%M') if departure_time else '?'} "
+                f"({hours_until:.0f}h available — PV + grid)"
             ),
         )
 
@@ -441,16 +414,13 @@ class ChargingPlanner:
         required_soc: float,
         energy_needed: float,
         running_soc: float,
-        pv_tomorrow_kwh: float,
     ) -> DayChargingRecommendation:
-        """Plan charging for tomorrow (affects tonight's charging)."""
+        """Plan charging for tomorrow (may need overnight charging)."""
 
-        # PV won't help before an early morning departure
         early_departure = departure_time and departure_time.hour < 10
-        pv_for_ev = pv_tomorrow_kwh * 0.6
 
-        if early_departure or pv_for_ev < deficit_kwh:
-            # Need to charge tonight — Smart mode with full-by-morning
+        if early_departure:
+            # Need to charge tonight
             return DayChargingRecommendation(
                 date=day_plan.date,
                 trips=day_plan.trips,
@@ -460,16 +430,15 @@ class ChargingPlanner:
                 charge_mode="Smart",
                 departure_time=departure_time,
                 charge_by=departure_time,
-                pv_expected_kwh=pv_tomorrow_kwh,
-                use_pv_charging=False,
+                urgency="medium",
                 reason=(
-                    f"Charge tonight: need {deficit_kwh:.1f} kWh by "
+                    f"Charge overnight: need {deficit_kwh:.1f} kWh by "
                     f"{departure_time.strftime('%H:%M') if departure_time else 'morning'} "
                     f"(current {running_soc:.0f}%, need {required_soc:.0f}%)"
                 ),
             )
 
-        # Late departure tomorrow + good PV → can PV-charge tomorrow morning
+        # Late departure — can charge tomorrow with PV
         return DayChargingRecommendation(
             date=day_plan.date,
             trips=day_plan.trips,
@@ -479,12 +448,11 @@ class ChargingPlanner:
             charge_mode="Smart",
             departure_time=departure_time,
             charge_by=departure_time,
-            pv_expected_kwh=pv_tomorrow_kwh,
-            use_pv_charging=True,
+            urgency="low",
             reason=(
-                f"PV + grid tomorrow: {pv_tomorrow_kwh:.1f} kWh PV expected, "
-                f"need {deficit_kwh:.1f} kWh, late departure "
-                f"{departure_time.strftime('%H:%M') if departure_time else '?'}"
+                f"Tomorrow: need {deficit_kwh:.1f} kWh, "
+                f"late departure {departure_time.strftime('%H:%M') if departure_time else '?'} "
+                f"— PV + grid can cover it"
             ),
         )
 

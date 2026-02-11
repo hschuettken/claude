@@ -63,6 +63,13 @@ class EVForecastSettings(BaseSettings):
     # Format: {"Münster": 60, "Aachen": 80, "STR": 500, "Stuttgart": 500, ...}
     known_destinations: str = '{"Münster": 60, "Muenster": 60, "MS": 60, "Aachen": 80, "AC": 80, "Köln": 100, "Koeln": 100, "Düsseldorf": 80, "Duesseldorf": 80, "Dortmund": 80, "STR": 500, "Stuttgart": 500, "MUC": 500, "München": 500, "Muenchen": 500, "Berlin": 450, "BER": 450, "Hamburg": 300, "HAM": 300, "Frankfurt": 250, "FRA": 250, "Lengerich": 22}'
 
+    # --- Geocoding for unknown destinations ---
+    # Home coordinates (auto-detected from HA if 0)
+    home_latitude: float = 0.0
+    home_longitude: float = 0.0
+    # Road factor: multiplier from straight-line to road distance (1.3 = 30% longer)
+    geocoding_road_factor: float = 1.3
+
     # --- Charging plan ---
     min_soc_pct: float = 20.0         # Never plan below this SoC
     buffer_soc_pct: float = 10.0      # Extra buffer above minimum needed
@@ -70,11 +77,6 @@ class EVForecastSettings(BaseSettings):
 
     # How far ahead to plan (days)
     planning_horizon_days: int = 3
-
-    # --- PV forecast integration ---
-    pv_forecast_today_entity: str = "sensor.pv_ai_forecast_today_kwh"
-    pv_forecast_today_remaining_entity: str = "sensor.pv_ai_forecast_today_remaining_kwh"
-    pv_forecast_tomorrow_entity: str = "sensor.pv_ai_forecast_tomorrow_kwh"
 
     # --- HA helper entities (written by this service) ---
     charge_mode_entity: str = "input_select.ev_charge_mode"

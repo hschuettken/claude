@@ -1,13 +1,13 @@
 """EV Forecast Service — entry point and main loop.
 
 Monitors the Audi A6 e-tron via dual Audi Connect accounts, predicts
-upcoming driving needs from the family calendar, and generates smart
-charging plans that maximize PV usage while ensuring the car is always
-charged enough for the next trip.
+upcoming driving needs from the family calendar, and generates demand-
+focused charging plans. The planner expresses what energy is needed
+and by when — the smart-ev-charging service handles PV optimization.
 
 Schedule:
   - Every 15 min: refresh vehicle state from Audi Connect
-  - Every 30 min: re-evaluate charging plan (calendar + PV forecast)
+  - Every 30 min: re-evaluate charging plan (calendar + demand)
   - On startup: initial state read + plan generation
 
 Output:
@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -34,7 +34,7 @@ from shared.mqtt_client import MQTTClient
 
 from config import EVForecastSettings
 from planner import ChargingPlan, ChargingPlanner
-from trips import TripPredictor
+from trips import GeoDistance, TripPredictor
 from vehicle import AccountConfig, VehicleMonitor, VehicleState
 
 HEALTHCHECK_FILE = Path("/app/data/healthcheck")
@@ -98,21 +98,12 @@ class EVForecastService:
             stale_threshold_minutes=self.settings.audi_stale_threshold_minutes,
         )
 
-        # Trip predictor
-        known_destinations = json.loads(self.settings.known_destinations)
-        commute_days = [d.strip() for d in self.settings.nicole_commute_days.split(",")]
-        self.trips = TripPredictor(
-            known_destinations=known_destinations,
-            consumption_kwh_per_100km=self.settings.ev_consumption_kwh_per_100km,
-            nicole_commute_km=self.settings.nicole_commute_km,
-            nicole_commute_days=commute_days,
-            nicole_departure_time=self.settings.nicole_departure_time,
-            nicole_arrival_time=self.settings.nicole_arrival_time,
-            hans_train_threshold_km=self.settings.hans_train_threshold_km,
-            calendar_prefix_hans=self.settings.calendar_prefix_hans,
-            calendar_prefix_nicole=self.settings.calendar_prefix_nicole,
-            timezone=self.settings.timezone,
-        )
+        # Home location (resolved in start())
+        self._home_lat = self.settings.home_latitude
+        self._home_lon = self.settings.home_longitude
+
+        # Trip predictor (initialized in start() after resolving home location)
+        self.trips: TripPredictor | None = None
 
         # Charging planner
         self.planner = ChargingPlanner(
@@ -133,6 +124,32 @@ class EVForecastService:
     async def start(self) -> None:
         """Initialize and start the service."""
         logger.info("service_starting")
+
+        # Resolve home location (for geocoding)
+        await self._resolve_home_location()
+
+        # Initialize trip predictor (needs home location for geocoding)
+        geo = GeoDistance(
+            home_lat=self._home_lat,
+            home_lon=self._home_lon,
+            road_factor=self.settings.geocoding_road_factor,
+        ) if self._home_lat and self._home_lon else None
+
+        known_destinations = json.loads(self.settings.known_destinations)
+        commute_days = [d.strip() for d in self.settings.nicole_commute_days.split(",")]
+        self.trips = TripPredictor(
+            known_destinations=known_destinations,
+            consumption_kwh_per_100km=self.settings.ev_consumption_kwh_per_100km,
+            nicole_commute_km=self.settings.nicole_commute_km,
+            nicole_commute_days=commute_days,
+            nicole_departure_time=self.settings.nicole_departure_time,
+            nicole_arrival_time=self.settings.nicole_arrival_time,
+            hans_train_threshold_km=self.settings.hans_train_threshold_km,
+            calendar_prefix_hans=self.settings.calendar_prefix_hans,
+            calendar_prefix_nicole=self.settings.calendar_prefix_nicole,
+            timezone=self.settings.timezone,
+            geo_distance=geo,
+        )
 
         # Connect MQTT
         self.mqtt.connect_background()
@@ -225,17 +242,14 @@ class EVForecastService:
             # Get calendar events
             events = await self._get_calendar_events()
 
-            # Predict trips
-            day_plans = self.trips.predict_trips(
+            # Predict trips (async for geocoding of unknown destinations)
+            day_plans = await self.trips.predict_trips(
                 events,
                 days=self.settings.planning_horizon_days,
             )
 
-            # Get PV forecast
-            pv_forecast = await self._get_pv_forecast()
-
-            # Generate plan
-            plan = await self.planner.generate_plan(vehicle, day_plans, pv_forecast)
+            # Generate demand-focused plan (no PV forecast — smart-ev-charging handles supply)
+            plan = await self.planner.generate_plan(vehicle, day_plans)
             self._last_plan = plan
 
             # Publish plan to MQTT
@@ -283,7 +297,7 @@ class EVForecastService:
         try:
             now = datetime.now(self._tz)
             time_min = now.isoformat()
-            time_max = (now + __import__("datetime").timedelta(
+            time_max = (now + timedelta(
                 days=self.settings.planning_horizon_days,
             )).isoformat()
 
@@ -320,24 +334,26 @@ class EVForecastService:
             logger.exception("calendar_fetch_failed")
             return []
 
-    async def _get_pv_forecast(self) -> dict[str, float]:
-        """Read PV forecast from HA sensors."""
-        result: dict[str, float] = {"today": 0.0, "today_remaining": 0.0, "tomorrow": 0.0}
+    # ------------------------------------------------------------------
+    # Home location resolution
+    # ------------------------------------------------------------------
 
-        for key, entity in [
-            ("today", self.settings.pv_forecast_today_entity),
-            ("today_remaining", self.settings.pv_forecast_today_remaining_entity),
-            ("tomorrow", self.settings.pv_forecast_tomorrow_entity),
-        ]:
-            try:
-                state = await self.ha.get_state(entity)
-                val = state.get("state", "0")
-                if val not in ("unavailable", "unknown"):
-                    result[key] = float(val)
-            except Exception:
-                pass
+    async def _resolve_home_location(self) -> None:
+        """Get home lat/lon from HA config if not explicitly set."""
+        if self._home_lat and self._home_lon:
+            logger.info("home_location_from_config", lat=self._home_lat, lon=self._home_lon)
+            return
 
-        return result
+        try:
+            client = await self.ha._get_client()
+            resp = await client.get("/config")
+            resp.raise_for_status()
+            config = resp.json()
+            self._home_lat = config.get("latitude", 0.0)
+            self._home_lon = config.get("longitude", 0.0)
+            logger.info("home_location_from_ha", lat=self._home_lat, lon=self._home_lon)
+        except Exception:
+            logger.warning("home_location_unavailable", detail="Geocoding for unknown destinations will be disabled")
 
     # ------------------------------------------------------------------
     # MQTT callbacks

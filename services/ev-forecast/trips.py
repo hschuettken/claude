@@ -6,8 +6,9 @@ Uses the convention:
   - "N: <destination>" = Nicole drives
   - No prefix / normal events = no driving (or Nicole's default commute)
 
-Known destinations are mapped to distances. For unknown destinations
-or ambiguous Hans trips, the service can request clarification from
+Known destinations are mapped to distances. Unknown destinations are
+geocoded via OpenStreetMap Nominatim to estimate road distance from home.
+For ambiguous Hans trips, the service requests clarification from
 the orchestrator (which asks via Telegram).
 """
 
@@ -15,12 +16,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import httpx
 import structlog
 
 logger = structlog.get_logger()
@@ -74,6 +77,96 @@ class DayPlan:
         return any(t.needs_clarification for t in self.trips)
 
 
+class GeoDistance:
+    """Estimate road distance using OpenStreetMap Nominatim geocoding.
+
+    For destinations not in the known lookup table, this class:
+    1. Geocodes the destination name via Nominatim (free, no API key)
+    2. Calculates haversine (great-circle) distance from home
+    3. Multiplies by a road factor (default 1.3) to estimate driving distance
+    """
+
+    NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+
+    def __init__(
+        self,
+        home_lat: float,
+        home_lon: float,
+        road_factor: float = 1.3,
+    ) -> None:
+        self._home_lat = home_lat
+        self._home_lon = home_lon
+        self._road_factor = road_factor
+        # Cache: destination_lower → distance_km
+        self._cache: dict[str, float] = {}
+
+    async def estimate_distance(self, destination: str) -> float | None:
+        """Estimate one-way road distance to a destination in km.
+
+        Returns None if geocoding fails.
+        """
+        key = destination.lower().strip()
+        if key in self._cache:
+            return self._cache[key]
+
+        coords = await self._geocode(destination)
+        if coords is None:
+            return None
+
+        lat, lon = coords
+        straight_km = self._haversine(self._home_lat, self._home_lon, lat, lon)
+        road_km = round(straight_km * self._road_factor, 1)
+        self._cache[key] = road_km
+
+        logger.info(
+            "geocoded_destination",
+            destination=destination,
+            lat=lat,
+            lon=lon,
+            straight_km=round(straight_km, 1),
+            road_km=road_km,
+        )
+        return road_km
+
+    async def _geocode(self, query: str) -> tuple[float, float] | None:
+        """Look up coordinates for a place name via Nominatim."""
+        # Bias towards Germany for better results
+        search_query = query if "," in query else f"{query}, Deutschland"
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    self.NOMINATIM_URL,
+                    params={
+                        "q": search_query,
+                        "format": "json",
+                        "limit": 1,
+                        "countrycodes": "de",
+                    },
+                    headers={"User-Agent": "homelab-ev-forecast/1.0"},
+                )
+                resp.raise_for_status()
+                results = resp.json()
+                if results:
+                    return float(results[0]["lat"]), float(results[0]["lon"])
+        except Exception:
+            logger.debug("geocoding_failed", destination=query)
+        return None
+
+    @staticmethod
+    def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        """Calculate great-circle distance in km between two points."""
+        R = 6371.0  # Earth radius in km
+        dlat = math.radians(lat2 - lat1)
+        dlon = math.radians(lon2 - lon1)
+        a = (
+            math.sin(dlat / 2) ** 2
+            + math.cos(math.radians(lat1))
+            * math.cos(math.radians(lat2))
+            * math.sin(dlon / 2) ** 2
+        )
+        return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
 class TripPredictor:
     """Predicts upcoming trips from calendar events and default patterns."""
 
@@ -89,6 +182,7 @@ class TripPredictor:
         calendar_prefix_hans: str = "H:",
         calendar_prefix_nicole: str = "N:",
         timezone: str = "Europe/Berlin",
+        geo_distance: GeoDistance | None = None,
     ) -> None:
         self._destinations = {k.lower(): v for k, v in known_destinations.items()}
         self._consumption = consumption_kwh_per_100km
@@ -100,11 +194,12 @@ class TripPredictor:
         self._prefix_hans = calendar_prefix_hans.lower().strip()
         self._prefix_nicole = calendar_prefix_nicole.lower().strip()
         self._tz = ZoneInfo(timezone)
+        self._geo = geo_distance
 
         # Pending clarifications: {event_id: Trip}
         self._pending_clarifications: dict[str, Trip] = {}
 
-    def predict_trips(
+    async def predict_trips(
         self,
         calendar_events: list[dict[str, Any]],
         days: int = 3,
@@ -122,7 +217,7 @@ class TripPredictor:
             day_events = self._events_for_date(calendar_events, current_date)
 
             # Parse calendar events into trips
-            calendar_trips = self._parse_calendar_trips(day_events, current_date)
+            calendar_trips = await self._parse_calendar_trips(day_events, current_date)
 
             # Determine if Nicole has a calendar trip or uses default commute
             nicole_has_calendar_trip = any(
@@ -177,7 +272,7 @@ class TripPredictor:
                 use_ev=use_ev,
             )
 
-    def _parse_calendar_trips(
+    async def _parse_calendar_trips(
         self,
         events: list[dict[str, Any]],
         trip_date: date,
@@ -197,13 +292,27 @@ class TripPredictor:
             if not person or not destination:
                 continue
 
-            # Look up distance
+            # Look up distance (known table first, then geocoding)
             distance_km = self._lookup_distance(destination)
             needs_clarification = False
 
+            if distance_km is None and self._geo:
+                # Try geocoding the destination
+                geo_km = await self._geo.estimate_distance(destination)
+                if geo_km is not None:
+                    distance_km = geo_km
+                    # Cache in known destinations for future lookups
+                    self._destinations[destination.lower().strip()] = geo_km
+                    logger.info(
+                        "destination_geocoded",
+                        person=person,
+                        destination=destination,
+                        distance_km=geo_km,
+                    )
+
             if distance_km is None:
-                # Unknown destination — estimate or flag for clarification
-                distance_km = 50.0  # Conservative default
+                # Geocoding also failed — use conservative default
+                distance_km = 50.0
                 needs_clarification = True
                 logger.info(
                     "unknown_destination",
