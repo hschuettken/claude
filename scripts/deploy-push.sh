@@ -2,26 +2,48 @@
 # Encrypt secrets, commit all changes, and push to git.
 #
 # Usage: ./scripts/deploy-push.sh [commit message]
+#        ./scripts/deploy-push.sh -y [commit message]   # skip confirmation
 #
 # Steps:
 #   1. Encrypt .env → .env.enc (via secrets-encrypt.sh)
-#   2. Stage all tracked changes (modified + untracked, respecting .gitignore)
-#   3. Commit with the provided message (or a default)
-#   4. Push to the current branch
+#   2. Stage tracked file changes + .env.enc (does NOT add unknown new files)
+#   3. Show what will be committed and ask for confirmation
+#   4. Commit with the provided message (or a default)
+#   5. Push to the current branch
 #
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Parse flags
+AUTO_CONFIRM=false
+if [ "${1:-}" = "-y" ]; then
+    AUTO_CONFIRM=true
+    shift
+fi
+
 # --- Step 1: Encrypt secrets ---
 echo "==> Encrypting .env → .env.enc ..."
 ./scripts/secrets-encrypt.sh
 echo ""
 
-# --- Step 2: Stage all changes ---
-echo "==> Staging all changes ..."
-git add -A
+# --- Step 2: Stage changes ---
+# Stage only already-tracked files (updates + deletes) — safe, never picks up
+# random new files like credentials/ or nested git repos.
+echo "==> Staging changes ..."
+git add -u
+# Always include the encrypted secrets file
+git add .env.enc
+
+# Show untracked files the user might want to add
+UNTRACKED="$(git ls-files --others --exclude-standard)"
+if [ -n "$UNTRACKED" ]; then
+    echo ""
+    echo "Untracked files (not staged — use 'git add' manually if needed):"
+    echo "$UNTRACKED" | sed 's/^/  /'
+    echo ""
+fi
 
 # Check if there is anything to commit
 if git diff --cached --quiet; then
@@ -33,13 +55,22 @@ echo "Staged changes:"
 git --no-pager diff --cached --stat
 echo ""
 
-# --- Step 3: Commit ---
+# --- Step 3: Confirm ---
+if [ "$AUTO_CONFIRM" = false ]; then
+    read -r -p "Commit and push these changes? [y/N] " answer
+    if [ "$answer" != "y" ] && [ "$answer" != "Y" ]; then
+        echo "Aborted. Changes are still staged."
+        exit 0
+    fi
+fi
+
+# --- Step 4: Commit ---
 COMMIT_MSG="${1:-Deploy: update config and encrypted secrets}"
 echo "==> Committing: $COMMIT_MSG"
 git commit -m "$COMMIT_MSG"
 echo ""
 
-# --- Step 4: Push ---
+# --- Step 5: Push ---
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 echo "==> Pushing to origin/$BRANCH ..."
 

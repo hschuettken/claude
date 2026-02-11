@@ -1,6 +1,7 @@
 # Secrets — never commit
 .env
 .sops/
+credentials/
 
 # Python
 __pycache__/
