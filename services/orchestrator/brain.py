@@ -295,14 +295,16 @@ class Brain:
         if not self._semantic or self._semantic.entry_count == 0:
             return ""
 
+        top_k = self._settings.memory_context_results
+        sim_threshold = self._settings.memory_similarity_threshold
         try:
-            results = await self._semantic.search(user_message, top_k=3)
+            results = await self._semantic.search(user_message, top_k=top_k)
         except Exception:
             logger.debug("semantic_search_failed")
             return ""
 
         # Only include results with reasonable similarity
-        relevant = [r for r in results if r["similarity"] >= 0.5]
+        relevant = [r for r in results if r["similarity"] >= sim_threshold]
         if not relevant:
             return ""
 
@@ -388,14 +390,17 @@ class Brain:
         if not self._semantic:
             return 0
 
+        min_age = self._settings.memory_consolidation_min_age_days
+        limit = self._settings.memory_consolidation_batch_limit
+        batch_size = self._settings.memory_consolidation_batch_size
+        min_batch = self._settings.memory_consolidation_min_batch_size
+
         entries = self._semantic.get_entries_for_consolidation(
-            category="conversation", min_age_days=1.0, limit=50,
+            category="conversation", min_age_days=min_age, limit=limit,
         )
-        if len(entries) < 5:
+        if len(entries) < min_batch:
             return 0  # not enough to consolidate
 
-        # Group entries into batches of ~10 for consolidation
-        batch_size = 10
         total_consolidated = 0
 
         for i in range(0, len(entries), batch_size):

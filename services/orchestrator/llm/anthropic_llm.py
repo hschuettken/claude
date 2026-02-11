@@ -17,10 +17,12 @@ class AnthropicProvider(LLMProvider):
         api_key: str,
         model: str,
         temperature: float = 0.7,
+        max_tokens: int = 4096,
     ) -> None:
         self._client = AsyncAnthropic(api_key=api_key)
         self._model = model
         self._temperature = temperature
+        self._max_tokens = max_tokens
 
     async def chat(
         self,
@@ -41,7 +43,7 @@ class AnthropicProvider(LLMProvider):
 
         kwargs: dict[str, Any] = {
             "model": self._model,
-            "max_tokens": 4096,
+            "max_tokens": self._max_tokens,
             "temperature": self._temperature,
             "messages": anthropic_messages,
         }

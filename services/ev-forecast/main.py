@@ -113,6 +113,11 @@ class EVForecastService:
             buffer_soc_pct=self.settings.buffer_soc_pct,
             min_arrival_soc_pct=self.settings.min_arrival_soc_pct,
             timezone=self.settings.timezone,
+            default_assumed_soc_pct=self.settings.default_assumed_soc_pct,
+            critical_urgency_hours=self.settings.critical_urgency_hours,
+            high_urgency_hours=self.settings.high_urgency_hours,
+            fast_mode_threshold_kwh=self.settings.fast_mode_threshold_kwh,
+            early_departure_hour=self.settings.early_departure_hour,
         )
 
         # Google Calendar

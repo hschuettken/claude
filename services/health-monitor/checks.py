@@ -52,10 +52,10 @@ class DiagnosticResult:
 # ──────────────────────────────────────────────────────────────
 
 
-async def check_home_assistant(ha_url: str, ha_token: str) -> CheckResult:
+async def check_home_assistant(ha_url: str, ha_token: str, timeout: float = 10.0) -> CheckResult:
     """Check if Home Assistant API is reachable."""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.get(
                 f"{ha_url}/api/",
                 headers={"Authorization": f"Bearer {ha_token}"},
@@ -71,10 +71,10 @@ async def check_home_assistant(ha_url: str, ha_token: str) -> CheckResult:
         return CheckResult("Home Assistant", False, str(e), severity="critical")
 
 
-async def check_influxdb(influx_url: str, influx_token: str) -> CheckResult:
+async def check_influxdb(influx_url: str, influx_token: str, timeout: float = 10.0) -> CheckResult:
     """Check if InfluxDB is reachable."""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.get(
                 f"{influx_url}/health",
                 headers={"Authorization": f"Token {influx_token}"},
@@ -92,12 +92,13 @@ async def check_ha_entities(
     ha_url: str,
     ha_token: str,
     entity_ids: list[str],
+    timeout: float = 10.0,
 ) -> list[CheckResult]:
     """Check if key HA entities are available (not unavailable/unknown)."""
     results: list[CheckResult] = []
     headers = {"Authorization": f"Bearer {ha_token}"}
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         for entity_id in entity_ids:
             try:
                 resp = await client.get(

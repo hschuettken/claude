@@ -58,12 +58,30 @@ FEATURE_COLS = [
 class PVModel:
     """Gradient Boosting model for PV production forecasting."""
 
-    def __init__(self, array_name: str, model_dir: str = "/app/data/models") -> None:
+    def __init__(
+        self,
+        array_name: str,
+        model_dir: str = "/app/data/models",
+        n_estimators: int = 200,
+        max_depth: int = 5,
+        learning_rate: float = 0.05,
+        subsample: float = 0.8,
+        min_samples_leaf: int = 10,
+        min_training_samples: int = 50,
+        cv_folds: int = 3,
+    ) -> None:
         self.array_name = array_name
         self.model_dir = Path(model_dir)
         self.model: GradientBoostingRegressor | None = None
         self._trained_features: list[str] | None = None
         self._model_path = self.model_dir / f"pv_model_{array_name}.joblib"
+        self._n_estimators = n_estimators
+        self._max_depth = max_depth
+        self._learning_rate = learning_rate
+        self._subsample = subsample
+        self._min_samples_leaf = min_samples_leaf
+        self._min_training_samples = min_training_samples
+        self._cv_folds = cv_folds
 
     def train(self, df: pd.DataFrame) -> dict[str, float]:
         """Train the model on historical data.
@@ -87,17 +105,17 @@ class PVModel:
         # Clip negative targets (shouldn't happen but safety)
         y = np.clip(y, 0, None)
 
-        if len(X) < 50:
+        if len(X) < self._min_training_samples:
             logger.warning("too_few_samples", count=len(X))
             return {"r2": 0.0, "mae": 0.0, "cv_r2": 0.0}
 
         # Train Gradient Boosting
         self.model = GradientBoostingRegressor(
-            n_estimators=200,
-            max_depth=5,
-            learning_rate=0.05,
-            subsample=0.8,
-            min_samples_leaf=10,
+            n_estimators=self._n_estimators,
+            max_depth=self._max_depth,
+            learning_rate=self._learning_rate,
+            subsample=self._subsample,
+            min_samples_leaf=self._min_samples_leaf,
             random_state=42,
         )
         self.model.fit(X, y)
@@ -107,8 +125,8 @@ class PVModel:
         train_pred = self.model.predict(X)
         train_mae = float(np.mean(np.abs(y - train_pred)))
 
-        # Cross-validation R² (3-fold to keep it fast)
-        n_folds = min(3, len(X) // 50)
+        # Cross-validation R²
+        n_folds = min(self._cv_folds, len(X) // self._min_training_samples)
         if n_folds >= 2:
             cv_scores = cross_val_score(self.model, X, y, cv=n_folds, scoring="r2")
             cv_r2 = float(cv_scores.mean())
@@ -202,16 +220,18 @@ def fallback_estimate(
     azimuth: float,
     tilt: float,
     latitude: float,
+    system_efficiency: float = 0.78,
+    peak_irradiance: float = 1000.0,
 ) -> np.ndarray:
     """Simple radiation-based estimate when ML model isn't available.
 
     Uses GHI (shortwave_radiation) from Open-Meteo with a basic model
-    that accounts for panel orientation and a fixed system efficiency.
+    that accounts for panel orientation and a configurable system efficiency.
 
     This is intentionally simple — it's a fallback, not the main model.
     """
-    SYSTEM_EFFICIENCY = 0.78  # Typical: inverter loss, wiring, temp, soiling
-    PEAK_IRRADIANCE = 1000.0  # W/m² at which kWp rating is defined
+    SYSTEM_EFFICIENCY = system_efficiency
+    PEAK_IRRADIANCE = peak_irradiance
 
     ghi = weather_df["shortwave_radiation"].fillna(0).values
     hours = weather_df["hour"].values if "hour" in weather_df.columns else np.zeros(len(ghi))

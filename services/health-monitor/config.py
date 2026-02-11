@@ -35,6 +35,9 @@ class HealthMonitorSettings(BaseSettings):
     # Send a daily summary at this hour (local time, 0-23; -1 to disable)
     daily_summary_hour: int = 8
 
+    # --- HTTP ---
+    http_check_timeout_seconds: float = 10.0  # timeout for HA/InfluxDB health checks
+
     # --- Docker ---
     docker_socket: str = "/var/run/docker.sock"
     # Compose project name (used to find containers)

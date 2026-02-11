@@ -28,14 +28,15 @@ PROFILES_FILE = DATA_DIR / "profiles.json"
 DECISIONS_FILE = DATA_DIR / "decisions.json"
 CONVERSATIONS_DIR = DATA_DIR / "conversations"
 
-MAX_DECISIONS = 500
+DEFAULT_MAX_DECISIONS = 500
 
 
 class Memory:
     """Manages persistent orchestrator memory."""
 
-    def __init__(self, max_history: int = 50) -> None:
+    def __init__(self, max_history: int = 50, max_decisions: int = DEFAULT_MAX_DECISIONS) -> None:
         self._max_history = max_history
+        self._max_decisions = max_decisions
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         CONVERSATIONS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -149,8 +150,8 @@ class Memory:
         }
         self._decisions.append(entry)
         # Trim old entries
-        if len(self._decisions) > MAX_DECISIONS:
-            self._decisions = self._decisions[-MAX_DECISIONS:]
+        if len(self._decisions) > self._max_decisions:
+            self._decisions = self._decisions[-self._max_decisions:]
         self._save_json(DECISIONS_FILE, self._decisions)
 
     def get_recent_decisions(self, n: int = 10) -> list[dict[str, Any]]:
