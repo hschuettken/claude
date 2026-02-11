@@ -70,8 +70,12 @@ class EmbeddingProvider:
             raise RuntimeError("No Gemini API key")
 
         from google import genai
+        from google.genai import types
 
-        client = genai.Client(api_key=api_key)
+        client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(api_version="v1"),
+        )
         result = await client.aio.models.embed_content(
             model="text-embedding-004",
             contents=text,
