@@ -41,6 +41,13 @@ class SmartEVChargingService(BaseService):
         self.mqtt.connect_background()
         self._register_ha_discovery()
 
+        # Subscribe to orchestrator commands
+        self._force_cycle = asyncio.Event()
+        self.mqtt.subscribe(
+            "homelab/orchestrator/command/smart-ev-charging",
+            self._on_orchestrator_command,
+        )
+
         charger = WallboxController(
             ha=self.ha,
             vehicle_state_entity=self.settings.wallbox_vehicle_state_entity,
@@ -78,12 +85,21 @@ class SmartEVChargingService(BaseService):
             except Exception:
                 self.logger.exception("control_cycle_error")
 
+            # Wait for shutdown, force-cycle signal, or normal interval
             try:
-                await asyncio.wait_for(
-                    self._shutdown_event.wait(),
+                done, _ = await asyncio.wait(
+                    [
+                        asyncio.create_task(self._shutdown_event.wait()),
+                        asyncio.create_task(self._force_cycle.wait()),
+                    ],
                     timeout=self.settings.control_interval_seconds,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
-                break
+                if self._shutdown_event.is_set():
+                    break
+                if self._force_cycle.is_set():
+                    self._force_cycle.clear()
+                    self.logger.info("forced_cycle_triggered")
             except asyncio.TimeoutError:
                 pass  # normal — interval elapsed
 
@@ -324,6 +340,25 @@ class SmartEVChargingService(BaseService):
         lines.append(f"Reason: {decision.reason}")
 
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # MQTT auto-discovery
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Orchestrator command handler
+    # ------------------------------------------------------------------
+
+    def _on_orchestrator_command(self, topic: str, payload: dict) -> None:
+        """Handle commands from the orchestrator service."""
+        command = payload.get("command", "")
+        self.logger.info("orchestrator_command", command=command)
+
+        if command == "refresh":
+            # Trigger an immediate control cycle
+            self._force_cycle.set()
+        else:
+            self.logger.debug("unknown_command", command=command)
 
     # ------------------------------------------------------------------
     # MQTT auto-discovery

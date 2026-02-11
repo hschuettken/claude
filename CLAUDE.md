@@ -48,6 +48,7 @@ This file provides guidance for AI assistants working with this repository.
 │   │   ├── calendar.py                      #   Google Calendar integration (read family, write own)
 │   │   ├── proactive.py                     #   Scheduled briefings, alerts, suggestions
 │   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
+│   │   ├── diagnose.py                      #   Step-by-step connectivity diagnostic
 │   │   ├── llm/                             #   Pluggable LLM backends
 │   │   │   ├── __init__.py                  #     Provider factory
 │   │   │   ├── base.py                      #     Abstract LLM interface
@@ -77,7 +78,8 @@ This file provides guidance for AI assistants working with this repository.
 │   │   ├── config.py                        #   EV-specific settings
 │   │   ├── charger.py                       #   Wallbox abstraction (read state, set power)
 │   │   ├── strategy.py                      #   Charging strategy logic
-│   │   └── healthcheck.py                   #   Docker HEALTHCHECK script
+│   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
+│   │   └── diagnose.py                      #   Step-by-step connectivity/data diagnostic
 │   ├── ev-forecast/                         #   EV driving forecast & charging planner
 │   │   ├── Dockerfile
 │   │   ├── requirements.txt                 #   google-api-python-client, google-auth
@@ -91,7 +93,8 @@ This file provides guidance for AI assistants working with this repository.
 │   └── example-service/                     #   Template service
 │       ├── Dockerfile
 │       ├── requirements.txt                 #   Service-specific deps only
-│       └── main.py                          #   Entry point
+│       ├── main.py                          #   Entry point
+│       └── healthcheck.py                   #   Docker HEALTHCHECK script
 ├── HomeAssistant_config/                    # Reference HA configuration (read-only docs)
 │   ├── configuration.yaml                   #   Main HA config (entities, integrations, InfluxDB)
 │   ├── ev_audi_connect.yaml                 #   Dual Audi Connect template sensors + automation
@@ -158,14 +161,22 @@ docker compose logs -f pv-forecast       # watch output
 ### Diagnosing issues
 
 ```bash
-docker compose run --rm pv-forecast python diagnose.py            # test everything
-docker compose run --rm pv-forecast python diagnose.py --step ha  # test just HA
+docker compose run --rm orchestrator python diagnose.py              # test everything
+docker compose run --rm orchestrator python diagnose.py --step llm   # test just LLM provider
 
-docker compose run --rm ev-forecast python diagnose.py            # test everything
-docker compose run --rm ev-forecast python diagnose.py --step audi  # test just Audi Connect
+docker compose run --rm pv-forecast python diagnose.py               # test everything
+docker compose run --rm pv-forecast python diagnose.py --step ha     # test just HA
+
+docker compose run --rm smart-ev-charging python diagnose.py         # test everything
+docker compose run --rm smart-ev-charging python diagnose.py --step wallbox  # test just wallbox
+
+docker compose run --rm ev-forecast python diagnose.py               # test everything
+docker compose run --rm ev-forecast python diagnose.py --step audi   # test just Audi Connect
 ```
 
+orchestrator steps: `config`, `ha`, `mqtt`, `llm`, `telegram`, `calendar`, `memory`, `services`, `all`
 pv-forecast steps: `config`, `ha`, `influx`, `mqtt`, `weather`, `forecast`, `all`
+smart-ev-charging steps: `config`, `ha`, `wallbox`, `energy`, `mqtt`, `cycle`, `all`
 ev-forecast steps: `config`, `ha`, `audi`, `mqtt`, `calendar`, `geocoding`, `plan`, `all`
 
 ### Debugging with VS Code
@@ -244,6 +255,26 @@ homelab/{service-name}/{event-type}
 ```
 
 Examples: `homelab/energy-monitor/price-changed`, `homelab/climate-control/setpoint-updated`
+
+### Inter-service commands via MQTT
+
+The orchestrator can send commands to other services via MQTT:
+
+```
+homelab/orchestrator/command/{service-name}
+```
+
+Payload: `{"command": "refresh"}`, `{"command": "retrain"}`, `{"command": "refresh_vehicle"}`
+
+Every service subscribes to its command topic on startup and handles commands asynchronously.
+The orchestrator exposes this via the `request_service_refresh` LLM tool, so the AI can trigger
+on-demand updates when a user asks for fresh data.
+
+| Service | Supported Commands |
+|---------|-------------------|
+| `pv-forecast` | `refresh` (re-run forecast), `retrain` (retrain ML model) |
+| `smart-ev-charging` | `refresh` (trigger immediate control cycle) |
+| `ev-forecast` | `refresh` (re-evaluate plan), `refresh_vehicle` (refresh Audi Connect data) |
 
 ### MQTT auto-discovery for Home Assistant
 
@@ -360,6 +391,7 @@ The central intelligence layer that coordinates all services, communicates with 
 - `create_calendar_event` — Create reminders/events on orchestrator's own calendar
 - `recall_memory` — Semantic search over long-term memory (past conversations, facts, decisions)
 - `store_fact` — Store knowledge/facts in long-term semantic memory for future recall
+- `request_service_refresh` — Send a command to a service (refresh forecast, retrain model, etc.)
 
 **Communication**: Telegram bot with commands `/start`, `/status`, `/forecast`, `/clear`, `/whoami`, `/help` plus free-text LLM conversation.
 
@@ -436,9 +468,10 @@ The central intelligence layer that coordinates all services, communicates with 
 
 **MQTT**: Subscribes to `homelab/+/heartbeat` and `homelab/+/updated` to track all service states. Also subscribes to `homelab/ev-forecast/plan` (creates calendar events for charging needs) and `homelab/ev-forecast/clarification-needed` (forwards trip questions to users via Telegram).
 
-**HA entities** (via MQTT auto-discovery, "Home Orchestrator" device, 14 entities):
+**HA entities** (via MQTT auto-discovery, "Home Orchestrator" device, 15 entities):
 - `binary_sensor` — Service online/offline, Proactive Suggestions enabled, Morning/Evening Briefing enabled
 - `sensor` — Uptime, LLM Provider, Messages Today, Tool Calls Today, Suggestions Sent Today, Last Tool Used, Last Decision, Last Suggestion, Services Online
+- `sensor` (reasoning) — Orchestrator Reasoning (with `full_reasoning`, `services_tracked`, `last_decision_time` as JSON attributes)
 
 **Config** (env vars): `LLM_PROVIDER`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`, `MORNING_BRIEFING_TIME`, `ENABLE_PROACTIVE_SUGGESTIONS`, `ENABLE_SEMANTIC_MEMORY`, `GRID_PRICE_CT`, `FEED_IN_TARIFF_CT`, `OIL_PRICE_PER_KWH_CT`, `HOUSEHOLD_USERS`, `GOOGLE_CALENDAR_CREDENTIALS_FILE`, `GOOGLE_CALENDAR_FAMILY_ID`, `GOOGLE_CALENDAR_ORCHESTRATOR_ID`. Most entity IDs have sensible defaults matching the existing HA setup.
 
@@ -561,9 +594,10 @@ Monitors the Audi A6 e-tron (83 kWh gross / 76 kWh net) via dual Audi Connect ac
 
 **Schedule**: Vehicle state check every 15 min, plan update every 30 min.
 
-**HA output sensors** (via MQTT auto-discovery, "EV Forecast" device, 11 entities):
+**HA output sensors** (via MQTT auto-discovery, "EV Forecast" device, 13 entities):
 - `binary_sensor` — Service online/offline
-- `sensor` — EV SoC (%), EV Range (km), Active Account, Charging State, Plug State, Energy Needed Today (kWh), Recommended Charge Mode, Next Trip, Next Departure, Plan Status
+- `sensor` — EV SoC (%), EV Range (km), Active Account, Charging State, Plug State, Energy Needed Today (kWh), Recommended Charge Mode, Next Trip, Next Departure, Plan Status, Uptime
+- `sensor` (reasoning) — Plan Reasoning (with `full_reasoning`, `current_soc_pct`, `total_energy_needed_kwh`, `today_urgency` as JSON attributes)
 
 **MQTT events**: `homelab/ev-forecast/vehicle`, `homelab/ev-forecast/plan`, `homelab/ev-forecast/clarification-needed`, `homelab/ev-forecast/heartbeat`
 

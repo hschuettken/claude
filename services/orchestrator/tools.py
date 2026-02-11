@@ -460,6 +460,37 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "request_service_refresh",
+            "description": (
+                "Send a command to one of the homelab services to trigger an immediate refresh. "
+                "Use when the user asks for up-to-date data or when you need fresh data before "
+                "answering a question. Available services: pv-forecast, smart-ev-charging, ev-forecast. "
+                "Available commands: 'refresh' (update forecast/plan/cycle), "
+                "'retrain' (pv-forecast only: retrain ML model), "
+                "'refresh_vehicle' (ev-forecast only: refresh Audi Connect data)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service": {
+                        "type": "string",
+                        "enum": ["pv-forecast", "smart-ev-charging", "ev-forecast"],
+                        "description": "The service to send the command to",
+                    },
+                    "command": {
+                        "type": "string",
+                        "enum": ["refresh", "retrain", "refresh_vehicle"],
+                        "description": "The command to send",
+                        "default": "refresh",
+                    },
+                },
+                "required": ["service"],
+            },
+        },
+    },
 ]
 
 
@@ -920,6 +951,19 @@ class ToolExecutor:
             "id": entry_id,
             "category": category,
             "total_stored": self.semantic.entry_count,
+        }
+
+    async def _tool_request_service_refresh(
+        self, service: str, command: str = "refresh",
+    ) -> dict[str, Any]:
+        topic = f"homelab/orchestrator/command/{service}"
+        self.mqtt.publish(topic, {"command": command})
+        logger.info("service_command_sent", service=service, command=command)
+        return {
+            "success": True,
+            "service": service,
+            "command": command,
+            "note": f"Command '{command}' sent to {service}. The service will process it asynchronously.",
         }
 
     # ------------------------------------------------------------------

@@ -310,6 +310,7 @@ class OrchestratorService(BaseService):
             "proactive_enabled": self.settings.enable_proactive_suggestions,
             "morning_briefing_enabled": self.settings.enable_morning_briefing,
             "evening_briefing_enabled": self.settings.enable_evening_briefing,
+            "reasoning": self._compose_reasoning(online_services),
         }
         self.publish("activity", payload)
 
@@ -442,6 +443,33 @@ class OrchestratorService(BaseService):
             },
         )
 
+        # --- Reasoning sensor (rich, with JSON attributes) ---
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "reasoning", node_id=node, config={
+                "name": "Orchestrator Reasoning",
+                "device": device,
+                "state_topic": activity_topic,
+                "value_template": "{{ value_json.last_decision[:250] }}",
+                "json_attributes_topic": activity_topic,
+                "json_attributes_template": (
+                    '{{ {"full_reasoning": value_json.reasoning, '
+                    '"last_decision": value_json.last_decision, '
+                    '"last_decision_time": value_json.last_decision_time, '
+                    '"last_suggestion": value_json.last_suggestion, '
+                    '"last_suggestion_time": value_json.last_suggestion_time, '
+                    '"last_tool_name": value_json.last_tool_name, '
+                    '"last_tool_time": value_json.last_tool_time, '
+                    '"messages_today": value_json.messages_today, '
+                    '"tools_today": value_json.tools_today, '
+                    '"suggestions_today": value_json.suggestions_today, '
+                    '"services_online": value_json.services_online, '
+                    '"services_tracked": value_json.services_tracked} | tojson }}'
+                ),
+                "icon": "mdi:head-cog-outline",
+            },
+        )
+
         # --- Proactive feature status ---
 
         self.mqtt.publish_ha_discovery(
@@ -480,7 +508,63 @@ class OrchestratorService(BaseService):
             },
         )
 
-        self.logger.info("ha_discovery_registered", entity_count=14)
+        self.logger.info("ha_discovery_registered", entity_count=15)
+
+    def _compose_reasoning(self, online_services: list[str]) -> str:
+        """Compose detailed human-readable reasoning for the orchestrator state."""
+        lines: list[str] = []
+        activity = self._activity.to_dict()
+
+        lines.append(f"LLM: {self.settings.llm_provider} | Language: {self.settings.household_language}")
+        lines.append(
+            f"Activity: {activity['messages_today']} messages, "
+            f"{activity['tools_today']} tool calls, "
+            f"{activity['suggestions_today']} suggestions today"
+        )
+
+        if activity["last_decision"]:
+            lines.append(f"Last decision: {activity['last_decision'][:200]}")
+        if activity["last_suggestion"]:
+            lines.append(f"Last suggestion: {activity['last_suggestion'][:200]}")
+        if activity["last_tool_name"]:
+            lines.append(f"Last tool: {activity['last_tool_name']} at {activity['last_tool_time']}")
+
+        # Service status
+        total = len(self._service_states)
+        online = len(online_services)
+        lines.append(f"Services: {online}/{total} online")
+        for svc, state in sorted(self._service_states.items()):
+            status = state.get("status", "?")
+            uptime_h = state.get("uptime_seconds", 0) / 3600
+            lines.append(f"  {svc}: {status} (uptime {uptime_h:.1f}h)")
+
+        # Feature status
+        features = []
+        if self.settings.enable_proactive_suggestions:
+            features.append("proactive")
+        if self.settings.enable_morning_briefing:
+            features.append("morning-briefing")
+        if self.settings.enable_evening_briefing:
+            features.append("evening-briefing")
+        if self.settings.enable_semantic_memory:
+            features.append("semantic-memory")
+        lines.append(f"Features: {', '.join(features) if features else 'none'}")
+
+        # EV state
+        ev_plan = self._ev_state.get("plan")
+        if ev_plan:
+            days = ev_plan.get("days", [])
+            if days:
+                today = days[0]
+                lines.append(
+                    f"EV plan: {today.get('charge_mode', '?')} | "
+                    f"need {today.get('energy_needed_kwh', 0):.1f} kWh today"
+                )
+        pending = self._ev_state.get("pending_clarifications", [])
+        if pending:
+            lines.append(f"Pending EV clarifications: {len(pending)}")
+
+        return "\n".join(lines)
 
     def health_check(self) -> dict[str, Any]:
         """Add LLM provider and activity info to heartbeat."""

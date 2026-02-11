@@ -81,6 +81,7 @@ class PVForecastService:
         self._data_days: dict[str, int] = {"east": 0, "west": 0}
         self._forecast_solar_today: dict[str, float] = {}
         self._last_forecast_summary: str = ""
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def _resolve_location(self) -> None:
         """Get lat/lon from HA config if not explicitly set."""
@@ -121,6 +122,13 @@ class PVForecastService:
 
         # Register entities in HA via MQTT auto-discovery
         self._register_ha_discovery()
+
+        # Subscribe to orchestrator commands
+        self._loop = asyncio.get_event_loop()
+        self.mqtt.subscribe(
+            "homelab/orchestrator/command/pv-forecast",
+            self._on_orchestrator_command,
+        )
 
         # Initial training attempt
         await self._train()
@@ -321,6 +329,22 @@ class PVForecastService:
             f"Tomorrow: {forecast.tomorrow_total_kwh:.1f} kWh"
         )
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Orchestrator command handler
+    # ------------------------------------------------------------------
+
+    def _on_orchestrator_command(self, topic: str, payload: dict) -> None:
+        """Handle commands from the orchestrator service."""
+        command = payload.get("command", "")
+        logger.info("orchestrator_command", command=command)
+
+        if command == "refresh" and self._loop:
+            asyncio.run_coroutine_threadsafe(self._forecast(), self._loop)
+        elif command == "retrain" and self._loop:
+            asyncio.run_coroutine_threadsafe(self._train(), self._loop)
+        else:
+            logger.debug("unknown_command", command=command)
 
     def _register_ha_discovery(self) -> None:
         """Register service entities in HA via MQTT auto-discovery."""
