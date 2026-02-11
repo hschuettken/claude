@@ -376,9 +376,9 @@ The central intelligence layer that coordinates all services, communicates with 
 
 **MQTT**: Subscribes to `homelab/+/heartbeat` and `homelab/+/updated` to track all service states.
 
-**HA entities** (via MQTT auto-discovery, "Home Orchestrator" device):
-- `binary_sensor` — Service online/offline
-- `sensor` — Uptime, LLM Provider
+**HA entities** (via MQTT auto-discovery, "Home Orchestrator" device, 14 entities):
+- `binary_sensor` — Service online/offline, Proactive Suggestions enabled, Morning/Evening Briefing enabled
+- `sensor` — Uptime, LLM Provider, Messages Today, Tool Calls Today, Suggestions Sent Today, Last Tool Used, Last Decision, Last Suggestion, Services Online
 
 **Config** (env vars): `LLM_PROVIDER`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`, `MORNING_BRIEFING_TIME`, `ENABLE_PROACTIVE_SUGGESTIONS`, `GRID_PRICE_CT`, `FEED_IN_TARIFF_CT`, `OIL_PRICE_PER_KWH_CT`, `HOUSEHOLD_USERS`, `GOOGLE_CALENDAR_CREDENTIALS_FILE`, `GOOGLE_CALENDAR_FAMILY_ID`, `GOOGLE_CALENDAR_ORCHESTRATOR_ID`. Most entity IDs have sensible defaults matching the existing HA setup.
 
@@ -413,9 +413,11 @@ trained on historical production data (InfluxDB) correlated with weather feature
 
 Each sensor includes an `hourly` attribute with per-hour breakdown.
 
-*Via MQTT auto-discovery* (grouped under "PV AI Forecast" device in HA):
+*Via MQTT auto-discovery* (grouped under "PV AI Forecast" device in HA, 23 entities):
 - `binary_sensor` — Service status (online/offline, 3-min expiry)
-- `sensor` — Uptime (seconds), Today kWh, Today Remaining kWh, Tomorrow kWh, Day After kWh
+- `sensor` — Uptime, Today/Tomorrow/Day-After kWh, Today Remaining kWh, East/West Today/Tomorrow kWh
+- `sensor` (diagnostic) — East/West Model Type (ml/fallback), East/West R², East/West MAE, Training Data Days (East/West), Last Model Training timestamp
+- `sensor` — Forecast.Solar Today (comparison), Forecast Reasoning (with full_reasoning attribute)
 
 **MQTT events**: `homelab/pv-forecast/updated`, `homelab/pv-forecast/model-trained`, `homelab/pv-forecast/heartbeat`
 
@@ -456,9 +458,12 @@ Charging from PV surplus = +18 ct/kWh profit. Grid charging = cost-neutral.
 - `input_number.ev_target_energy_kwh` — Energy to add this session
 - `input_number.ev_battery_capacity_kwh` — Total EV battery capacity
 
-**HA output sensors** (via MQTT auto-discovery, "Smart EV Charging" device, 10 entities):
-- `binary_sensor` — Service online/offline
-- `sensor` — Charge Mode, Target Power (W), Actual Power (W), Session Energy (kWh), PV Available (W), Status text, Home Battery Power (W), Home Battery SoC (%), House Power (W)
+**HA output sensors** (via MQTT auto-discovery, "Smart EV Charging" device, 22 entities):
+- `binary_sensor` — Service online/offline, Vehicle Connected, Full by Morning active
+- `sensor` (core) — Charge Mode, Target Power (W), Actual Power (W), Session Energy (kWh), PV Available (W), Status text, Home Battery Power (W), Home Battery SoC (%), House Power (W)
+- `sensor` (decision context) — PV Surplus before assist (W), Battery Assist Power (W), Battery Assist Reason, PV DC Power (W), Grid Power (W), PV Forecast Remaining (kWh), Energy Remaining to Target (kWh), Target Energy (kWh)
+- `sensor` (deadline) — Deadline Hours Left, Deadline Required Power (W)
+- `sensor` (reasoning) — Decision Reasoning (with full_reasoning, battery_assist_reason, deadline details as JSON attributes)
 
 **MQTT events**: `homelab/smart-ev-charging/status`, `homelab/smart-ev-charging/heartbeat`
 

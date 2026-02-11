@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime
 from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo
 
 from shared.service import BaseService
 
@@ -31,12 +34,75 @@ from tools import ToolExecutor
 HEALTHCHECK_FILE = Path("/app/data/healthcheck")
 
 
+class ActivityTracker:
+    """Tracks orchestrator activity for HA sensor exposure."""
+
+    def __init__(self) -> None:
+        self.messages_today: int = 0
+        self.tools_today: int = 0
+        self.suggestions_today: int = 0
+        self.last_message_time: str = ""
+        self.last_tool_name: str = ""
+        self.last_tool_time: str = ""
+        self.last_suggestion: str = ""
+        self.last_suggestion_time: str = ""
+        self.last_decision: str = ""
+        self.last_decision_time: str = ""
+        self._last_reset_date: str = ""
+
+    def _maybe_reset_daily(self) -> None:
+        today = time.strftime("%Y-%m-%d")
+        if today != self._last_reset_date:
+            self.messages_today = 0
+            self.tools_today = 0
+            self.suggestions_today = 0
+            self._last_reset_date = today
+
+    def record_message(self) -> None:
+        self._maybe_reset_daily()
+        self.messages_today += 1
+        self.last_message_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    def record_tool_call(self, tool_name: str) -> None:
+        self._maybe_reset_daily()
+        self.tools_today += 1
+        self.last_tool_name = tool_name
+        self.last_tool_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    def record_suggestion(self, text: str) -> None:
+        self._maybe_reset_daily()
+        self.suggestions_today += 1
+        self.last_suggestion = text[:500]
+        self.last_suggestion_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    def record_decision(self, text: str) -> None:
+        self.last_decision = text[:500]
+        self.last_decision_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    def to_dict(self) -> dict[str, Any]:
+        self._maybe_reset_daily()
+        return {
+            "messages_today": self.messages_today,
+            "tools_today": self.tools_today,
+            "suggestions_today": self.suggestions_today,
+            "last_message_time": self.last_message_time,
+            "last_tool_name": self.last_tool_name,
+            "last_tool_time": self.last_tool_time,
+            "last_suggestion": self.last_suggestion,
+            "last_suggestion_time": self.last_suggestion_time,
+            "last_decision": self.last_decision,
+            "last_decision_time": self.last_decision_time,
+        }
+
+
 class OrchestratorService(BaseService):
     name = "orchestrator"
 
     def __init__(self) -> None:
         super().__init__(settings=OrchestratorSettings())
         self.settings: OrchestratorSettings
+        self._activity = ActivityTracker()
+        self._service_states: dict[str, dict[str, Any]] = {}
 
     async def run(self) -> None:
         self.mqtt.connect_background()
@@ -81,6 +147,10 @@ class OrchestratorService(BaseService):
             settings=self.settings,
         )
 
+        # Wire activity tracking into brain and tool executor
+        brain._activity_tracker = self._activity
+        tool_executor._activity_tracker = self._activity
+
         telegram = TelegramChannel(settings=self.settings, brain=brain)
 
         # Wire up notification callback so tools can send messages
@@ -91,6 +161,8 @@ class OrchestratorService(BaseService):
             telegram=telegram,
             settings=self.settings,
         )
+        # Wire activity tracker into proactive engine
+        proactive._activity_tracker = self._activity
 
         # --- Subscribe to service events via MQTT ---
         self.mqtt.subscribe("homelab/+/heartbeat", self._on_service_heartbeat)
@@ -98,6 +170,12 @@ class OrchestratorService(BaseService):
 
         # --- Register HA discovery entities ---
         self._register_ha_discovery()
+
+        # --- Publish initial activity state ---
+        self._publish_activity()
+
+        # --- Start activity publishing loop ---
+        asyncio.create_task(self._activity_publish_loop())
 
         # --- Start communication channel ---
         await telegram.start()
@@ -125,12 +203,53 @@ class OrchestratorService(BaseService):
         """Track heartbeats from other services."""
         service = payload.get("service", "unknown")
         status = payload.get("status", "unknown")
+        self._service_states[service] = {
+            "status": status,
+            "uptime_seconds": payload.get("uptime_seconds", 0),
+            "last_seen": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
         self.logger.debug("service_heartbeat", service=service, status=status)
 
     def _on_service_update(self, topic: str, payload: dict) -> None:
         """React to updates from other services (e.g. new PV forecast)."""
         self.logger.debug("service_update", topic=topic)
         self._touch_healthcheck()
+
+    # ------------------------------------------------------------------
+    # Activity publishing
+    # ------------------------------------------------------------------
+
+    async def _activity_publish_loop(self) -> None:
+        """Publish activity data to MQTT every 60 seconds."""
+        while not self._shutdown_event.is_set():
+            try:
+                self._publish_activity()
+            except Exception:
+                self.logger.debug("activity_publish_failed")
+            try:
+                await asyncio.wait_for(
+                    self._shutdown_event.wait(), timeout=60,
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+
+    def _publish_activity(self) -> None:
+        """Publish current activity state to MQTT for HA sensors."""
+        # Count healthy services
+        online_services = [
+            s for s, state in self._service_states.items()
+            if state.get("status") == "online"
+        ]
+        payload: dict[str, Any] = {
+            **self._activity.to_dict(),
+            "services_online": len(online_services),
+            "services_tracked": list(self._service_states.keys()),
+            "proactive_enabled": self.settings.enable_proactive_suggestions,
+            "morning_briefing_enabled": self.settings.enable_morning_briefing,
+            "evening_briefing_enabled": self.settings.enable_evening_briefing,
+        }
+        self.publish("activity", payload)
 
     # ------------------------------------------------------------------
     # HA MQTT auto-discovery
@@ -145,12 +264,15 @@ class OrchestratorService(BaseService):
             "model": "orchestrator",
         }
         node = "orchestrator"
+        heartbeat_topic = f"homelab/{self.name}/heartbeat"
+        activity_topic = f"homelab/{self.name}/activity"
 
+        # --- Connectivity & uptime ---
         self.mqtt.publish_ha_discovery(
             "binary_sensor", "service_status", node_id=node, config={
                 "name": "Orchestrator Status",
                 "device": device,
-                "state_topic": f"homelab/{self.name}/heartbeat",
+                "state_topic": heartbeat_topic,
                 "value_template": (
                     "{{ 'ON' if value_json.status == 'online' else 'OFF' }}"
                 ),
@@ -163,10 +285,11 @@ class OrchestratorService(BaseService):
             "sensor", "uptime", node_id=node, config={
                 "name": "Orchestrator Uptime",
                 "device": device,
-                "state_topic": f"homelab/{self.name}/heartbeat",
+                "state_topic": heartbeat_topic,
                 "value_template": "{{ value_json.uptime_seconds }}",
                 "unit_of_measurement": "s",
                 "icon": "mdi:timer-outline",
+                "entity_category": "diagnostic",
             },
         )
 
@@ -174,17 +297,136 @@ class OrchestratorService(BaseService):
             "sensor", "llm_provider", node_id=node, config={
                 "name": "LLM Provider",
                 "device": device,
-                "state_topic": f"homelab/{self.name}/heartbeat",
+                "state_topic": heartbeat_topic,
                 "value_template": "{{ value_json.llm_provider }}",
                 "icon": "mdi:brain",
             },
         )
 
-        self.logger.info("ha_discovery_registered", entity_count=3)
+        # --- Activity sensors ---
 
-    def health_check(self) -> dict[str, str]:
-        """Add LLM provider info to heartbeat."""
-        return {"llm_provider": self.settings.llm_provider}
+        self.mqtt.publish_ha_discovery(
+            "sensor", "messages_today", node_id=node, config={
+                "name": "Messages Today",
+                "device": device,
+                "state_topic": activity_topic,
+                "value_template": "{{ value_json.messages_today }}",
+                "icon": "mdi:message-text-outline",
+                "state_class": "total_increasing",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "tools_today", node_id=node, config={
+                "name": "Tool Calls Today",
+                "device": device,
+                "state_topic": activity_topic,
+                "value_template": "{{ value_json.tools_today }}",
+                "icon": "mdi:tools",
+                "state_class": "total_increasing",
+                "entity_category": "diagnostic",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "suggestions_today", node_id=node, config={
+                "name": "Suggestions Sent Today",
+                "device": device,
+                "state_topic": activity_topic,
+                "value_template": "{{ value_json.suggestions_today }}",
+                "icon": "mdi:lightbulb-on-outline",
+                "state_class": "total_increasing",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "last_tool_used", node_id=node, config={
+                "name": "Last Tool Used",
+                "device": device,
+                "state_topic": activity_topic,
+                "value_template": "{{ value_json.last_tool_name }}",
+                "icon": "mdi:wrench-outline",
+                "entity_category": "diagnostic",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "last_decision", node_id=node, config={
+                "name": "Last Decision",
+                "device": device,
+                "state_topic": activity_topic,
+                "value_template": "{{ value_json.last_decision[:250] }}",
+                "icon": "mdi:scale-balance",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "last_suggestion", node_id=node, config={
+                "name": "Last Suggestion",
+                "device": device,
+                "state_topic": activity_topic,
+                "value_template": "{{ value_json.last_suggestion[:250] }}",
+                "icon": "mdi:lightbulb-alert-outline",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "services_online", node_id=node, config={
+                "name": "Services Online",
+                "device": device,
+                "state_topic": activity_topic,
+                "value_template": "{{ value_json.services_online }}",
+                "icon": "mdi:server-network",
+            },
+        )
+
+        # --- Proactive feature status ---
+
+        self.mqtt.publish_ha_discovery(
+            "binary_sensor", "proactive_enabled", node_id=node, config={
+                "name": "Proactive Suggestions",
+                "device": device,
+                "state_topic": activity_topic,
+                "value_template": (
+                    "{{ 'ON' if value_json.proactive_enabled else 'OFF' }}"
+                ),
+                "icon": "mdi:robot-outline",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "binary_sensor", "morning_briefing_enabled", node_id=node, config={
+                "name": "Morning Briefing",
+                "device": device,
+                "state_topic": activity_topic,
+                "value_template": (
+                    "{{ 'ON' if value_json.morning_briefing_enabled else 'OFF' }}"
+                ),
+                "icon": "mdi:weather-sunset-up",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "binary_sensor", "evening_briefing_enabled", node_id=node, config={
+                "name": "Evening Briefing",
+                "device": device,
+                "state_topic": activity_topic,
+                "value_template": (
+                    "{{ 'ON' if value_json.evening_briefing_enabled else 'OFF' }}"
+                ),
+                "icon": "mdi:weather-sunset-down",
+            },
+        )
+
+        self.logger.info("ha_discovery_registered", entity_count=14)
+
+    def health_check(self) -> dict[str, Any]:
+        """Add LLM provider and activity info to heartbeat."""
+        return {
+            "llm_provider": self.settings.llm_provider,
+            "messages_today": self._activity.messages_today,
+            "services_tracked": len(self._service_states),
+        }
 
     # ------------------------------------------------------------------
     # Healthcheck
