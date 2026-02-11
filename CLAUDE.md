@@ -374,6 +374,46 @@ The central intelligence layer that coordinates all services, communicates with 
 - Uses `google-api-python-client` with Service Account auth (no interactive OAuth)
 - Setup: create Service Account in Google Cloud Console, share calendars with its email
 
+**Google Calendar Setup** (step-by-step):
+
+1. **Google Cloud Console** — go to https://console.cloud.google.com
+   - Create a new project (or use an existing one)
+   - Go to **APIs & Services → Library** → search "Google Calendar API" → **Enable**
+   - Go to **APIs & Services → Credentials** → **Create Credentials → Service Account**
+   - Give it a name (e.g. "homelab-orchestrator"), click through, done
+   - Click the new service account → **Keys** tab → **Add Key → Create new key → JSON**
+   - Download the JSON key file — this is your `GOOGLE_CALENDAR_CREDENTIALS_FILE`
+   - Note the service account email (looks like `name@project.iam.gserviceaccount.com`)
+
+2. **Share the family calendar** (read-only)
+   - Open https://calendar.google.com → hover your family calendar on the left → three dots → **Settings and sharing**
+   - Under **Share with specific people or groups** → **+ Add people and groups**
+   - Paste the service account email → set permission to **See all event details** → Send
+   - Scroll to **Integrate calendar** → copy the **Calendar ID** (e.g. `abc123@group.calendar.google.com` or your email for the primary calendar)
+
+3. **Create the orchestrator calendar** (read/write)
+   - In Google Calendar, click **+** next to "Other calendars" → **Create new calendar**
+   - Name it "Home Orchestrator" → click **Create calendar**
+   - Open its settings → under **Share with specific people or groups**, add the service account email with **Make changes to events** permission
+   - Copy the **Calendar ID** from **Integrate calendar**
+
+4. **Deploy the credentials**
+   - Option A — file mount: copy the JSON key into the orchestrator data volume:
+     ```bash
+     docker compose up -d orchestrator
+     docker cp /path/to/key.json orchestrator:/app/data/google-credentials.json
+     ```
+   - Option B — base64 env var (no file needed): `base64 -w0 /path/to/key.json` and set `GOOGLE_CALENDAR_CREDENTIALS_JSON` in `.env`
+
+5. **Configure `.env`**:
+   ```
+   GOOGLE_CALENDAR_CREDENTIALS_FILE=/app/data/google-credentials.json
+   GOOGLE_CALENDAR_FAMILY_ID=<family calendar ID from step 2>
+   GOOGLE_CALENDAR_ORCHESTRATOR_ID=<orchestrator calendar ID from step 3>
+   ```
+
+6. **Verify**: `docker compose restart orchestrator && docker compose logs -f orchestrator` → look for `google_calendar_enabled  family_cal=True  orchestrator_cal=True`
+
 **MQTT**: Subscribes to `homelab/+/heartbeat` and `homelab/+/updated` to track all service states.
 
 **HA entities** (via MQTT auto-discovery, "Home Orchestrator" device, 14 entities):
