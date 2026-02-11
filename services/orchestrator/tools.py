@@ -7,6 +7,7 @@ Tools are defined in OpenAI-compatible JSON Schema and executed here.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
 from datetime import datetime
@@ -534,6 +535,18 @@ class ToolExecutor:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
         try:
+            # Filter out arguments the handler doesn't accept (LLMs sometimes
+            # hallucinate extra parameters not in the tool schema).
+            sig = inspect.signature(handler)
+            params = sig.parameters
+            if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                valid_names = set(params.keys())
+                filtered = {k: v for k, v in arguments.items() if k in valid_names}
+                if len(filtered) != len(arguments):
+                    dropped = set(arguments) - valid_names
+                    logger.warning("tool_args_filtered", tool=tool_name, dropped=list(dropped))
+                arguments = filtered
+
             result = await handler(**arguments)
             return json.dumps(result, ensure_ascii=False, default=str)
         except Exception as e:
