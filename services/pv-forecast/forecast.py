@@ -167,7 +167,7 @@ class ForecastEngine:
             training_data = await self.data.get_training_data(
                 entity_id=entity_id,
                 capacity_kwp=capacity_kwp,
-                days_back=min(days_available, 365),
+                days_back=days_available,
                 forecast_solar_entity_id=fs_entity_id,
             )
 

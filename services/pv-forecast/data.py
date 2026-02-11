@@ -285,10 +285,11 @@ class PVDataCollector:
 
     def count_days_of_data(self, entity_id: str) -> int:
         """Check how many days of production data exist."""
+        history_days = self.settings.data_history_days
         records = self.influx.query_records(
             bucket=self.settings.influxdb_bucket,
             entity_id=entity_id,
-            range_start="-365d",
+            range_start=f"-{history_days}d",
             field="value",
         )
         if not records:
