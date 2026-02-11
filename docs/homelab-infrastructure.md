@@ -63,7 +63,7 @@
 | 192.168.0.90 | HomePod | AirPlay |
 | 192.168.0.91 | LG TV | webOS |
 | 192.168.0.92 | RXV473 | Yamaha AV receiver |
-| 192.168.0.93 | Tesla Model 3 | WiFi |
+| 192.168.0.93 | Audi A6 e-tron | WiFi (Audi Connect) |
 | 192.168.0.221 | Shelly Plus 1PM | HTTP/MQTT |
 | 192.168.0.222 | Shelly EM3 | HTTP/MQTT (main panel meter) |
 | 192.168.0.230 | keller_flur_treppe_v3 | ESPHome |
@@ -84,9 +84,22 @@
 Currently running: **Traefik** (reverse proxy) + **Portainer** (management)
 This repo's services are intended for this VM or dockerDev (VM 105).
 
+## Homelab Automation Services (this repo)
+All services run as Docker containers via `docker-compose.yml`, communicating via MQTT:
+
+| Service | Purpose | Key Integrations |
+|---------|---------|-----------------|
+| **pv-forecast** | AI solar production forecast (Gradient Boosting ML) | InfluxDB, Open-Meteo, Forecast.Solar, HA |
+| **smart-ev-charging** | Wallbox control (PV surplus, deadline, battery-aware) | AMTRON Modbus, HA, Audi Connect (SoC) |
+| **ev-forecast** | EV driving forecast & charging planner | Dual Audi Connect, Google Calendar, PV forecast |
+| **orchestrator** | AI-powered home brain (LLM + tools + Telegram) | Gemini/OpenAI/Anthropic/Ollama, HA, MQTT, Google Calendar |
+
+All services use MQTT auto-discovery to register entities in HA and publish heartbeats every 60s. Each has a `diagnose.py` for step-by-step connectivity testing.
+
 ## Notes
 - Proxmox RAM is heavily used (~91%). HA VM alone takes 94% of its allocated RAM.
 - dockerDev (VM 105) at 89% memory — also loaded.
 - The system has been running 164+ days without restart — very stable.
 - Two MQTT instances: production (LXC 215, .73) and temp/test (LXC 110).
 - AI stack: Ollama + Open WebUI + ComfyUI + Flowise AI + SearXNG — all on LXCs.
+- Secrets managed via SOPS + age encryption (`.env.enc`). Plain `.env` is gitignored.

@@ -37,10 +37,13 @@
 - **HomeKit Bridge** — 1 service (exposing HA to Apple Home)
 - **Thread** — 1 entry
 
+### Vehicle
+- **Audi Connect** — Dual accounts (Hans + Nicole) for Audi A6 e-tron. Template sensors combine both into unified entities (see `HomeAssistant_config/ev_audi_connect.yaml`): `sensor.ev_state_of_charge`, `sensor.ev_range`, `sensor.ev_charging_state`, `sensor.ev_plug_state`, `sensor.ev_mileage`, `sensor.ev_active_account`, `binary_sensor.ev_plugged_in`, `binary_sensor.ev_is_charging`
+
 ### Automation / Development
 - **Node-RED Companion** — 1 entry
 - **Pyscript Python scripting** — 1 entry
-- **MQTT** — 2 devices
+- **MQTT** — 2 devices + homelab service auto-discovery entities (see below)
 - **HACS** — 10 services (custom components)
 
 ### Media
@@ -63,6 +66,34 @@
 - **Tuya** (h.schuettken@gmail.com) — needs reconfiguration
 - **Home Connect** (homeappliances) — needs reconfiguration (Bosch/Siemens appliances)
 - **Withings** — health/fitness data, can be added
+
+## MQTT Auto-Discovery Entities (from homelab services)
+
+All services register entities in HA automatically via MQTT Discovery on startup. Grouped by device:
+
+### PV AI Forecast (23 entities)
+- `binary_sensor` — Service online/offline (3-min expiry)
+- `sensor` — Uptime, Today/Tomorrow/Day-After kWh, Today Remaining kWh, East/West Today/Tomorrow kWh
+- `sensor` (diagnostic) — East/West Model Type (ml/fallback), East/West R², East/West MAE, Training Data Days, Last Model Training
+- `sensor` — Forecast.Solar Today (comparison), Forecast Reasoning
+
+### Smart EV Charging (24 entities)
+- `binary_sensor` — Service online/offline, Vehicle Connected, Full by Morning active
+- `sensor` (core) — Charge Mode, Target Power (W), Actual Power (W), Session Energy (kWh), PV Available (W), Status, Home Battery Power (W), Home Battery SoC (%), House Power (W)
+- `sensor` (EV) — EV SoC (%), Energy Needed (kWh)
+- `sensor` (decision) — PV Surplus before assist (W), Battery Assist Power (W), Battery Assist Reason, PV DC Power (W), Grid Power (W), PV Forecast Remaining (kWh), Energy Remaining to Target (kWh), Target Energy (kWh)
+- `sensor` (deadline) — Deadline Hours Left, Deadline Required Power (W)
+- `sensor` (reasoning) — Decision Reasoning (JSON attributes)
+
+### Home Orchestrator (15 entities)
+- `binary_sensor` — Service online/offline, Proactive Suggestions enabled, Morning/Evening Briefing enabled
+- `sensor` — Uptime, LLM Provider, Messages Today, Tool Calls Today, Suggestions Sent Today, Last Tool Used, Last Decision, Last Suggestion, Services Online
+- `sensor` (reasoning) — Orchestrator Reasoning (JSON attributes)
+
+### EV Forecast (13 entities)
+- `binary_sensor` — Service online/offline
+- `sensor` — EV SoC (%), EV Range (km), Active Account, Charging State, Plug State, Energy Needed Today (kWh), Recommended Charge Mode, Next Trip, Next Departure, Plan Status, Uptime
+- `sensor` (reasoning) — Plan Reasoning (JSON attributes)
 
 ## KNX Room Layout & Entities
 
@@ -129,6 +160,14 @@ All rooms have shutters: Gästebad, Bad OG, Wohnzimmer (2x: links + Kamin), Bad 
 ## Integration Sensors (configuration.yaml)
 - inverter_pv_east_energy (integration of east power)
 - inverter_pv_west_energy (integration of west power)
+
+## EV Charging HA Helpers (input_* entities)
+- `input_select.ev_charge_mode` — Off / PV Surplus / Smart / Eco / Fast / Manual
+- `input_boolean.ev_full_by_morning` — Deadline mode toggle
+- `input_datetime.ev_departure_time` — When the car leaves
+- `input_number.ev_target_soc_pct` — Target SoC % (default 80)
+- `input_number.ev_target_energy_kwh` — Fallback manual energy target
+- `input_number.ev_battery_capacity_kwh` — Total EV battery capacity
 
 ## Heating System Notes (from comments)
 - Oil-based heating with floor heating
