@@ -278,7 +278,7 @@ async def check_telegram(settings) -> None:
 async def check_calendar(settings) -> None:
     header("Google Calendar")
     try:
-        from calendar import GoogleCalendarClient
+        from gcal import GoogleCalendarClient
         gcal = GoogleCalendarClient(
             credentials_file=settings.google_calendar_credentials_file,
             credentials_json=settings.google_calendar_credentials_json,

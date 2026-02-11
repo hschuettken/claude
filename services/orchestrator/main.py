@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 from shared.service import BaseService
 
 from brain import Brain
-from calendar import GoogleCalendarClient
+from gcal import GoogleCalendarClient
 from channels.telegram import TelegramChannel
 from config import OrchestratorSettings
 from llm import create_provider

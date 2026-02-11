@@ -45,7 +45,7 @@ This file provides guidance for AI assistants working with this repository.
 │   │   ├── tools.py                         #   LLM tool definitions & execution
 │   │   ├── memory.py                        #   Persistent conversations, profiles, preferences
 │   │   ├── semantic_memory.py               #   Vector-based long-term memory (embeddings + search)
-│   │   ├── calendar.py                      #   Google Calendar integration (read family, write own)
+│   │   ├── gcal.py                          #   Google Calendar integration (read family, write own)
 │   │   ├── proactive.py                     #   Scheduled briefings, alerts, suggestions
 │   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
 │   │   ├── diagnose.py                      #   Step-by-step connectivity diagnostic
