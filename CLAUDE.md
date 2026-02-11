@@ -78,12 +78,23 @@ This file provides guidance for AI assistants working with this repository.
 │   │   ├── charger.py                       #   Wallbox abstraction (read state, set power)
 │   │   ├── strategy.py                      #   Charging strategy logic
 │   │   └── healthcheck.py                   #   Docker HEALTHCHECK script
+│   ├── ev-forecast/                         #   EV driving forecast & charging planner
+│   │   ├── Dockerfile
+│   │   ├── requirements.txt                 #   google-api-python-client, google-auth
+│   │   ├── main.py                          #   Entry point + scheduler
+│   │   ├── config.py                        #   EV forecast settings
+│   │   ├── vehicle.py                       #   Dual Audi Connect account handling
+│   │   ├── trips.py                         #   Calendar-based trip prediction
+│   │   ├── planner.py                       #   Smart charging plan generator
+│   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
+│   │   └── diagnose.py                      #   Step-by-step connectivity/data diagnostic
 │   └── example-service/                     #   Template service
 │       ├── Dockerfile
 │       ├── requirements.txt                 #   Service-specific deps only
 │       └── main.py                          #   Entry point
 ├── HomeAssistant_config/                    # Reference HA configuration (read-only docs)
 │   ├── configuration.yaml                   #   Main HA config (entities, integrations, InfluxDB)
+│   ├── ev_audi_connect.yaml                 #   Dual Audi Connect template sensors + automation
 │   └── ...                                  #   KNX, sensor, climate, cover, light configs
 ├── infrastructure/                          # Config for infra containers
 │   └── mosquitto/config/mosquitto.conf
@@ -149,9 +160,13 @@ docker compose logs -f pv-forecast       # watch output
 ```bash
 docker compose run --rm pv-forecast python diagnose.py            # test everything
 docker compose run --rm pv-forecast python diagnose.py --step ha  # test just HA
+
+docker compose run --rm ev-forecast python diagnose.py            # test everything
+docker compose run --rm ev-forecast python diagnose.py --step audi  # test just Audi Connect
 ```
 
-Steps: `config`, `ha`, `influx`, `mqtt`, `weather`, `forecast`, `all`
+pv-forecast steps: `config`, `ha`, `influx`, `mqtt`, `weather`, `forecast`, `all`
+ev-forecast steps: `config`, `ha`, `audi`, `mqtt`, `calendar`, `geocoding`, `plan`, `all`
 
 ### Debugging with VS Code
 
@@ -307,6 +322,7 @@ Two PV arrays connected to a single inverter:
 - **Energy pricing**: EPEX spot market (`sensor.epex_spot_data_price_2`), `input_number.price_per_kwh_electricity_grid`, `input_number.price_per_kwh_electricity_pv`
 - **EV charging**: Amtron wallbox via Modbus — `sensor.amtron_meter_total_power_w`, `sensor.amtron_meter_total_energy_kwh`
 - **Forecast.Solar**: Configured per array — `sensor.energy_production_today_east` / `west`, `sensor.energy_production_tomorrow_east` / `west`
+- **EV (Audi Connect)**: Dual-account setup — `sensor.ev_state_of_charge` (%, combined template), `sensor.ev_range` (km), `sensor.ev_charging_state`, `sensor.ev_plug_state`, `binary_sensor.ev_plugged_in`, `binary_sensor.ev_is_charging` (see `HomeAssistant_config/ev_audi_connect.yaml`)
 
 ## Services
 
@@ -416,9 +432,9 @@ The central intelligence layer that coordinates all services, communicates with 
 
 **MQTT**: Subscribes to `homelab/+/heartbeat` and `homelab/+/updated` to track all service states.
 
-**HA entities** (via MQTT auto-discovery, "Home Orchestrator" device):
-- `binary_sensor` — Service online/offline
-- `sensor` — Uptime, LLM Provider
+**HA entities** (via MQTT auto-discovery, "Home Orchestrator" device, 14 entities):
+- `binary_sensor` — Service online/offline, Proactive Suggestions enabled, Morning/Evening Briefing enabled
+- `sensor` — Uptime, LLM Provider, Messages Today, Tool Calls Today, Suggestions Sent Today, Last Tool Used, Last Decision, Last Suggestion, Services Online
 
 **Config** (env vars): `LLM_PROVIDER`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`, `MORNING_BRIEFING_TIME`, `ENABLE_PROACTIVE_SUGGESTIONS`, `ENABLE_SEMANTIC_MEMORY`, `GRID_PRICE_CT`, `FEED_IN_TARIFF_CT`, `OIL_PRICE_PER_KWH_CT`, `HOUSEHOLD_USERS`, `GOOGLE_CALENDAR_CREDENTIALS_FILE`, `GOOGLE_CALENDAR_FAMILY_ID`, `GOOGLE_CALENDAR_ORCHESTRATOR_ID`. Most entity IDs have sensible defaults matching the existing HA setup.
 
@@ -453,9 +469,11 @@ trained on historical production data (InfluxDB) correlated with weather feature
 
 Each sensor includes an `hourly` attribute with per-hour breakdown.
 
-*Via MQTT auto-discovery* (grouped under "PV AI Forecast" device in HA):
+*Via MQTT auto-discovery* (grouped under "PV AI Forecast" device in HA, 23 entities):
 - `binary_sensor` — Service status (online/offline, 3-min expiry)
-- `sensor` — Uptime (seconds), Today kWh, Today Remaining kWh, Tomorrow kWh, Day After kWh
+- `sensor` — Uptime, Today/Tomorrow/Day-After kWh, Today Remaining kWh, East/West Today/Tomorrow kWh
+- `sensor` (diagnostic) — East/West Model Type (ml/fallback), East/West R², East/West MAE, Training Data Days (East/West), Last Model Training timestamp
+- `sensor` — Forecast.Solar Today (comparison), Forecast Reasoning (with full_reasoning attribute)
 
 **MQTT events**: `homelab/pv-forecast/updated`, `homelab/pv-forecast/model-trained`, `homelab/pv-forecast/heartbeat`
 
@@ -496,13 +514,60 @@ Charging from PV surplus = +18 ct/kWh profit. Grid charging = cost-neutral.
 - `input_number.ev_target_energy_kwh` — Energy to add this session
 - `input_number.ev_battery_capacity_kwh` — Total EV battery capacity
 
-**HA output sensors** (via MQTT auto-discovery, "Smart EV Charging" device, 10 entities):
-- `binary_sensor` — Service online/offline
-- `sensor` — Charge Mode, Target Power (W), Actual Power (W), Session Energy (kWh), PV Available (W), Status text, Home Battery Power (W), Home Battery SoC (%), House Power (W)
+**HA output sensors** (via MQTT auto-discovery, "Smart EV Charging" device, 22 entities):
+- `binary_sensor` — Service online/offline, Vehicle Connected, Full by Morning active
+- `sensor` (core) — Charge Mode, Target Power (W), Actual Power (W), Session Energy (kWh), PV Available (W), Status text, Home Battery Power (W), Home Battery SoC (%), House Power (W)
+- `sensor` (decision context) — PV Surplus before assist (W), Battery Assist Power (W), Battery Assist Reason, PV DC Power (W), Grid Power (W), PV Forecast Remaining (kWh), Energy Remaining to Target (kWh), Target Energy (kWh)
+- `sensor` (deadline) — Deadline Hours Left, Deadline Required Power (W)
+- `sensor` (reasoning) — Decision Reasoning (with full_reasoning, battery_assist_reason, deadline details as JSON attributes)
 
 **MQTT events**: `homelab/smart-ev-charging/status`, `homelab/smart-ev-charging/heartbeat`
 
 **Config** (env vars): `EV_GRID_PRICE_CT`, `EV_FEED_IN_TARIFF_CT`, `EV_REIMBURSEMENT_CT`, `WALLBOX_MAX_POWER_W`, `WALLBOX_MIN_POWER_W`, `ECO_CHARGE_POWER_W`, `GRID_RESERVE_W`, `CONTROL_INTERVAL_SECONDS`, `BATTERY_MIN_SOC_PCT`, `BATTERY_EV_ASSIST_MAX_W`, `PV_FORECAST_GOOD_KWH`. Entity IDs have sensible defaults matching the Amtron + Sungrow + Shelly setup.
+
+### ev-forecast — EV Driving Forecast & Smart Charging Planner
+
+Monitors the Audi A6 e-tron (83 kWh gross / 76 kWh net) via dual Audi Connect accounts, predicts driving needs from the family calendar, and generates smart charging plans that maximize PV usage while ensuring the car is always ready.
+
+**Vehicle**: Audi A6 e-tron, ~22 kWh/100 km average consumption.
+
+**Dual Audi Connect accounts**: Hans and Nicole each have an Audi Connect account for the same car. Only the person who last drove sees valid sensor data — the other shows "unknown". The service:
+1. Tries both accounts' sensors, picks the one with valid data
+2. Triggers `audiconnect.refresh_cloud_data` to update stale data
+3. Creates "virtual" combined HA sensors via template sensors (see `HomeAssistant_config/ev_audi_connect.yaml`)
+
+**Calendar-based trip prediction**: Reads the shared family calendar. Events are parsed by prefix:
+- `H: <destination>` — Hans drives (e.g., "H: Aachen", "H: STR")
+- `N: <destination>` — Nicole drives (e.g., "N: Münster")
+- Hans: trips >350 km → takes the train (no EV impact); 100–350 km → asks via Telegram
+- Nicole: default commute Mon–Thu to Lengerich (22 km one way), departs 07:00, returns ~18:00
+- Known destinations are mapped to distances via a configurable lookup table
+
+**Smart charging plan**: For the next 3 days, the planner:
+1. Calculates energy needed for each day's trips (distance × 22 kWh/100km)
+2. Adds safety buffer (min SoC at arrival + reserve)
+3. Compares to current SoC and PV forecast
+4. Chooses the best charge mode:
+   - **PV Surplus** — no trips or SoC already sufficient
+   - **Smart** — PV surplus + grid fill by departure deadline
+   - **Fast/Eco** — urgent, departure imminent
+5. Automatically sets the HA input helpers (`ev_charge_mode`, `ev_target_energy_kwh`, `ev_departure_time`, `ev_full_by_morning`) for the smart-ev-charging service
+
+**Data flow**: Audi Connect (SoC/range) + Google Calendar (trips) + PV Forecast (solar) → Charging Plan → HA Helpers → smart-ev-charging (wallbox control)
+
+**Schedule**: Vehicle state check every 15 min, plan update every 30 min.
+
+**HA output sensors** (via MQTT auto-discovery, "EV Forecast" device, 11 entities):
+- `binary_sensor` — Service online/offline
+- `sensor` — EV SoC (%), EV Range (km), Active Account, Charging State, Plug State, Energy Needed Today (kWh), Recommended Charge Mode, Next Trip, Next Departure, Plan Status
+
+**MQTT events**: `homelab/ev-forecast/vehicle`, `homelab/ev-forecast/plan`, `homelab/ev-forecast/clarification-needed`, `homelab/ev-forecast/heartbeat`
+
+**MQTT integration with orchestrator**: When a trip needs clarification (unknown distance or Hans's ambiguous trips), publishes to `homelab/ev-forecast/clarification-needed`. The orchestrator can ask via Telegram and respond on `homelab/ev-forecast/trip-response`.
+
+**HA YAML** (`HomeAssistant_config/ev_audi_connect.yaml`): Template sensors that combine both Audi Connect accounts into unified entities (`sensor.ev_state_of_charge`, `sensor.ev_range`, `sensor.ev_charging_state`, `sensor.ev_plug_state`, `sensor.ev_mileage`, `sensor.ev_active_account`, `binary_sensor.ev_plugged_in`, `binary_sensor.ev_is_charging`).
+
+**Config** (env vars): `EV_BATTERY_CAPACITY_GROSS_KWH`, `EV_BATTERY_CAPACITY_NET_KWH`, `EV_CONSUMPTION_KWH_PER_100KM`, `AUDI_ACCOUNT1_*` / `AUDI_ACCOUNT2_*` (entity IDs per account), `NICOLE_COMMUTE_KM`, `NICOLE_COMMUTE_DAYS`, `HANS_TRAIN_THRESHOLD_KM`, `KNOWN_DESTINATIONS` (JSON), `MIN_SOC_PCT`, `BUFFER_SOC_PCT`, `PLAN_UPDATE_MINUTES`, `VEHICLE_CHECK_MINUTES`. Uses same `GOOGLE_CALENDAR_*` credentials as the orchestrator.
 
 ## Code Conventions
 

@@ -1,0 +1,197 @@
+# =============================================================================
+# EV Audi Connect — Dual Account Configuration
+# =============================================================================
+#
+# The Audi A6 e-tron has two Audi Connect accounts (Hans & Nicole).
+# Only the person who last drove sees valid data; the other shows "unknown".
+#
+# This config creates:
+#   1. Template sensors that always show the valid value from whichever account works
+#   2. An automation to periodically refresh both accounts' cloud data
+#
+# Include this file in your main configuration.yaml:
+#   template: !include ev_audi_connect.yaml
+#
+# Or merge the template section into your existing template configuration.
+#
+# IMPORTANT: Adjust the entity IDs below to match your actual Audi Connect
+# integration entity names. The defaults assume:
+#   Account 1 (Hans):  sensor.audi_a6_e_tron_<property>
+#   Account 2 (Nicole): sensor.audi_a6_e_tron_<property>_2
+# =============================================================================
+
+# --- Template sensors: "Virtual" Audi Connect that always shows valid data ---
+
+template:
+  - sensor:
+      # --- State of Charge (%) ---
+      - name: "EV State of Charge"
+        unique_id: ev_combined_state_of_charge
+        unit_of_measurement: "%"
+        device_class: battery
+        state_class: measurement
+        icon: mdi:car-battery
+        state: >-
+          {% set a1 = states('sensor.audi_a6_e_tron_state_of_charge') %}
+          {% set a2 = states('sensor.audi_a6_e_tron_state_of_charge_2') %}
+          {% if a1 not in ['unknown', 'unavailable', 'None', ''] %}
+            {{ a1 }}
+          {% elif a2 not in ['unknown', 'unavailable', 'None', ''] %}
+            {{ a2 }}
+          {% else %}
+            unknown
+          {% endif %}
+        attributes:
+          account1_value: "{{ states('sensor.audi_a6_e_tron_state_of_charge') }}"
+          account2_value: "{{ states('sensor.audi_a6_e_tron_state_of_charge_2') }}"
+          source_account: >-
+            {% set a1 = states('sensor.audi_a6_e_tron_state_of_charge') %}
+            {% if a1 not in ['unknown', 'unavailable', 'None', ''] %}
+              Hans
+            {% else %}
+              Nicole
+            {% endif %}
+
+      # --- Electric Range (km) ---
+      - name: "EV Range"
+        unique_id: ev_combined_range
+        unit_of_measurement: "km"
+        icon: mdi:map-marker-distance
+        state: >-
+          {% set a1 = states('sensor.audi_a6_e_tron_range') %}
+          {% set a2 = states('sensor.audi_a6_e_tron_range_2') %}
+          {% if a1 not in ['unknown', 'unavailable', 'None', ''] %}
+            {{ a1 }}
+          {% elif a2 not in ['unknown', 'unavailable', 'None', ''] %}
+            {{ a2 }}
+          {% else %}
+            unknown
+          {% endif %}
+        attributes:
+          account1_value: "{{ states('sensor.audi_a6_e_tron_range') }}"
+          account2_value: "{{ states('sensor.audi_a6_e_tron_range_2') }}"
+
+      # --- Charging State ---
+      - name: "EV Charging State"
+        unique_id: ev_combined_charging_state
+        icon: mdi:ev-plug-type2
+        state: >-
+          {% set a1 = states('sensor.audi_a6_e_tron_charging_state') %}
+          {% set a2 = states('sensor.audi_a6_e_tron_charging_state_2') %}
+          {% if a1 not in ['unknown', 'unavailable', 'None', ''] %}
+            {{ a1 }}
+          {% elif a2 not in ['unknown', 'unavailable', 'None', ''] %}
+            {{ a2 }}
+          {% else %}
+            unknown
+          {% endif %}
+
+      # --- Plug State ---
+      - name: "EV Plug State"
+        unique_id: ev_combined_plug_state
+        icon: mdi:power-plug
+        state: >-
+          {% set a1 = states('sensor.audi_a6_e_tron_plug_state') %}
+          {% set a2 = states('sensor.audi_a6_e_tron_plug_state_2') %}
+          {% if a1 not in ['unknown', 'unavailable', 'None', ''] %}
+            {{ a1 }}
+          {% elif a2 not in ['unknown', 'unavailable', 'None', ''] %}
+            {{ a2 }}
+          {% else %}
+            unknown
+          {% endif %}
+
+      # --- Remaining Charge Time (min) ---
+      - name: "EV Remaining Charge Time"
+        unique_id: ev_combined_remaining_charge_time
+        unit_of_measurement: "min"
+        icon: mdi:battery-clock-outline
+        state: >-
+          {% set a1 = states('sensor.audi_a6_e_tron_remaining_charge_time') %}
+          {% set a2 = states('sensor.audi_a6_e_tron_remaining_charge_time_2') %}
+          {% if a1 not in ['unknown', 'unavailable', 'None', ''] %}
+            {{ a1 }}
+          {% elif a2 not in ['unknown', 'unavailable', 'None', ''] %}
+            {{ a2 }}
+          {% else %}
+            unknown
+          {% endif %}
+
+      # --- Mileage (km) ---
+      - name: "EV Mileage"
+        unique_id: ev_combined_mileage
+        unit_of_measurement: "km"
+        icon: mdi:counter
+        state_class: total_increasing
+        state: >-
+          {% set a1 = states('sensor.audi_a6_e_tron_mileage') %}
+          {% set a2 = states('sensor.audi_a6_e_tron_mileage_2') %}
+          {% if a1 not in ['unknown', 'unavailable', 'None', ''] %}
+            {{ a1 }}
+          {% elif a2 not in ['unknown', 'unavailable', 'None', ''] %}
+            {{ a2 }}
+          {% else %}
+            unknown
+          {% endif %}
+
+      # --- Active Account indicator ---
+      - name: "EV Active Account"
+        unique_id: ev_active_account
+        icon: mdi:account-check
+        state: >-
+          {% set a1_soc = states('sensor.audi_a6_e_tron_state_of_charge') %}
+          {% set a2_soc = states('sensor.audi_a6_e_tron_state_of_charge_2') %}
+          {% if a1_soc not in ['unknown', 'unavailable', 'None', ''] %}
+            Hans
+          {% elif a2_soc not in ['unknown', 'unavailable', 'None', ''] %}
+            Nicole
+          {% else %}
+            None
+          {% endif %}
+
+  - binary_sensor:
+      # --- Is EV plugged in? ---
+      - name: "EV Plugged In"
+        unique_id: ev_combined_plugged_in
+        device_class: plug
+        state: >-
+          {% set plug = states('sensor.ev_plug_state') %}
+          {{ plug | lower in ['connected', 'locked', 'angeschlossen'] }}
+
+      # --- Is EV charging? ---
+      - name: "EV Is Charging"
+        unique_id: ev_combined_is_charging
+        device_class: battery_charging
+        state: >-
+          {% set charging = states('sensor.ev_charging_state') %}
+          {{ charging | lower in ['charging', 'laden'] }}
+
+# =============================================================================
+# Automation: Periodic Audi Connect Cloud Refresh
+# =============================================================================
+# Add this to your automations.yaml or include separately.
+# Tries both accounts' refresh_cloud_data to ensure at least one has fresh data.
+#
+# automation:
+#   - id: ev_audi_connect_refresh
+#     alias: "EV: Refresh Audi Connect Data"
+#     description: "Periodically refresh Audi Connect cloud data for both accounts"
+#     trigger:
+#       - platform: time_pattern
+#         minutes: "/30"    # Every 30 minutes
+#     action:
+#       # Try account 1 refresh
+#       - service: audiconnect.refresh_cloud_data
+#         data:
+#           vin: "YOUR_VIN_HERE"
+#       # Small delay between calls
+#       - delay: "00:00:05"
+#       # Try account 2 refresh (same VIN, different integration instance)
+#       - service: audiconnect.refresh_cloud_data
+#         data:
+#           vin: "YOUR_VIN_HERE"
+#     mode: single
+#
+# NOTE: The ev-forecast service also triggers refreshes programmatically.
+# You may not need this automation if the service handles it.
+# =============================================================================

@@ -92,6 +92,8 @@ class Brain:
         self._settings = settings
         self._semantic = semantic
         self._tz = ZoneInfo(settings.timezone)
+        # Injected by OrchestratorService after construction
+        self._activity_tracker: Any = None
 
     async def process_message(
         self,
@@ -130,6 +132,10 @@ class Brain:
             history_len=len(history_msgs),
             has_memory_context=bool(memory_context),
         )
+
+        # Track message activity
+        if self._activity_tracker:
+            self._activity_tracker.record_message()
 
         # Multi-turn tool-calling loop
         final_text = await self._reasoning_loop(messages)
@@ -182,6 +188,8 @@ class Brain:
             # Execute each tool call
             for tc in response.tool_calls:
                 logger.info("tool_call", round=round_num, tool=tc.name, args=tc.arguments)
+                if self._activity_tracker:
+                    self._activity_tracker.record_tool_call(tc.name)
                 result = await self._tools.execute(tc.name, tc.arguments)
                 messages.append(Message(
                     role="tool",
