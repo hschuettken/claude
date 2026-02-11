@@ -53,13 +53,15 @@ class EmbeddingProvider:
 
     async def embed(self, text: str) -> list[float]:
         """Return an embedding vector for *text*."""
-        # Try providers in preference order
+        errors: list[str] = []
         for fn in (self._embed_gemini, self._embed_openai):
             try:
                 return await fn(text)
-            except Exception:
+            except Exception as exc:
+                errors.append(f"{fn.__name__}: {exc}")
                 continue
-        raise RuntimeError("No embedding provider available")
+        logger.warning("all_embedding_providers_failed", errors=errors)
+        raise RuntimeError(f"No embedding provider available: {'; '.join(errors)}")
 
     async def _embed_gemini(self, text: str) -> list[float]:
         s = self._settings
