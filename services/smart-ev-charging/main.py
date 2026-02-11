@@ -139,6 +139,20 @@ class SmartEVChargingService(BaseService):
         # Household consumption (for monitoring)
         house_power = await self._read_float(self.settings.house_power_entity)
 
+        # EV battery SoC (from car, e.g. Audi Connect) — None if not configured
+        ev_soc: float | None = None
+        if self.settings.ev_soc_entity:
+            ev_soc = await self._read_float_optional(
+                self.settings.ev_soc_entity,
+            )
+
+        ev_battery_capacity = await self._read_float(
+            self.settings.ev_battery_capacity_entity, default=77.0,
+        )
+        ev_target_soc = await self._read_float(
+            self.settings.target_soc_entity, default=80.0,
+        )
+
         ctx = ChargingContext(
             mode=mode,
             wallbox=wallbox,
@@ -151,6 +165,9 @@ class SmartEVChargingService(BaseService):
             departure_time=departure_time,
             target_energy_kwh=target_energy,
             session_energy_kwh=wallbox.session_energy_kwh,
+            ev_soc_pct=ev_soc,
+            ev_battery_capacity_kwh=ev_battery_capacity,
+            ev_target_soc_pct=ev_target_soc,
             now=datetime.now(self.tz),
         )
 
@@ -175,6 +192,9 @@ class SmartEVChargingService(BaseService):
             house_w=round(house_power),
             bat_w=round(battery_power),
             bat_soc=round(battery_soc),
+            ev_soc=round(ev_soc) if ev_soc is not None else None,
+            ev_target_soc=round(ev_target_soc),
+            energy_needed_kwh=round(ctx.energy_needed_kwh, 1),
             forecast_kwh=round(pv_forecast_remaining, 1),
             target_w=decision.target_power_w,
             reason=decision.reason,
@@ -201,6 +221,18 @@ class SmartEVChargingService(BaseService):
         except Exception:
             self.logger.warning("read_float_failed", entity_id=entity_id)
             return default
+
+    async def _read_float_optional(self, entity_id: str) -> float | None:
+        """Read a float sensor, returning None if unavailable."""
+        try:
+            state = await self.ha.get_state(entity_id)
+            val = state.get("state", "")
+            if val in ("unavailable", "unknown", ""):
+                return None
+            return float(val)
+        except Exception:
+            self.logger.warning("read_float_optional_failed", entity_id=entity_id)
+            return None
 
     async def _read_bool(self, entity_id: str) -> bool:
         try:
@@ -244,12 +276,15 @@ class SmartEVChargingService(BaseService):
             "target_power_w": decision.target_power_w,
             "actual_power_w": round(ctx.wallbox.current_power_w),
             "session_energy_kwh": round(ctx.wallbox.session_energy_kwh, 2),
+            "energy_needed_kwh": round(ctx.energy_needed_kwh, 1),
             "grid_power_w": round(ctx.grid_power_w),
             "pv_power_w": round(ctx.pv_power_w),
             "pv_available_w": round(pv_available),
             "house_power_w": round(house_power),
             "battery_power_w": round(ctx.battery_power_w),
             "battery_soc_pct": round(ctx.battery_soc_pct, 1),
+            "ev_soc_pct": round(ctx.ev_soc_pct, 1) if ctx.ev_soc_pct is not None else None,
+            "ev_target_soc_pct": round(ctx.ev_target_soc_pct),
             "pv_forecast_remaining_kwh": round(ctx.pv_forecast_remaining_kwh, 1),
             "full_by_morning": ctx.full_by_morning,
             "reason": decision.reason,
@@ -282,6 +317,13 @@ class SmartEVChargingService(BaseService):
         if not ctx.wallbox.vehicle_connected:
             lines.append("→ No vehicle connected, nothing to do.")
             return "\n".join(lines)
+
+        # EV SoC info
+        if ctx.ev_soc_pct is not None:
+            lines.append(
+                f"EV SoC: {ctx.ev_soc_pct:.0f}% → target {ctx.ev_target_soc_pct:.0f}% | "
+                f"Energy needed: {ctx.energy_needed_kwh:.1f} kWh"
+            )
 
         # Energy balance
         grid_dir = "export" if ctx.grid_power_w > 0 else "import"
@@ -500,6 +542,37 @@ class SmartEVChargingService(BaseService):
             },
         )
 
+        # --- EV SoC sensors ---
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "ev_soc", node_id=node, config={
+                "name": "EV SoC",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": (
+                    "{{ value_json.ev_soc_pct "
+                    "if value_json.ev_soc_pct is not none "
+                    "else 'unknown' }}"
+                ),
+                "unit_of_measurement": "%",
+                "device_class": "battery",
+                "state_class": "measurement",
+                "icon": "mdi:car-battery",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "energy_needed", node_id=node, config={
+                "name": "Energy Needed",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.energy_needed_kwh }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:battery-charging-outline",
+            },
+        )
+
         # --- Enhanced decision context sensors ---
 
         self.mqtt.publish_ha_discovery(
@@ -677,7 +750,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.logger.info("ha_discovery_registered", entity_count=22)
+        self.logger.info("ha_discovery_registered", entity_count=24)
 
     # ------------------------------------------------------------------
     # Healthcheck

@@ -17,6 +17,11 @@ class EVChargingSettings(BaseSettings):
     wallbox_energy_session_entity: str = "sensor.amtron_charged_energy_session_kwh"
     wallbox_hems_power_number: str = "number.amtron_hems_power_limit_w"
 
+    # --- EV battery (Audi Connect / We Connect) ---
+    # Set to your Audi SoC sensor entity — empty string = not available
+    ev_soc_entity: str = ""
+    ev_battery_capacity_entity: str = "input_number.ev_battery_capacity_kwh"
+
     # --- Grid connection meter ---
     # Positive = exporting to grid, negative = importing from grid
     grid_power_entity: str = "sensor.power_meter_active_power"
@@ -42,8 +47,8 @@ class EVChargingSettings(BaseSettings):
     charge_mode_entity: str = "input_select.ev_charge_mode"
     full_by_morning_entity: str = "input_boolean.ev_full_by_morning"
     departure_time_entity: str = "input_datetime.ev_departure_time"
+    target_soc_entity: str = "input_number.ev_target_soc_pct"
     target_energy_entity: str = "input_number.ev_target_energy_kwh"
-    ev_battery_capacity_entity: str = "input_number.ev_battery_capacity_kwh"
 
     # --- Wallbox power limits ---
     wallbox_max_power_w: int = 11000  # 16A x 3ph x 230V
@@ -56,9 +61,10 @@ class EVChargingSettings(BaseSettings):
     ramp_step_w: int = 500          # Max power change per control cycle
 
     # --- Economics (ct/kWh) ---
-    grid_price_ct: float = 25.0       # Fixed grid buy price
-    feed_in_tariff_ct: float = 7.0    # Feed-in revenue per kWh
-    reimbursement_ct: float = 25.0    # Employer pays back per kWh charged
+    # Fixed prices — no EPEX spot market, just flat rates
+    grid_price_ct: float = 25.0       # Fixed grid import price
+    feed_in_tariff_ct: float = 7.0    # Grid export revenue per kWh
+    reimbursement_ct: float = 25.0    # Employer reimburses per kWh charged
 
     # --- Timing ---
     control_interval_seconds: int = 30

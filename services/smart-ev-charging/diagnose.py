@@ -83,12 +83,15 @@ def check_config() -> dict:
             "BATTERY_MIN_SOC_PCT": str(s.battery_min_soc_pct),
             "BATTERY_EV_ASSIST_MAX_W": str(s.battery_ev_assist_max_w),
             "PV_FORECAST_GOOD_KWH": str(s.pv_forecast_good_kwh),
+            "EV_SOC_ENTITY": s.ev_soc_entity or "(not configured)",
         }
         for key, val in checks.items():
             print(f"         {key} = {val}")
 
         if not s.ha_token:
             warn("HA_TOKEN is empty — HA connection will fail")
+        if not s.ev_soc_entity:
+            warn("EV_SOC_ENTITY not set — will use manual target energy")
 
         return {"settings": s}
 
@@ -122,6 +125,7 @@ async def check_ha(settings) -> None:
             ("Charge mode selector", settings.charge_mode_entity),
             ("Full by morning toggle", settings.full_by_morning_entity),
             ("Departure time", settings.departure_time_entity),
+            ("Target SoC", settings.target_soc_entity),
             ("Target energy", settings.target_energy_entity),
         ]:
             try:
@@ -221,6 +225,26 @@ async def check_energy(settings) -> None:
                 detail += f" ({note})"
             result(f"{label} ({entity_id})", ok, detail)
 
+        # EV SoC (optional)
+        if settings.ev_soc_entity:
+            val_str, val_float = await read_val(settings.ev_soc_entity)
+            values["EV SoC"] = val_float
+            result(f"EV SoC ({settings.ev_soc_entity})",
+                   val_float is not None, f"Value: {val_str} %")
+        else:
+            values["EV SoC"] = None
+            info("EV SoC not configured (EV_SOC_ENTITY is empty)")
+
+        # EV battery capacity + target SoC
+        for label, entity_id in [
+            ("EV battery capacity", settings.ev_battery_capacity_entity),
+            ("EV target SoC", settings.target_soc_entity),
+        ]:
+            val_str, val_float = await read_val(entity_id)
+            values[label] = val_float
+            result(f"{label} ({entity_id})",
+                   val_float is not None, f"Value: {val_str}")
+
         # Calculate PV surplus (same formula as the service)
         grid = values.get("Grid power") or 0
         pv = values.get("PV DC power") or 0
@@ -230,6 +254,20 @@ async def check_energy(settings) -> None:
              f"grid ({grid:+.0f}) + battery ({battery:+.0f}) "
              f"- reserve ({settings.grid_reserve_w}) = {surplus:.0f} W\n"
              f"(EV would reclaim its own power when actually charging)")
+
+        # SoC-based target
+        ev_soc = values.get("EV SoC")
+        ev_cap = values.get("EV battery capacity") or 77.0
+        target_soc = values.get("EV target SoC") or 80.0
+        if ev_soc is not None:
+            needed = max(0, (target_soc - ev_soc) / 100.0 * ev_cap)
+            info(
+                "SoC-based target:",
+                f"EV at {ev_soc:.0f}% → target {target_soc:.0f}%"
+                f" × {ev_cap:.0f} kWh = {needed:.1f} kWh needed",
+            )
+        else:
+            info("SoC-based target: N/A (no EV SoC sensor)")
 
     except Exception:
         result("Energy state", False, traceback.format_exc())
@@ -320,6 +358,16 @@ async def check_cycle(settings) -> None:
             except Exception:
                 return default
 
+        async def read_float_optional(entity_id: str) -> float | None:
+            try:
+                state = await ha.get_state(entity_id)
+                val = state.get("state", "")
+                if val in ("unavailable", "unknown", ""):
+                    return None
+                return float(val)
+            except Exception:
+                return None
+
         async def read_bool(entity_id: str) -> bool:
             try:
                 state = await ha.get_state(entity_id)
@@ -354,6 +402,12 @@ async def check_cycle(settings) -> None:
         battery_power = await read_float(settings.battery_power_entity)
         battery_soc = await read_float(settings.battery_soc_entity)
         pv_forecast_remaining = await read_float(settings.pv_forecast_remaining_entity)
+        ev_battery_cap = await read_float(settings.ev_battery_capacity_entity, 77.0)
+        ev_target_soc = await read_float(settings.target_soc_entity, 80.0)
+
+        ev_soc: float | None = None
+        if settings.ev_soc_entity:
+            ev_soc = await read_float_optional(settings.ev_soc_entity)
 
         ctx = ChargingContext(
             mode=mode,
@@ -367,16 +421,23 @@ async def check_cycle(settings) -> None:
             departure_time=departure_time,
             target_energy_kwh=target_energy,
             session_energy_kwh=wallbox.session_energy_kwh,
+            ev_soc_pct=ev_soc,
+            ev_battery_capacity_kwh=ev_battery_cap,
+            ev_target_soc_pct=ev_target_soc,
             now=datetime.now(tz),
         )
 
         decision = strategy.decide(ctx)
 
+        ev_soc_str = f"{ev_soc:.0f}%" if ev_soc is not None else "N/A"
         result("Control cycle", True,
                f"Mode: {mode.value}\n"
                f"Vehicle: {wallbox.vehicle_state_text} (connected: {wallbox.vehicle_connected})\n"
                f"Grid: {grid_power:+.0f} W | PV: {pv_power:.0f} W\n"
                f"Battery: {battery_power:+.0f} W ({battery_soc:.0f}%)\n"
+               f"EV SoC: {ev_soc_str} | Target SoC: {ev_target_soc:.0f}%"
+               f" | Capacity: {ev_battery_cap:.0f} kWh\n"
+               f"Energy needed: {ctx.energy_needed_kwh:.1f} kWh\n"
                f"PV forecast remaining: {pv_forecast_remaining:.1f} kWh\n"
                f"Full-by-morning: {full_by_morning} | "
                f"Target: {target_energy:.0f} kWh | "
