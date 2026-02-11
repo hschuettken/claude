@@ -1,19 +1,23 @@
-"""Google Gemini LLM provider with function-calling support."""
+"""Google Gemini LLM provider with function-calling support.
+
+Uses the ``google-genai`` SDK (replacement for the deprecated
+``google-generativeai`` package).
+"""
 
 from __future__ import annotations
 
-import json
 import uuid
 from typing import Any
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 from llm.base import LLMProvider, LLMResponse, Message, ToolCall, ToolDefinition
 
 
 class GeminiProvider(LLMProvider):
     def __init__(self, api_key: str, model: str, temperature: float = 0.7) -> None:
-        genai.configure(api_key=api_key)
+        self._client = genai.Client(api_key=api_key)
         self._model_name = model
         self._temperature = temperature
 
@@ -32,17 +36,22 @@ class GeminiProvider(LLMProvider):
                 conversation.append(msg)
 
         gemini_tools = self._convert_tools(tools) if tools else None
-        model = genai.GenerativeModel(
-            self._model_name,
+
+        config = types.GenerateContentConfig(
+            temperature=self._temperature,
             system_instruction=system_instruction,
             tools=gemini_tools,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                disable=True,
+            ),
         )
 
         contents = self._build_contents(conversation)
 
-        response = await model.generate_content_async(
-            contents,
-            generation_config=genai.GenerationConfig(temperature=self._temperature),
+        response = await self._client.aio.models.generate_content(
+            model=self._model_name,
+            contents=contents,
+            config=config,
         )
 
         return self._parse_response(response)
@@ -51,78 +60,59 @@ class GeminiProvider(LLMProvider):
     # Internal conversions
     # ------------------------------------------------------------------
 
-    def _convert_tools(self, tools: list[ToolDefinition]) -> list[dict]:
+    def _convert_tools(self, tools: list[ToolDefinition]) -> list[types.Tool]:
         """Convert OpenAI-format tool defs to Gemini function declarations."""
-        declarations: list[dict[str, Any]] = []
+        declarations: list[types.FunctionDeclaration] = []
         for tool in tools:
             func = tool.get("function", tool)
-            decl: dict[str, Any] = {
-                "name": func["name"],
-                "description": func.get("description", ""),
-            }
+            decl = types.FunctionDeclaration(
+                name=func["name"],
+                description=func.get("description", ""),
+            )
             if "parameters" in func:
-                decl["parameters"] = self._convert_schema(func["parameters"])
+                decl.parameters_json_schema = func["parameters"]
             declarations.append(decl)
-        return [{"function_declarations": declarations}]
+        return [types.Tool(function_declarations=declarations)]
 
-    def _convert_schema(self, schema: dict) -> dict:
-        """Recursively convert JSON Schema to Gemini Schema format."""
-        result: dict[str, Any] = {}
-        if "type" in schema:
-            result["type_"] = schema["type"].upper()
-        if "description" in schema:
-            result["description"] = schema["description"]
-        if "enum" in schema:
-            result["enum"] = schema["enum"]
-        if "properties" in schema:
-            result["properties"] = {
-                k: self._convert_schema(v) for k, v in schema["properties"].items()
-            }
-        if "required" in schema:
-            result["required"] = schema["required"]
-        if "items" in schema:
-            result["items"] = self._convert_schema(schema["items"])
-        return result
-
-    def _build_contents(self, messages: list[Message]) -> list[dict]:
+    def _build_contents(self, messages: list[Message]) -> list[types.Content]:
         """Convert unified messages to Gemini contents format."""
-        contents: list[dict] = []
+        contents: list[types.Content] = []
 
         for msg in messages:
             if msg.role == "user":
-                contents.append({"role": "user", "parts": [{"text": msg.content or ""}]})
+                contents.append(types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=msg.content or "")],
+                ))
 
             elif msg.role == "assistant":
-                parts: list[dict] = []
+                parts: list[types.Part] = []
                 if msg.content:
-                    parts.append({"text": msg.content})
+                    parts.append(types.Part.from_text(text=msg.content))
                 if msg.tool_calls:
                     for tc in msg.tool_calls:
-                        parts.append({
-                            "function_call": {
-                                "name": tc.name,
-                                "args": tc.arguments,
-                            }
-                        })
+                        parts.append(types.Part.from_function_call(
+                            name=tc.name,
+                            args=tc.arguments,
+                        ))
                 if parts:
-                    contents.append({"role": "model", "parts": parts})
+                    contents.append(types.Content(role="model", parts=parts))
 
             elif msg.role == "tool":
-                # Gemini expects function responses as user-role messages
+                # Parse tool result back to dict for Gemini
                 try:
+                    import json
                     response_data = json.loads(msg.content) if msg.content else {}
                 except (json.JSONDecodeError, TypeError):
                     response_data = {"result": msg.content}
 
-                contents.append({
-                    "role": "user",
-                    "parts": [{
-                        "function_response": {
-                            "name": msg.name or "unknown",
-                            "response": response_data,
-                        }
-                    }],
-                })
+                contents.append(types.Content(
+                    role="tool",
+                    parts=[types.Part.from_function_response(
+                        name=msg.name or "unknown",
+                        response=response_data,
+                    )],
+                ))
 
         return contents
 

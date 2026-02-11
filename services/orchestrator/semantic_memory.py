@@ -20,7 +20,6 @@ Features:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import math
 import time
@@ -68,15 +67,14 @@ class EmbeddingProvider:
         if not api_key:
             raise RuntimeError("No Gemini API key")
 
-        import google.generativeai as genai
+        from google import genai
 
-        genai.configure(api_key=api_key)
-        result = await asyncio.to_thread(
-            genai.embed_content,
-            model="models/text-embedding-004",
-            content=text,
+        client = genai.Client(api_key=api_key)
+        result = await client.aio.models.embed_content(
+            model="text-embedding-004",
+            contents=text,
         )
-        return result["embedding"]
+        return list(result.embeddings[0].values)
 
     async def _embed_openai(self, text: str) -> list[float]:
         s = self._settings
