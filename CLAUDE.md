@@ -528,9 +528,6 @@ Each sensor includes an `hourly` attribute with per-hour breakdown.
 Controls the Amtron wallbox via HEMS power limit (Modbus register 1002) to optimize
 EV charging based on PV surplus, user preferences, and departure deadlines.
 
-**Economics**: Grid buy 25 ct/kWh (fixed), feed-in 7 ct/kWh, employer reimburses 25 ct/kWh.
-Charging from PV surplus = +18 ct/kWh profit. Grid charging = cost-neutral.
-
 **Charge modes** (selected via `input_select.ev_charge_mode`):
 
 | Mode | Behavior |
