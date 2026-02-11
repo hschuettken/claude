@@ -20,7 +20,7 @@ from shared.log import get_logger
 
 if TYPE_CHECKING:
     from brain import Brain
-    from calendar import GoogleCalendarClient
+    from gcal import GoogleCalendarClient
     from channels.telegram import TelegramChannel
     from config import OrchestratorSettings
 

@@ -18,7 +18,7 @@ from shared.influx_client import InfluxClient
 from shared.log import get_logger
 from shared.mqtt_client import MQTTClient
 
-from calendar import GoogleCalendarClient
+from gcal import GoogleCalendarClient
 from config import OrchestratorSettings
 from memory import Memory
 from semantic_memory import SemanticMemory
