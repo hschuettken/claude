@@ -157,25 +157,19 @@ class VehicleMonitor:
         return self._last_state
 
     async def refresh_data(self) -> bool:
-        """Trigger a cloud data refresh via the Audi Connect service.
+        """Trigger a cloud data refresh via the Audi Connect HA script.
 
-        Iterates all configured VINs (Henning & Nicole) and calls
-        audiconnect.refresh_cloud_data for each. Then re-reads state.
+        Calls the ev_refresh_cloud script which refreshes cloud data for
+        all registered accounts in one API call. Then re-reads state.
         Returns True if fresh data was obtained.
         """
         refreshed = False
-        for rc in self._refresh_configs:
-            if rc.vin:
-                try:
-                    await self._ha.call_service(
-                        "audiconnect",
-                        "refresh_cloud_data",
-                        {"vin": rc.vin},
-                    )
-                    logger.info("cloud_refresh_triggered", account=rc.name)
-                    refreshed = True
-                except Exception:
-                    logger.debug("cloud_refresh_failed", account=rc.name)
+        try:
+            await self._ha.call_service("script", "ev_refresh_cloud", {})
+            logger.info("cloud_refresh_triggered")
+            refreshed = True
+        except Exception:
+            logger.debug("cloud_refresh_failed")
 
         if refreshed:
             # Wait a moment for data to propagate
