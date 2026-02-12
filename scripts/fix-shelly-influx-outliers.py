@@ -80,6 +80,17 @@ from(bucket: "{BUCKET}")
             })
     # Sort by time across all tables (InfluxDB returns separate tables per _measurement)
     records.sort(key=lambda r: r["time"])
+
+    # Deduplicate: InfluxDB stores multiple series (e.g. per-phase tags) for the same
+    # entity_id, resulting in 3 identical records per timestamp. Collapse to one per
+    # timestamp so neighbor-based outlier detection works correctly.
+    if records:
+        deduped = [records[0]]
+        for r in records[1:]:
+            if r["time"] != deduped[-1]["time"]:
+                deduped.append(r)
+        records = deduped
+
     return records
 
 
