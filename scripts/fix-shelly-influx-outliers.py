@@ -78,6 +78,8 @@ from(bucket: "{BUCKET}")
                 "value": record.get_value(),
                 "measurement": record.get_measurement(),
             })
+    # Sort by time across all tables (InfluxDB returns separate tables per _measurement)
+    records.sort(key=lambda r: r["time"])
     return records
 
 
@@ -179,6 +181,7 @@ def delete_points(client: InfluxDBClient, entity_id: str, outliers: list[dict]) 
 def analyze_and_fix(
     client: InfluxDBClient, entity_id: str, apply: bool,
     range_start: str, range_stop: str, threshold: float,
+    dump: int = 0,
 ) -> int:
     """Analyze one sensor and optionally fix outliers. Returns outlier count."""
     print(f"\n{'='*60}")
@@ -187,6 +190,24 @@ def analyze_and_fix(
 
     records = query_sensor_data(client, entity_id, range_start, range_stop)
     print(f"Data points in window: {len(records)}")
+
+    # Count records per _measurement
+    meas_counts: dict[str, int] = {}
+    for r in records:
+        m = r["measurement"]
+        meas_counts[m] = meas_counts.get(m, 0) + 1
+    if len(meas_counts) > 1:
+        print(f"  WARNING: Multiple _measurement values: {meas_counts}")
+    elif meas_counts:
+        print(f"  _measurement: {list(meas_counts.keys())[0]}")
+
+    if dump and records:
+        n = min(dump, len(records))
+        print(f"\n  First {n} data points:")
+        for r in records[:n]:
+            print(f"    {r['time'].isoformat()}  {r['value']:>12.2f}  ({r['measurement']})")
+        if len(records) > n:
+            print(f"  ... ({len(records) - n} more)")
 
     if not records:
         print("No data found. Check entity_id and date range.")
@@ -250,6 +271,10 @@ def main() -> None:
         "--total-only", action="store_true",
         help="Only check the total sensor, skip per-phase sensors",
     )
+    parser.add_argument(
+        "--dump", type=int, metavar="N", default=0,
+        help="Dump first N data points per sensor (for debugging)",
+    )
     args = parser.parse_args()
 
     range_start = args.start
@@ -273,14 +298,14 @@ def main() -> None:
 
         # Check total energy sensor
         total_outliers += analyze_and_fix(
-            client, ENTITY_ID, args.apply, range_start, range_stop, threshold,
+            client, ENTITY_ID, args.apply, range_start, range_stop, threshold, args.dump,
         )
 
         # Check per-phase sensors
         if not args.total_only:
             for phase_entity in PHASE_ENTITIES:
                 total_outliers += analyze_and_fix(
-                    client, phase_entity, args.apply, range_start, range_stop, threshold,
+                    client, phase_entity, args.apply, range_start, range_stop, threshold, args.dump,
                 )
 
         print(f"\n{'='*60}")
