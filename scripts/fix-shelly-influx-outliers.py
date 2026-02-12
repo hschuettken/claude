@@ -173,7 +173,8 @@ def delete_points(client: InfluxDBClient, entity_id: str, outliers: list[dict]) 
         # Use a 1-second window around the exact timestamp
         start = ts.strftime("%Y-%m-%dT%H:%M:%S.000Z")
         stop = ts.strftime("%Y-%m-%dT%H:%M:%S.999Z")
-        predicate = f'entity_id="{entity_id}" AND _field="value"'
+        # InfluxDB v2 delete only supports tag predicates (not _field)
+        predicate = f'entity_id="{entity_id}"'
 
         try:
             delete_api.delete(
