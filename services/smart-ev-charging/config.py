@@ -18,8 +18,8 @@ class EVChargingSettings(BaseSettings):
     wallbox_hems_power_number: str = "number.amtron_hems_power_limit_w"
 
     # --- EV battery (Audi Connect / We Connect) ---
-    # Set to your Audi SoC sensor entity — empty string = not available
-    ev_soc_entity: str = ""
+    # Combined SoC sensor from dual Audi Connect accounts (mileage-based active account)
+    ev_soc_entity: str = "sensor.audi_a6_avant_e_tron_state_of_charge_comb"
     ev_battery_capacity_entity: str = "input_number.ev_battery_capacity_kwh"
 
     # --- Grid connection meter ---

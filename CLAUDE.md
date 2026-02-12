@@ -107,7 +107,7 @@ This file provides guidance for AI assistants working with this repository.
 │       └── healthcheck.py                   #   Docker HEALTHCHECK script
 ├── HomeAssistant_config/                    # Reference HA configuration (read-only docs)
 │   ├── configuration.yaml                   #   Main HA config (entities, integrations, InfluxDB)
-│   ├── ev_audi_connect.yaml                 #   Dual Audi Connect template sensors + automation
+│   ├── ev_audi_connect.yaml                 #   Dual Audi Connect combined sensors, scripts & automation (HA package)
 │   └── ...                                  #   KNX, sensor, climate, cover, light configs
 ├── infrastructure/                          # Config for infra containers
 │   └── mosquitto/config/mosquitto.conf
@@ -386,9 +386,9 @@ Two PV arrays connected to a single inverter:
 - **Home battery**: `sensor.batteries_charge_discharge_power` (W, positive = charging, negative = discharging), `sensor.batteries_state_of_capacity` (%, SoC) — 7 kWh / 3.5 kW max
 - **Energy pricing**: Fixed rates — grid import 25 ct/kWh, feed-in 7 ct/kWh, EV reimbursement 25 ct/kWh. No EPEX spot market used.
 - **EV charging**: Amtron wallbox via Modbus — `sensor.amtron_meter_total_power_w`, `sensor.amtron_meter_total_energy_kwh`
-- **EV battery**: Audi Connect — SoC sensor (configurable via `EV_SOC_ENTITY`)
+- **EV battery**: Audi Connect — SoC sensor (`sensor.audi_a6_avant_e_tron_state_of_charge_comb`)
 - **Forecast.Solar**: Configured per array — `sensor.energy_production_today_east` / `west`, `sensor.energy_production_tomorrow_east` / `west`
-- **EV (Audi Connect)**: Dual-account setup with mileage-based active account detection — `sensor.ev_state_of_charge` (%, combined template), `sensor.ev_range` (km), `sensor.ev_charging_state`, `sensor.ev_plug_state`, `sensor.ev_mileage`, `sensor.ev_climatisation`, `binary_sensor.ev_plugged_in`, `binary_sensor.ev_is_charging`, `binary_sensor.ev_climatisation_active` (see `HomeAssistant_config/ev_audi_connect.yaml`)
+- **EV (Audi Connect)**: Dual-account setup with mileage-based active account detection. Combined `_comb` sensors merge both accounts (higher mileage = active driver): `sensor.audi_a6_avant_e_tron_state_of_charge_comb` (%), `sensor.audi_a6_avant_e_tron_range_comb` (km), `sensor.audi_a6_avant_e_tron_charging_state_comb`, `sensor.audi_a6_avant_e_tron_plug_state_comb`, `sensor.audi_a6_avant_e_tron_mileage_comb`, `sensor.audi_a6_avant_e_tron_climatisation_state_comb`, `binary_sensor.audi_a6_avant_e_tron_plugged_in_comb`, `binary_sensor.audi_a6_avant_e_tron_is_charging_comb`, `binary_sensor.audi_a6_avant_e_tron_climatisation_active_comb`. HA scripts for vehicle actions: `script.ev_refresh_cloud`, `script.ev_refresh_vehicle`, `script.ev_start_climate`, `script.ev_lock`, `script.ev_unlock`, etc. (see `HomeAssistant_config/ev_audi_connect.yaml`)
 
 ## Services
 
@@ -617,10 +617,10 @@ Monitors the Audi A6 e-tron (83 kWh gross / 76 kWh net) via dual Audi Connect ac
 
 **Vehicle**: Audi A6 e-tron, ~22 kWh/100 km average consumption.
 
-**Dual Audi Connect accounts**: Henning and Nicole each have an Audi Connect account for the same car. Only the person who last drove sees valid sensor data — the other shows "unknown". HA template sensors (see `HomeAssistant_config/ev_audi_connect.yaml`) determine the active account via mileage-based comparison and expose combined entities. The service:
-1. Reads from combined HA template sensors (`sensor.ev_state_of_charge`, `sensor.ev_range`, `sensor.ev_charging_state`, `sensor.ev_plug_state`, `sensor.ev_mileage`, `sensor.ev_climatisation`, etc.) — HA handles active account selection
+**Dual Audi Connect accounts**: Henning and Nicole each have an Audi Connect account for the same car. Only the person who last drove sees valid sensor data — the other shows "unknown". HA template sensors (see `HomeAssistant_config/ev_audi_connect.yaml`) determine the active account via **mileage comparison** (higher mileage = last driver) and expose combined `_comb` entities. The service:
+1. Reads from combined HA template sensors (`sensor.audi_a6_avant_e_tron_state_of_charge_comb`, `sensor.audi_a6_avant_e_tron_range_comb`, `sensor.audi_a6_avant_e_tron_charging_state_comb`, `sensor.audi_a6_avant_e_tron_plug_state_comb`, `sensor.audi_a6_avant_e_tron_mileage_comb`, `sensor.audi_a6_avant_e_tron_climatisation_state_comb`, etc.) — HA handles active account selection
 2. Triggers `audiconnect.refresh_cloud_data` for both accounts to keep data fresh (account names + VINs still needed for cloud refresh)
-3. Individual account sensor config has been replaced with combined sensor entity IDs in the service config
+3. Individual account sensor config has been replaced with combined `_comb` sensor entity IDs in the service config
 
 **Calendar-based trip prediction**: Reads the shared family calendar. Events are parsed by prefix:
 - `H: <destination>` — Henning drives (e.g., "H: Aachen", "H: STR")
@@ -668,7 +668,7 @@ Monitors the Audi A6 e-tron (83 kWh gross / 76 kWh net) via dual Audi Connect ac
 
 **MQTT integration with orchestrator**: When a trip needs clarification (unknown distance or Henning's ambiguous trips), publishes to `homelab/ev-forecast/clarification-needed`. The orchestrator can ask via Telegram and respond on `homelab/ev-forecast/trip-response`.
 
-**HA YAML** (`HomeAssistant_config/ev_audi_connect.yaml`): Template sensors that combine both Audi Connect accounts into unified entities. Active account is determined by mileage comparison (higher mileage = last driver). Combined entities: `sensor.ev_state_of_charge`, `sensor.ev_range`, `sensor.ev_charging_state`, `sensor.ev_plug_state`, `sensor.ev_mileage`, `sensor.ev_active_account`, `sensor.ev_climatisation`, `binary_sensor.ev_plugged_in`, `binary_sensor.ev_is_charging`, `binary_sensor.ev_climatisation_active`.
+**HA YAML** (`HomeAssistant_config/ev_audi_connect.yaml`): HA package that combines both Audi Connect accounts into unified `_comb` entities via mileage-based active account detection. Also includes scripts for cloud/vehicle refresh and all vehicle actions (climate, lock, unlock, charger, etc.), plus a periodic cloud refresh automation (every 30 min). Include as a HA package: `homeassistant: packages: ev_audi: !include ev_audi_connect.yaml`. Requires `ev_vin` in `secrets.yaml`. Combined entities: `sensor.audi_a6_avant_e_tron_state_of_charge_comb`, `sensor.audi_a6_avant_e_tron_range_comb`, `sensor.audi_a6_avant_e_tron_charging_state_comb`, `sensor.audi_a6_avant_e_tron_plug_state_comb`, `sensor.audi_a6_avant_e_tron_mileage_comb`, `sensor.audi_a6_avant_e_tron_active_account_comb`, `sensor.audi_a6_avant_e_tron_climatisation_state_comb`, `binary_sensor.audi_a6_avant_e_tron_plugged_in_comb`, `binary_sensor.audi_a6_avant_e_tron_is_charging_comb`, `binary_sensor.audi_a6_avant_e_tron_climatisation_active_comb`. Scripts: `script.ev_refresh_cloud`, `script.ev_refresh_vehicle`, `script.ev_start_climate`, `script.ev_stop_climate`, `script.ev_start_window_heating`, `script.ev_lock`, `script.ev_unlock`, `script.ev_start_charger`, `script.ev_stop_charger`, `script.ev_set_target_soc`.
 
 **Config** (env vars): `EV_BATTERY_CAPACITY_GROSS_KWH`, `EV_BATTERY_CAPACITY_NET_KWH`, `EV_CONSUMPTION_KWH_PER_100KM`, `EV_SOC_ENTITY`, `EV_RANGE_ENTITY`, `EV_CHARGING_STATE_ENTITY`, `EV_PLUG_STATE_ENTITY`, `EV_MILEAGE_ENTITY`, `EV_CLIMATISATION_ENTITY` (combined sensor entity IDs — HA handles active account selection), `AUDI_ACCOUNT1_NAME` / `AUDI_ACCOUNT1_VIN`, `AUDI_ACCOUNT2_NAME` / `AUDI_ACCOUNT2_VIN` (needed for cloud refresh only), `NICOLE_COMMUTE_KM`, `NICOLE_COMMUTE_DAYS`, `HENNING_TRAIN_THRESHOLD_KM`, `KNOWN_DESTINATIONS` (JSON), `MIN_SOC_PCT`, `BUFFER_SOC_PCT`, `CRITICAL_URGENCY_HOURS`, `HIGH_URGENCY_HOURS`, `FAST_MODE_THRESHOLD_KWH`, `EARLY_DEPARTURE_HOUR`, `PLAN_UPDATE_MINUTES`, `VEHICLE_CHECK_MINUTES`, `SAFE_MODE_ENTITY`. Uses same `GOOGLE_CALENDAR_*` credentials as the orchestrator.
 
