@@ -63,7 +63,7 @@
 | 192.168.0.90 | HomePod | AirPlay |
 | 192.168.0.91 | LG TV | webOS |
 | 192.168.0.92 | RXV473 | Yamaha AV receiver |
-| 192.168.0.93 | Audi A6 e-tron | WiFi (Audi Connect) |
+| 192.168.0.93 | Audi A6 Avant e-tron | WiFi (Audi Connect) |
 | 192.168.0.221 | Shelly Plus 1PM | HTTP/MQTT |
 | 192.168.0.222 | Shelly EM3 | HTTP/MQTT (main panel meter) |
 | 192.168.0.230 | keller_flur_treppe_v3 | ESPHome |

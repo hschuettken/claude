@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     anthropic_api_key: str = ""
 
+    # --- Global Safe Mode ---
+    # When enabled, services continue monitoring but block write actions
+    safe_mode_entity: str = ""  # e.g. "input_boolean.homelab_safe_mode"
+
     # --- General ---
     log_level: str = "INFO"
     timezone: str = "Europe/Berlin"

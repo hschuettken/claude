@@ -103,7 +103,7 @@ class OrchestratorSettings(BaseSettings):
     memory_consolidation_min_batch_size: int = 5  # min entries to trigger consolidation
 
     # --- Household info ---
-    household_users: str = "Hans,Nicole"  # comma-separated
+    household_users: str = "Henning,Nicole"  # comma-separated
     household_language: str = "de"  # default response language
 
     @property

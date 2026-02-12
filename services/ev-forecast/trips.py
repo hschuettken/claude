@@ -2,13 +2,13 @@
 
 Parses family calendar events to predict upcoming driving needs.
 Uses the convention:
-  - "H: <destination>" = Hans drives
+  - "H: <destination>" = Henning drives
   - "N: <destination>" = Nicole drives
   - No prefix / normal events = no driving (or Nicole's default commute)
 
 Known destinations are mapped to distances. Unknown destinations are
 geocoded via OpenStreetMap Nominatim to estimate road distance from home.
-For ambiguous Hans trips, the service requests clarification from
+For ambiguous Henning trips, the service requests clarification from
 the orchestrator (which asks via Telegram).
 """
 
@@ -34,7 +34,7 @@ class Trip:
     """A predicted trip requiring the EV."""
 
     date: date
-    person: str                      # "Hans" or "Nicole"
+    person: str                      # "Henning" or "Nicole"
     destination: str                 # Raw destination string
     distance_km: float               # One-way distance
     round_trip_km: float             # Total distance (usually 2x one-way)
@@ -42,7 +42,7 @@ class Trip:
     departure_time: time | None = None
     return_time: time | None = None
     is_commute: bool = False         # Nicole's regular commute
-    needs_clarification: bool = False # Unknown distance or Hans ambiguous
+    needs_clarification: bool = False # Unknown distance or Henning ambiguous
     source: str = ""                 # "calendar" or "default_commute"
 
     @property
@@ -178,8 +178,8 @@ class TripPredictor:
         nicole_commute_days: list[str] | None = None,
         nicole_departure_time: str = "07:00",
         nicole_arrival_time: str = "18:00",
-        hans_train_threshold_km: float = 350.0,
-        calendar_prefix_hans: str = "H:",
+        henning_train_threshold_km: float = 350.0,
+        calendar_prefix_henning: str = "H:",
         calendar_prefix_nicole: str = "N:",
         timezone: str = "Europe/Berlin",
         geo_distance: GeoDistance | None = None,
@@ -190,8 +190,8 @@ class TripPredictor:
         self._nicole_commute_days = nicole_commute_days or ["mon", "tue", "wed", "thu"]
         self._nicole_departure = self._parse_time(nicole_departure_time)
         self._nicole_arrival = self._parse_time(nicole_arrival_time)
-        self._hans_train_km = hans_train_threshold_km
-        self._prefix_hans = calendar_prefix_hans.lower().strip()
+        self._henning_train_km = henning_train_threshold_km
+        self._prefix_henning = calendar_prefix_henning.lower().strip()
         self._prefix_nicole = calendar_prefix_nicole.lower().strip()
         self._tz = ZoneInfo(timezone)
         self._geo = geo_distance
@@ -223,12 +223,12 @@ class TripPredictor:
             nicole_has_calendar_trip = any(
                 t.person.lower() == "nicole" for t in calendar_trips
             )
-            hans_has_calendar_trip = any(
-                t.person.lower() == "hans" for t in calendar_trips
+            henning_has_calendar_trip = any(
+                t.person.lower() == "henning" for t in calendar_trips
             )
 
-            # Check if Hans is on a multi-day trip (all-day event)
-            hans_away = self._is_person_away(calendar_events, current_date, "h")
+            # Check if Henning is on a multi-day trip (all-day event)
+            henning_away = self._is_person_away(calendar_events, current_date, "h")
             nicole_away = self._is_person_away(calendar_events, current_date, "n")
 
             trips: list[Trip] = list(calendar_trips)
@@ -258,7 +258,7 @@ class TripPredictor:
         return plans
 
     def resolve_clarification(self, event_id: str, use_ev: bool, distance_km: float = 0) -> None:
-        """Resolve a pending trip clarification (e.g., Hans confirms he drives EV)."""
+        """Resolve a pending trip clarification (e.g., Henning confirms he drives EV)."""
         trip = self._pending_clarifications.pop(event_id, None)
         if trip and use_ev and distance_km > 0:
             trip.distance_km = distance_km
@@ -321,20 +321,20 @@ class TripPredictor:
                     default_km=distance_km,
                 )
 
-            # Hans: check if he takes the train for long distances
-            if person.lower() == "hans" and distance_km > self._hans_train_km:
+            # Henning: check if he takes the train for long distances
+            if person.lower() == "henning" and distance_km > self._henning_train_km:
                 logger.info(
-                    "hans_takes_train",
+                    "henning_takes_train",
                     destination=destination,
                     distance_km=distance_km,
                 )
                 continue  # No EV needed
 
-            # Hans: for medium distances, flag for clarification
+            # Henning: for medium distances, flag for clarification
             if (
-                person.lower() == "hans"
+                person.lower() == "henning"
                 and distance_km > 100
-                and distance_km <= self._hans_train_km
+                and distance_km <= self._henning_train_km
                 and not needs_clarification
             ):
                 needs_clarification = True
@@ -367,7 +367,7 @@ class TripPredictor:
         return trips
 
     def _parse_event_summary(self, summary: str) -> tuple[str, str]:
-        """Parse 'H: Stuttgart' into ('Hans', 'Stuttgart').
+        """Parse 'H: Stuttgart' into ('Henning', 'Stuttgart').
 
         Returns (person, destination) or ('', '') if not a driving event.
         """
@@ -376,7 +376,7 @@ class TripPredictor:
 
         # Try prefix matching: "H: destination" or "N: destination"
         for prefix, person in [
-            (self._prefix_hans, "Hans"),
+            (self._prefix_henning, "Henning"),
             (self._prefix_nicole, "Nicole"),
         ]:
             if summary_lower.startswith(prefix):
@@ -440,7 +440,7 @@ class TripPredictor:
     ) -> bool:
         """Check if a person is away on a given date (multi-day all-day event).
 
-        A multi-day event like "H: STR" spanning Mon-Fri means Hans is
+        A multi-day event like "H: STR" spanning Mon-Fri means Henning is
         gone for the whole week (took the train, car stays home).
         """
         for event in events:
@@ -461,7 +461,7 @@ class TripPredictor:
                     # Check if this is a train trip (long distance)
                     dest = summary.split(":", 1)[1].strip()
                     dist = self._lookup_distance(dest)
-                    if dist and dist > self._hans_train_km and prefix_initial == "h":
+                    if dist and dist > self._henning_train_km and prefix_initial == "h":
                         return True
                     # Nicole multi-day away
                     if prefix_initial == "n" and duration_days > 1:

@@ -17,6 +17,7 @@ handle the supply side (PV surplus, grid charging, timing).
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from typing import Any
@@ -67,6 +68,7 @@ class ChargingPlan:
     current_energy_kwh: float | None
     vehicle_plugged_in: bool
     days: list[DayChargingRecommendation] = field(default_factory=list)
+    trace_id: str = ""
 
     @property
     def immediate_action(self) -> DayChargingRecommendation | None:
@@ -81,6 +83,7 @@ class ChargingPlan:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "trace_id": self.trace_id,
             "generated_at": self.generated_at.isoformat(),
             "current_soc_pct": self.current_soc_pct,
             "current_energy_kwh": self.current_energy_kwh,
@@ -155,12 +158,14 @@ class ChargingPlanner:
         now = datetime.now(self._tz)
         current_soc = vehicle.soc_pct
         current_energy = self._soc_to_kwh(current_soc) if current_soc else None
+        trace_id = str(uuid.uuid4())[:8]
 
         plan = ChargingPlan(
             generated_at=now,
             current_soc_pct=current_soc,
             current_energy_kwh=current_energy,
             vehicle_plugged_in=vehicle.is_plugged_in,
+            trace_id=trace_id,
         )
 
         # Track running SoC through the planning horizon

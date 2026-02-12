@@ -38,7 +38,7 @@
 - **Thread** — 1 entry
 
 ### Vehicle
-- **Audi Connect** — Dual accounts (Hans + Nicole) for Audi A6 e-tron. Template sensors combine both into unified entities (see `HomeAssistant_config/ev_audi_connect.yaml`): `sensor.ev_state_of_charge`, `sensor.ev_range`, `sensor.ev_charging_state`, `sensor.ev_plug_state`, `sensor.ev_mileage`, `sensor.ev_active_account`, `binary_sensor.ev_plugged_in`, `binary_sensor.ev_is_charging`
+- **Audi Connect** — Dual accounts (Henning + Nicole) for Audi A6 Avant e-tron. Active account detected via mileage comparison (mileage always updates when driving, more reliable than SoC-based detection). Template sensors combine both into unified entities (see `HomeAssistant_config/ev_audi_connect.yaml`): `sensor.ev_state_of_charge`, `sensor.ev_range`, `sensor.ev_charging_state`, `sensor.ev_plug_state`, `sensor.ev_mileage`, `sensor.ev_active_account`, `binary_sensor.ev_plugged_in`, `binary_sensor.ev_is_charging`
 
 ### Automation / Development
 - **Node-RED Companion** — 1 entry
@@ -92,8 +92,17 @@ All services register entities in HA automatically via MQTT Discovery on startup
 
 ### EV Forecast (13 entities)
 - `binary_sensor` — Service online/offline
-- `sensor` — EV SoC (%), EV Range (km), Active Account, Charging State, Plug State, Energy Needed Today (kWh), Recommended Charge Mode, Next Trip, Next Departure, Plan Status, Uptime
-- `sensor` (reasoning) — Plan Reasoning (JSON attributes)
+- `sensor` — EV SoC (%), EV Range (km), Active Account (mileage-based detection), Charging State, Plug State, Energy Needed Today (kWh), Recommended Charge Mode, Next Trip, Next Departure, Plan Status, Uptime
+- `sensor` (reasoning) — Plan Reasoning (JSON attributes: `full_reasoning`, `current_soc_pct`, `total_energy_needed_kwh`, `today_urgency`)
+
+### Health Monitor (8 entities)
+- `binary_sensor` — Service online/offline, HA Connectivity, InfluxDB Connectivity
+- `sensor` — Services Online, Services Monitored, Active Issues, Uptime, Last Health Check
+
+## EV Climatisation Scripts
+- `script.ev_start_climatisation` — Start Audi A6 Avant e-tron climatisation via Audi Connect
+- `script.ev_stop_climatisation` — Stop climatisation
+- Referenced from orchestrator LLM tools and HA automations
 
 ## KNX Room Layout & Entities
 
@@ -164,6 +173,7 @@ All rooms have shutters: Gästebad, Bad OG, Wohnzimmer (2x: links + Kamin), Bad 
 ## EV Charging HA Helpers (input_* entities)
 - `input_select.ev_charge_mode` — Off / PV Surplus / Smart / Eco / Fast / Manual
 - `input_boolean.ev_full_by_morning` — Deadline mode toggle
+- `input_boolean.ev_safe_mode` — Global safe mode toggle (disables automated charging control when enabled)
 - `input_datetime.ev_departure_time` — When the car leaves
 - `input_number.ev_target_soc_pct` — Target SoC % (default 80)
 - `input_number.ev_target_energy_kwh` — Fallback manual energy target

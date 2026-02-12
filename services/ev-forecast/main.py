@@ -35,9 +35,10 @@ from shared.mqtt_client import MQTTClient
 from config import EVForecastSettings
 from planner import ChargingPlan, ChargingPlanner
 from trips import GeoDistance, TripPredictor
-from vehicle import AccountConfig, VehicleMonitor, VehicleState
+from vehicle import RefreshConfig, VehicleConfig, VehicleMonitor, VehicleState
 
 HEALTHCHECK_FILE = Path("/app/data/healthcheck")
+STATE_FILE = Path("/app/data/state.json")
 
 logger = get_logger("ev-forecast")
 
@@ -69,31 +70,24 @@ class EVForecastService:
             password=self.settings.mqtt_password,
         )
 
-        # Vehicle monitor
-        account1 = AccountConfig(
-            name=self.settings.audi_account1_name,
-            soc_entity=self.settings.audi_account1_soc_entity,
-            range_entity=self.settings.audi_account1_range_entity,
-            charging_entity=self.settings.audi_account1_charging_entity,
-            plug_entity=self.settings.audi_account1_plug_entity,
-            mileage_entity=self.settings.audi_account1_mileage_entity,
-            remaining_charge_entity=self.settings.audi_account1_remaining_charge_entity,
-            vin=self.settings.audi_account1_vin,
+        # Vehicle monitor — reads combined HA template sensors
+        vehicle_config = VehicleConfig(
+            soc_entity=self.settings.ev_soc_entity,
+            range_entity=self.settings.ev_range_entity,
+            charging_entity=self.settings.ev_charging_entity,
+            plug_entity=self.settings.ev_plug_entity,
+            mileage_entity=self.settings.ev_mileage_entity,
+            remaining_charge_entity=self.settings.ev_remaining_charge_entity,
+            active_account_entity=self.settings.ev_active_account_entity,
         )
-        account2 = AccountConfig(
-            name=self.settings.audi_account2_name,
-            soc_entity=self.settings.audi_account2_soc_entity,
-            range_entity=self.settings.audi_account2_range_entity,
-            charging_entity=self.settings.audi_account2_charging_entity,
-            plug_entity=self.settings.audi_account2_plug_entity,
-            mileage_entity=self.settings.audi_account2_mileage_entity,
-            remaining_charge_entity=self.settings.audi_account2_remaining_charge_entity,
-            vin=self.settings.audi_account2_vin,
-        )
+        refresh_configs = [
+            RefreshConfig(name=self.settings.audi_account1_name, vin=self.settings.audi_account1_vin),
+            RefreshConfig(name=self.settings.audi_account2_name, vin=self.settings.audi_account2_vin),
+        ]
         self.vehicle = VehicleMonitor(
             ha=self.ha,
-            account1=account1,
-            account2=account2,
+            vehicle_config=vehicle_config,
+            refresh_configs=refresh_configs,
             net_capacity_kwh=self.settings.ev_battery_capacity_net_kwh,
             stale_threshold_minutes=self.settings.audi_stale_threshold_minutes,
         )
@@ -149,12 +143,15 @@ class EVForecastService:
             nicole_commute_days=commute_days,
             nicole_departure_time=self.settings.nicole_departure_time,
             nicole_arrival_time=self.settings.nicole_arrival_time,
-            hans_train_threshold_km=self.settings.hans_train_threshold_km,
-            calendar_prefix_hans=self.settings.calendar_prefix_hans,
+            henning_train_threshold_km=self.settings.henning_train_threshold_km,
+            calendar_prefix_henning=self.settings.calendar_prefix_henning,
             calendar_prefix_nicole=self.settings.calendar_prefix_nicole,
             timezone=self.settings.timezone,
             geo_distance=geo,
         )
+
+        # Load persisted state (before first vehicle read)
+        self._load_state()
 
         # Connect MQTT
         self.mqtt.connect_background()
@@ -239,6 +236,7 @@ class EVForecastService:
             }
             self.mqtt.publish("homelab/ev-forecast/vehicle", payload)
             self._touch_healthcheck()
+            self._save_state()
         except Exception:
             logger.exception("vehicle_update_failed")
 
@@ -269,14 +267,18 @@ class EVForecastService:
             plan_payload["reasoning"] = self._compose_plan_reasoning(plan, vehicle)
             self.mqtt.publish("homelab/ev-forecast/plan", plan_payload)
 
-            # Apply immediate action to HA helpers
-            await self.planner.apply_plan(
-                plan,
-                charge_mode_entity=self.settings.charge_mode_entity,
-                full_by_morning_entity=self.settings.full_by_morning_entity,
-                departure_time_entity=self.settings.departure_time_entity,
-                target_energy_entity=self.settings.target_energy_entity,
-            )
+            # Apply immediate action to HA helpers (blocked in safe mode)
+            safe_mode = await self._check_safe_mode()
+            if safe_mode:
+                logger.warning("safe_mode_active", action="apply_plan_blocked")
+            else:
+                await self.planner.apply_plan(
+                    plan,
+                    charge_mode_entity=self.settings.charge_mode_entity,
+                    full_by_morning_entity=self.settings.full_by_morning_entity,
+                    departure_time_entity=self.settings.departure_time_entity,
+                    target_energy_entity=self.settings.target_energy_entity,
+                )
 
             # Publish any pending clarifications to orchestrator
             clarifications = self.trips.get_pending_clarifications()
@@ -299,6 +301,7 @@ class EVForecastService:
                 )
 
             self._touch_healthcheck()
+            self._save_state()
 
         except Exception:
             logger.exception("plan_update_failed")
@@ -714,6 +717,82 @@ class EVForecastService:
             "has_plan": self._last_plan is not None,
         })
         self._touch_healthcheck()
+
+    # ------------------------------------------------------------------
+    # State persistence
+    # ------------------------------------------------------------------
+
+    def _save_state(self) -> None:
+        """Persist current vehicle state and last plan to disk."""
+        try:
+            vehicle = self.vehicle.last_state
+            state_data: dict[str, Any] = {
+                "vehicle": {
+                    "soc_pct": vehicle.soc_pct,
+                    "range_km": vehicle.range_km,
+                    "charging_state": vehicle.charging_state,
+                    "plug_state": vehicle.plug_state,
+                    "active_account": vehicle.active_account,
+                },
+                "saved_at": datetime.now(self._tz).isoformat(),
+            }
+
+            if self._last_plan is not None:
+                today = self._last_plan.days[0] if self._last_plan.days else None
+                state_data["last_plan"] = {
+                    "mode_recommendation": today.charge_mode if today else None,
+                    "total_energy_needed": round(self._last_plan.total_energy_needed_kwh, 2),
+                }
+
+            STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            STATE_FILE.write_text(json.dumps(state_data, indent=2))
+        except Exception:
+            logger.debug("state_save_failed", exc_info=True)
+
+    def _load_state(self) -> None:
+        """Load persisted state on startup to pre-populate vehicle data."""
+        try:
+            if not STATE_FILE.exists():
+                return
+
+            data = json.loads(STATE_FILE.read_text())
+            v = data.get("vehicle", {})
+            soc = v.get("soc_pct")
+
+            if soc is not None:
+                restored = VehicleState(
+                    soc_pct=soc,
+                    range_km=v.get("range_km"),
+                    charging_state=v.get("charging_state", "unknown"),
+                    plug_state=v.get("plug_state", "unknown"),
+                    active_account=v.get("active_account", ""),
+                )
+                self.vehicle._last_state = restored
+                logger.info(
+                    "state_loaded",
+                    soc_pct=soc,
+                    saved_at=data.get("saved_at"),
+                )
+        except Exception:
+            logger.debug("state_load_failed", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Safe mode
+    # ------------------------------------------------------------------
+
+    async def _check_safe_mode(self) -> bool:
+        """Check if global safe mode is active (blocks HA helper writes).
+
+        Fail-open: if the check fails, allow actions.
+        """
+        entity = self.settings.safe_mode_entity
+        if not entity:
+            return False
+        try:
+            state = await self.ha.get_state(entity)
+            return state.get("state", "off") == "on"
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # Healthcheck / Shutdown

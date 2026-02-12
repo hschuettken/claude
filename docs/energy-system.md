@@ -18,8 +18,8 @@
 ## EV Charging
 - **Wallbox**: Mennekes AMTRON (192.168.0.32)
 - **Protocol**: Modbus TCP (port 502, slave 1)
-- **Vehicle**: Audi A6 e-tron (83 kWh gross / 76 kWh net, ~22 kWh/100km)
-- **Vehicle connectivity**: Dual Audi Connect accounts (Hans + Nicole) — only the last driver's account shows valid data. Combined via HA template sensors.
+- **Vehicle**: Audi A6 Avant e-tron (83 kWh gross / 76 kWh net, ~22 kWh/100km)
+- **Vehicle connectivity**: Dual Audi Connect accounts (Henning + Nicole) — only the last driver's account shows valid data. Active account detected via mileage comparison (mileage always updates when driving, more reliable than SoC-based detection). Combined via HA template sensors.
 - **Modbus registers** (extensive, defined in configuration.yaml):
   - Identity: firmware, protocol version, model, device name (regs 100-174)
   - Status: OCPP CP status (104), vehicle state (122), availability (124), relay (140), plug lock (152)
@@ -41,11 +41,19 @@
   - "Full by Morning" modifier: escalates to grid charging as deadline approaches if PV won't suffice
   - 24 HA entities via MQTT auto-discovery (binary sensors, core status, EV state, decision context, reasoning)
 - **EV Forecast service** (ev-forecast): predicts driving needs from family calendar
-  - Calendar events parsed by prefix: `H:` = Hans drives, `N:` = Nicole drives
+  - Calendar events parsed by prefix: `H:` = Henning drives, `N:` = Nicole drives
   - Known destinations mapped to distances via configurable lookup
   - Generates smart charging plans: sets charge mode, target energy, departure time in HA helpers
   - Ambiguous trips trigger Telegram clarification via orchestrator
   - 13 HA entities via MQTT auto-discovery
+  - **PV surplus continuation**: after plan target SoC is reached, charging continues from PV surplus rather than stopping. PV into car > feed-in to grid.
+
+### Energy Priority
+Home energy is allocated in this priority order:
+1. **Home consumption** — household loads always served first
+2. **Home battery** — charge the 7 kWh Sungrow battery
+3. **EV surplus charging** — excess PV into the car
+4. **Grid feed-in** — remaining surplus exported at 7 ct/kWh
 
 ### EV Charging HA Helpers
 - `input_select.ev_charge_mode` — Charge mode selector (Off/PV Surplus/Smart/Eco/Fast/Manual)
