@@ -758,3 +758,8 @@ Full lifecycle for ambiguous trip resolution:
 6. **Update this file** — When adding significant components, update this CLAUDE.md.
 7. **Security** — Never commit plain `.env`. Secrets go in `.env.enc` (encrypted via SOPS). Be cautious with InfluxDB Flux queries (injection risk if building queries from user input).
 8. **InfluxDB** — Currently configured for **v2** (Flux query language). If the user has v1, the client wrapper needs changing.
+9. **Server Python packages** — The server runs Debian/Ubuntu with PEP 668 (`externally-managed-environment`). Always use `python3 -m venv` for standalone scripts instead of `pip install` system-wide. A shared venv exists at `scripts/.venv/`.
+10. **InfluxDB query gotchas** (learned from Shelly outlier fix):
+    - Flux returns **separate tables per `_measurement`/series** — records from different tables are NOT sorted together. Always sort in Python after collecting from all tables.
+    - The Shelly 3EM stores **triplicate records** per timestamp (one per phase series) with sub-millisecond timestamp differences. Deduplicate by truncating to the second before comparing.
+    - The InfluxDB v2 **delete API only supports tag predicates** (e.g., `entity_id="..."`). Filtering by `_field` returns `501 Not Implemented`. Use a tight time window + tag filter instead.
