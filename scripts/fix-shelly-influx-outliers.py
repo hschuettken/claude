@@ -209,6 +209,23 @@ def analyze_and_fix(
         if len(records) > n:
             print(f"  ... ({len(records) - n} more)")
 
+        # Also show data around the min value to understand outlier shape
+        values_with_idx = [(i, r["value"]) for i, r in enumerate(records) if r["value"] is not None]
+        if values_with_idx:
+            min_idx, min_val = min(values_with_idx, key=lambda x: x[1])
+            max_idx, max_val = max(values_with_idx, key=lambda x: x[1])
+            median_val = sorted(v for _, v in values_with_idx)[len(values_with_idx) // 2]
+            # Show context around min if it's far from median (likely an outlier)
+            if abs(min_val - median_val) > abs(max_val - median_val) * 0.1:
+                ctx = min(n // 2, 5)
+                start = max(0, min_idx - ctx)
+                end = min(len(records), min_idx + ctx + 1)
+                print(f"\n  Data around minimum ({min_val:.2f}) at index {min_idx}:")
+                for i in range(start, end):
+                    r = records[i]
+                    marker = " <<<" if i == min_idx else ""
+                    print(f"    [{i:>4}] {r['time'].isoformat()}  {r['value']:>12.2f}  ({r['measurement']}){marker}")
+
     if not records:
         print("No data found. Check entity_id and date range.")
         return 0
