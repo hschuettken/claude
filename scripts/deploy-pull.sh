@@ -23,12 +23,22 @@ MAX_RETRIES=4
 DELAY=2
 PULLED=false
 for i in $(seq 1 $MAX_RETRIES); do
-    if git pull origin "$BRANCH"; then
+    PULL_OUTPUT=$(git pull --ff-only origin "$BRANCH" 2>&1) && {
+        echo "$PULL_OUTPUT"
         PULLED=true
         break
+    }
+    echo "$PULL_OUTPUT"
+    # Only retry on network/transient errors — not on divergent branches
+    if echo "$PULL_OUTPUT" | grep -qiE "fatal: not possible to fast-forward|cannot fast-forward|divergent"; then
+        echo ""
+        echo "ERROR: Local branch has diverged from origin/$BRANCH."
+        echo "This deploy script only supports fast-forward pulls."
+        echo "Resolve manually: git rebase origin/$BRANCH  OR  git reset --hard origin/$BRANCH"
+        exit 1
     fi
     if [ "$i" -lt "$MAX_RETRIES" ]; then
-        echo "Pull failed, retrying in ${DELAY}s ... (attempt $((i+1))/$MAX_RETRIES)"
+        echo "Pull failed (likely network error), retrying in ${DELAY}s ... (attempt $((i+1))/$MAX_RETRIES)"
         sleep "$DELAY"
         DELAY=$((DELAY * 2))
     fi
