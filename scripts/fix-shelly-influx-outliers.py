@@ -4,7 +4,14 @@
 Analyzes the shelly3em_main_channel_total_energy sensor data around a given date,
 detects outlier spikes, and removes them from InfluxDB.
 
+Setup (one-time):
+    python3 -m venv scripts/.venv
+    source scripts/.venv/bin/activate
+    pip install influxdb-client python-dotenv
+
 Usage:
+    source scripts/.venv/bin/activate
+
     # Dry run (default) — show outliers without deleting
     python scripts/fix-shelly-influx-outliers.py
 
