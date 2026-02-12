@@ -95,45 +95,54 @@ def find_outliers(records: list[dict], threshold: float) -> list[dict]:
         if prev_val is None or curr_val is None or next_val is None:
             continue
 
-        jump_up = curr_val - prev_val
-        drop_down = curr_val - next_val
+        diff_from_prev = curr_val - prev_val
+        diff_from_next = curr_val - next_val
 
-        # Outlier: big jump up from previous AND big drop to next (spike)
-        if jump_up > threshold and drop_down > threshold:
+        # Spike: big jump up from previous AND big drop to next
+        is_spike = diff_from_prev > threshold and diff_from_next > threshold
+        # Dip: big drop from previous AND big jump back to next
+        is_dip = -diff_from_prev > threshold and -diff_from_next > threshold
+
+        if is_spike or is_dip:
             outliers.append({
                 "index": i,
                 "time": records[i]["time"],
                 "value": curr_val,
                 "prev_value": prev_val,
                 "next_value": next_val,
-                "jump": jump_up,
+                "jump": abs(diff_from_prev),
+                "type": "spike" if is_spike else "dip",
                 "measurement": records[i]["measurement"],
             })
 
     # Also check first and last points
     if len(records) >= 2:
-        # First point: spike if much higher than second
+        # First point: outlier if far from second in either direction
         if records[0]["value"] is not None and records[1]["value"] is not None:
-            if records[0]["value"] - records[1]["value"] > threshold:
+            diff = abs(records[0]["value"] - records[1]["value"])
+            if diff > threshold:
                 outliers.insert(0, {
                     "index": 0,
                     "time": records[0]["time"],
                     "value": records[0]["value"],
                     "prev_value": None,
                     "next_value": records[1]["value"],
-                    "jump": records[0]["value"] - records[1]["value"],
+                    "jump": diff,
+                    "type": "spike" if records[0]["value"] > records[1]["value"] else "dip",
                     "measurement": records[0]["measurement"],
                 })
-        # Last point: spike if much higher than second-to-last
+        # Last point: outlier if far from second-to-last in either direction
         if records[-1]["value"] is not None and records[-2]["value"] is not None:
-            if records[-1]["value"] - records[-2]["value"] > threshold:
+            diff = abs(records[-1]["value"] - records[-2]["value"])
+            if diff > threshold:
                 outliers.append({
                     "index": len(records) - 1,
                     "time": records[-1]["time"],
                     "value": records[-1]["value"],
                     "prev_value": records[-2]["value"],
                     "next_value": None,
-                    "jump": records[-1]["value"] - records[-2]["value"],
+                    "jump": diff,
+                    "type": "spike" if records[-1]["value"] > records[-2]["value"] else "dip",
                     "measurement": records[-1]["measurement"],
                 })
 
@@ -195,13 +204,14 @@ def analyze_and_fix(
         return 0
 
     print(f"\nFound {len(outliers)} outlier(s):")
-    print(f"{'Timestamp':<30} {'Value':>12} {'Prev':>12} {'Next':>12} {'Jump':>12}")
-    print("-" * 80)
+    print(f"{'Timestamp':<30} {'Type':>6} {'Value':>12} {'Prev':>12} {'Next':>12} {'Jump':>12}")
+    print("-" * 86)
     for o in outliers:
         prev_str = f"{o['prev_value']:.2f}" if o["prev_value"] is not None else "N/A"
         next_str = f"{o['next_value']:.2f}" if o["next_value"] is not None else "N/A"
         print(
             f"{o['time'].isoformat():<30} "
+            f"{o['type']:>6} "
             f"{o['value']:>12.2f} "
             f"{prev_str:>12} "
             f"{next_str:>12} "
