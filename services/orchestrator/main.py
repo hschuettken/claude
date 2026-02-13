@@ -26,6 +26,7 @@ from brain import Brain
 from gcal import GoogleCalendarClient
 from channels.telegram import TelegramChannel
 from config import OrchestratorSettings
+from knowledge import KnowledgeStore, MemoryDocument
 from llm import create_provider
 from memory import Memory
 from proactive import ProactiveEngine
@@ -146,6 +147,22 @@ class OrchestratorService(BaseService):
         else:
             self.logger.info("semantic_memory_disabled")
 
+        # --- Knowledge store + memory document ---
+        knowledge: KnowledgeStore | None = None
+        memory_doc: MemoryDocument | None = None
+        if self.settings.enable_knowledge_store:
+            knowledge = KnowledgeStore(mqtt=self.mqtt)
+            memory_doc = MemoryDocument(
+                max_size=self.settings.memory_document_max_size,
+            )
+            self.logger.info(
+                "knowledge_store_enabled",
+                facts=knowledge.count,
+                memory_doc_size=memory_doc.size,
+            )
+        else:
+            self.logger.info("knowledge_store_disabled")
+
         # --- Google Calendar (optional) ---
         gcal = GoogleCalendarClient(
             credentials_file=self.settings.google_calendar_credentials_file,
@@ -170,6 +187,8 @@ class OrchestratorService(BaseService):
             gcal=gcal if gcal.available else None,
             semantic=semantic,
             ev_state=self._ev_state,
+            knowledge=knowledge,
+            memory_doc=memory_doc,
         )
 
         brain = Brain(
@@ -179,6 +198,8 @@ class OrchestratorService(BaseService):
             settings=self.settings,
             semantic=semantic,
             ev_state=self._ev_state,
+            knowledge=knowledge,
+            memory_doc=memory_doc,
         )
 
         # Wire activity tracking into brain and tool executor

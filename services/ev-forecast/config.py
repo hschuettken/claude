@@ -97,3 +97,5 @@ class EVForecastSettings(BaseSettings):
     # --- MQTT integration ---
     # Subscribe to orchestrator responses for trip clarifications
     orchestrator_response_topic: str = "homelab/ev-forecast/trip-response"
+    # Subscribe to learned knowledge updates from orchestrator
+    knowledge_update_topic: str = "homelab/orchestrator/knowledge-update"

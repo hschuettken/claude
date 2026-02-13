@@ -183,6 +183,7 @@ class TripPredictor:
         calendar_prefix_nicole: str = "N:",
         timezone: str = "Europe/Berlin",
         geo_distance: GeoDistance | None = None,
+        learned_destinations: Any = None,
     ) -> None:
         self._destinations = {k.lower(): v for k, v in known_destinations.items()}
         self._consumption = consumption_kwh_per_100km
@@ -195,6 +196,7 @@ class TripPredictor:
         self._prefix_nicole = calendar_prefix_nicole.lower().strip()
         self._tz = ZoneInfo(timezone)
         self._geo = geo_distance
+        self._learned = learned_destinations
 
         # Pending clarifications: {event_id: Trip}
         self._pending_clarifications: dict[str, Trip] = {}
@@ -387,17 +389,34 @@ class TripPredictor:
         return "", ""
 
     def _lookup_distance(self, destination: str) -> float | None:
-        """Look up one-way distance for a destination."""
+        """Look up one-way distance for a destination.
+
+        Lookup order:
+        1. Config-based known_destinations (static, from env var)
+        2. Learned destinations (from orchestrator conversations via MQTT)
+        3. Return None → caller falls through to geocoding
+        """
         dest_lower = destination.lower().strip()
 
-        # Direct match
+        # 1. Direct match in config destinations
         if dest_lower in self._destinations:
             return self._destinations[dest_lower]
 
-        # Try partial match (destination contains a known city)
+        # Partial match in config destinations
         for city, distance in self._destinations.items():
             if city in dest_lower or dest_lower in city:
                 return distance
+
+        # 2. Check learned destinations (from orchestrator knowledge store)
+        if self._learned:
+            learned_km = self._learned.lookup(destination)
+            if learned_km is not None:
+                logger.info(
+                    "distance_from_learned",
+                    destination=destination,
+                    distance_km=learned_km,
+                )
+                return learned_km
 
         return None
 
@@ -508,19 +527,62 @@ class TripPredictor:
         return time(int(parts[0]), int(parts[1]))
 
     def get_pending_clarifications(self) -> list[dict[str, Any]]:
-        """Return trips that need user clarification (for orchestrator)."""
-        return [
-            {
+        """Return trips that need user clarification (for orchestrator).
+
+        Generates smarter questions when learned destinations provide
+        disambiguation options (e.g. "Sarah in Bocholt oder Ibbenbüren?").
+        """
+        results: list[dict[str, Any]] = []
+        for eid, trip in self._pending_clarifications.items():
+            question = self._build_clarification_question(trip)
+            entry: dict[str, Any] = {
                 "event_id": eid,
                 "person": trip.person,
                 "destination": trip.destination,
                 "date": trip.date.isoformat(),
                 "estimated_distance_km": trip.distance_km,
-                "question": (
-                    f"Fährst du am {trip.date.strftime('%d.%m.')} nach "
-                    f"{trip.destination} mit dem E-Auto? "
-                    f"(geschätzt {trip.distance_km:.0f} km einfach)"
-                ),
+                "question": question,
             }
-            for eid, trip in self._pending_clarifications.items()
-        ]
+
+            # Add disambiguation options if available
+            if self._learned:
+                options = self._learned.lookup_all(trip.destination)
+                if len(options) > 1:
+                    entry["disambiguation_options"] = [
+                        {
+                            "name": o.get("name", trip.destination),
+                            "distance_km": o.get("distance_km", 0),
+                        }
+                        for o in options
+                    ]
+
+            results.append(entry)
+        return results
+
+    def _build_clarification_question(self, trip: Trip) -> str:
+        """Build a smart clarification question for a trip.
+
+        If learned destinations have multiple matches for the destination
+        name, generates a disambiguation question mentioning all options.
+        """
+        date_str = trip.date.strftime("%d.%m.")
+
+        # Check for disambiguation options in learned destinations
+        if self._learned:
+            options = self._learned.lookup_all(trip.destination)
+            if len(options) > 1:
+                # Multiple known places with this name
+                parts = " oder ".join(
+                    f"{o.get('name', trip.destination)} ({o.get('distance_km', '?')} km)"
+                    for o in options
+                )
+                return (
+                    f"Fährst du am {date_str} zu {parts} mit dem E-Auto?"
+                )
+
+        # Default question
+        return (
+            f"Fährst du am {date_str} nach "
+            f"{trip.destination} mit dem E-Auto? "
+            f"(geschätzt {trip.distance_km:.0f} km einfach)"
+        )

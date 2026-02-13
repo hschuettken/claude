@@ -21,6 +21,7 @@ from shared.mqtt_client import MQTTClient
 
 from gcal import GoogleCalendarClient
 from config import OrchestratorSettings
+from knowledge import KnowledgeStore, MemoryDocument
 from memory import Memory
 from semantic_memory import SemanticMemory
 
@@ -464,6 +465,124 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "store_learned_fact",
+            "description": (
+                "Store a structured, typed fact in the knowledge store. Use this when you "
+                "learn something concrete and actionable from a conversation: a destination "
+                "with distance, a person's behavioral pattern, a user preference, or a "
+                "correction to previous knowledge. This is different from store_fact (free-text "
+                "semantic memory) — store_learned_fact creates a structured, queryable entry "
+                "that other services (ev-forecast, smart-ev-charging) can use to improve "
+                "their behavior automatically."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fact_type": {
+                        "type": "string",
+                        "enum": ["destination", "person_pattern", "preference", "correction", "general"],
+                        "description": (
+                            "Type of fact: 'destination' (place + distance), "
+                            "'person_pattern' (behavioral pattern for a person), "
+                            "'preference' (user preference), 'correction' (fix to previous knowledge), "
+                            "'general' (other structured knowledge)"
+                        ),
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": (
+                            "Normalised lookup key. For destinations: 'sarah_ibbenbüren' or 'münchen'. "
+                            "For patterns: 'henning_berlin_train'. For preferences: 'henning_charge_overnight'."
+                        ),
+                    },
+                    "data": {
+                        "type": "object",
+                        "description": (
+                            "Type-specific data. Destination: {name, distance_km, person, disambiguation, notes}. "
+                            "Pattern: {person, pattern, context}. Preference: {user, value, context}. "
+                            "Correction: {original, corrected, context}."
+                        ),
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": "Confidence: 1.0 = user explicitly confirmed, 0.7 = inferred from conversation",
+                        "default": 1.0,
+                    },
+                },
+                "required": ["fact_type", "key", "data"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_learned_facts",
+            "description": (
+                "Search the knowledge store for previously learned structured facts. "
+                "Use this to check what the system already knows before asking the user "
+                "a question (e.g., check known destinations before asking about a trip, "
+                "check person patterns before suggesting a charge mode)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fact_type": {
+                        "type": "string",
+                        "enum": ["destination", "person_pattern", "preference", "correction", "general"],
+                        "description": "Filter by fact type (optional — omit to search all types)",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Search term — matches against key and data values (optional)",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_memory_notes",
+            "description": (
+                "Update the orchestrator's persistent memory notes (memory.md). "
+                "This is your personal notebook — a living document where you maintain "
+                "everything you've learned about the household, destinations, preferences, "
+                "patterns, and rules. The current content is shown in your system prompt "
+                "under '## Memory Notes'. When you learn something new, update the relevant "
+                "section. Keep it concise and well-organized — it's injected into every "
+                "conversation. Write the COMPLETE updated document (you'll see the current "
+                "content in context)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": (
+                            "The full updated memory.md content. Markdown format. "
+                            "Include all sections, not just the changed part."
+                        ),
+                    },
+                },
+                "required": ["content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_memory_notes",
+            "description": (
+                "Read the current content of the memory notes (memory.md). "
+                "Use this if you need to check the full document before updating it, "
+                "or if the system prompt excerpt was truncated."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "request_service_refresh",
             "description": (
                 "Send a command to one of the homelab services to trigger an immediate refresh. "
@@ -514,6 +633,8 @@ class ToolExecutor:
         semantic: SemanticMemory | None = None,
         send_notification_fn: Any = None,
         ev_state: dict[str, Any] | None = None,
+        knowledge: KnowledgeStore | None = None,
+        memory_doc: MemoryDocument | None = None,
     ) -> None:
         self.ha = ha
         self.influx = influx
@@ -524,6 +645,8 @@ class ToolExecutor:
         self.semantic = semantic
         self._send_notification = send_notification_fn
         self._ev_state = ev_state or {}
+        self._knowledge = knowledge
+        self._memory_doc = memory_doc
         self._tz = ZoneInfo(settings.timezone)
         # Injected by OrchestratorService after construction
         self._activity_tracker: Any = None
@@ -910,6 +1033,39 @@ class ToolExecutor:
             reasoning=f"User confirmed via Telegram (distance: {distance_km} km)",
         )
 
+        # --- Auto-learn: store destination and pattern in knowledge store ---
+        if self._knowledge and destination != "?":
+            # Store destination distance if provided
+            if distance_km > 0:
+                dest_key = destination.lower().strip()
+                self._knowledge.store(
+                    fact_type="destination",
+                    key=dest_key,
+                    data={
+                        "name": destination,
+                        "distance_km": distance_km,
+                        "person": person,
+                        "notes": f"Learned from trip clarification ({person})",
+                    },
+                    confidence=1.0,
+                    source="trip_clarification",
+                )
+            # Store person pattern (e.g., "Henning does not use EV for Berlin")
+            if not use_ev:
+                pattern_key = f"{person.lower()}_{destination.lower().strip()}_no_ev"
+                self._knowledge.store(
+                    fact_type="person_pattern",
+                    key=pattern_key,
+                    data={
+                        "person": person,
+                        "pattern": f"does not use EV for trips to {destination}",
+                        "destination": destination,
+                        "context": "User confirmed via trip clarification",
+                    },
+                    confidence=1.0,
+                    source="trip_clarification",
+                )
+
         return {
             "success": True,
             "event_id": event_id,
@@ -978,6 +1134,84 @@ class ToolExecutor:
             "command": command,
             "note": f"Command '{command}' sent to {service}. The service will process it asynchronously.",
         }
+
+    # ------------------------------------------------------------------
+    # Knowledge store + memory document tools
+    # ------------------------------------------------------------------
+
+    async def _tool_store_learned_fact(
+        self,
+        fact_type: str,
+        key: str,
+        data: dict[str, Any],
+        confidence: float = 1.0,
+    ) -> dict[str, Any]:
+        if not self._knowledge:
+            return {"error": "Knowledge store not enabled"}
+        try:
+            fact_id = self._knowledge.store(
+                fact_type=fact_type,
+                key=key,
+                data=data,
+                confidence=confidence,
+                source="conversation",
+            )
+            return {
+                "success": True,
+                "id": fact_id,
+                "fact_type": fact_type,
+                "key": key,
+                "total_facts": self._knowledge.count,
+            }
+        except ValueError as e:
+            return {"error": str(e)}
+
+    async def _tool_get_learned_facts(
+        self,
+        fact_type: str | None = None,
+        query: str = "",
+    ) -> dict[str, Any]:
+        if not self._knowledge:
+            return {"error": "Knowledge store not enabled"}
+        results = self._knowledge.search(fact_type=fact_type, query=query)
+        # Return concise view (skip internal fields)
+        facts = [
+            {
+                "id": f["id"],
+                "type": f["type"],
+                "key": f["key"],
+                "data": f["data"],
+                "confidence": f["confidence"],
+                "source": f["source"],
+                "times_used": f["times_used"],
+            }
+            for f in results[:20]
+        ]
+        return {
+            "query": query or "(all)",
+            "fact_type": fact_type or "all",
+            "result_count": len(facts),
+            "facts": facts,
+            "total_stored": self._knowledge.count,
+        }
+
+    async def _tool_update_memory_notes(self, content: str) -> dict[str, Any]:
+        if not self._memory_doc:
+            return {"error": "Memory document not enabled"}
+        success = self._memory_doc.write(content)
+        if success:
+            return {
+                "success": True,
+                "size": len(content),
+                "note": "Memory notes updated. Changes will be visible in the next conversation.",
+            }
+        return {"error": "Failed to write memory document"}
+
+    async def _tool_read_memory_notes(self) -> dict[str, Any]:
+        if not self._memory_doc:
+            return {"error": "Memory document not enabled"}
+        content = self._memory_doc.read()
+        return {"content": content, "size": len(content)}
 
     # ------------------------------------------------------------------
     # Helpers
