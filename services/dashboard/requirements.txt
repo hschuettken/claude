@@ -1,0 +1,2 @@
+# === Dashboard web UI ===
+nicegui>=2.0,<3                  # Modern Python web UI framework (Quasar + Vue + Tailwind)

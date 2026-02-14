@@ -102,6 +102,18 @@ This file provides guidance for AI assistants working with this repository.
 │   │   ├── alerts.py                        #   Telegram alerting with cooldown
 │   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
 │   │   └── diagnose.py                      #   Self-diagnostic
+│   ├── dashboard/                           #   NiceGUI web dashboard
+│   │   ├── Dockerfile
+│   │   ├── requirements.txt                 #   nicegui
+│   │   ├── main.py                          #   Entry point (NiceGUI app + MQTT/HA setup)
+│   │   ├── config.py                        #   Dashboard-specific settings
+│   │   ├── state.py                         #   Shared reactive state (MQTT + HA data)
+│   │   ├── layout.py                        #   Shared page layout, navigation, styling
+│   │   ├── page_home.py                     #   Energy overview page
+│   │   ├── page_services.py                 #   Service health monitoring page
+│   │   ├── page_controls.py                 #   HA entity controls page
+│   │   ├── page_chat.py                     #   Orchestrator chat page
+│   │   └── healthcheck.py                   #   Docker HEALTHCHECK script (HTTP-based)
 │   └── example-service/                     #   Template service
 │       ├── Dockerfile
 │       ├── requirements.txt                 #   Service-specific deps only
@@ -715,6 +727,42 @@ Continuously monitors all homelab services and infrastructure. Sends Telegram al
 **MQTT events**: `homelab/health-monitor/status`, `homelab/health-monitor/heartbeat`
 
 **Config** (env vars): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALERT_CHAT_IDS` (comma-separated chat IDs), `MONITORED_SERVICES` (comma-separated, default: all 4 services), `HEARTBEAT_TIMEOUT_SECONDS` (5 min), `INFRASTRUCTURE_CHECK_MINUTES` (5), `DIAGNOSTIC_RUN_MINUTES` (30), `DOCKER_CHECK_MINUTES` (2), `ALERT_COOLDOWN_MINUTES` (30), `DAILY_SUMMARY_HOUR` (8, -1 to disable), `WATCHED_ENTITIES` (comma-separated HA entity IDs to check for staleness).
+
+### dashboard — NiceGUI Web Dashboard
+
+A modern dark-themed web dashboard built with [NiceGUI](https://nicegui.io/) (Python, Quasar/Vue under the hood). Provides real-time monitoring, Home Assistant controls, and a chat interface to the orchestrator — all in the browser.
+
+**Tech stack**: NiceGUI 2.x (FastAPI + uvicorn + Quasar + Vue + Tailwind). Pure Python, no separate frontend build step.
+
+**Pages**:
+
+| Page | Path | Description |
+|------|------|-------------|
+| Dashboard | `/` | Energy overview (PV, grid, battery, house, EV), PV forecast, EV charging status, service health mini-view |
+| Services | `/services` | Service health grid with status, uptime, memory, last heartbeat. Orchestrator activity section. |
+| Controls | `/controls` | EV charging controls (charge mode, target SoC, departure time, full-by-morning), quick actions (refresh/retrain), safe mode toggle |
+| Chat | `/chat` | Chat with the orchestrator AI via MQTT. Quick prompts, markdown rendering, typing indicator. |
+
+**Architecture**: The dashboard does NOT use BaseService. It creates MQTT, HA, and InfluxDB clients manually and integrates with NiceGUI's lifecycle via `app.on_startup` / `app.on_shutdown`. MQTT callbacks update a thread-safe `DashboardState` object; NiceGUI pages poll the state with `ui.timer` for live updates (~3s refresh).
+
+**Chat integration**: The dashboard sends chat messages to the orchestrator via MQTT:
+1. Dashboard publishes to `homelab/orchestrator/command/dashboard` with `{"command": "chat", "message": "...", "request_id": "...", "user_name": "Dashboard"}`
+2. Orchestrator processes through Brain (same LLM + tools as Telegram)
+3. Orchestrator publishes response to `homelab/dashboard/chat-response` with `{"request_id": "...", "response": "..."}`
+
+**HA entities** (via MQTT auto-discovery, "Homelab Dashboard" device, 2 entities):
+- `binary_sensor` — Service online/offline
+- `sensor` — Uptime
+
+**MQTT subscriptions**: `homelab/+/heartbeat`, `homelab/pv-forecast/updated`, `homelab/smart-ev-charging/status`, `homelab/ev-forecast/plan`, `homelab/ev-forecast/vehicle`, `homelab/orchestrator/activity`, `homelab/health-monitor/status`, `homelab/dashboard/chat-response`
+
+**MQTT events**: `homelab/dashboard/heartbeat`
+
+**HA polling**: Periodically reads energy sensors, EV entities, PV forecast entities, and control entities (input_select, input_number, input_boolean, input_datetime) via the REST API. Default interval: 10 seconds.
+
+**Config** (env vars): `DASHBOARD_PORT` (8085), `DASHBOARD_TITLE`, `DASHBOARD_USER_NAME` (name shown in chat), `HA_POLL_INTERVAL` (10), `UI_REFRESH_INTERVAL` (3). All entity IDs are configurable with sensible defaults matching the existing HA setup. Uses the same `HA_URL`, `HA_TOKEN`, `MQTT_*` settings as other services.
+
+**Access**: `http://<server-ip>:8085` — no authentication (intended for local network / VPN use only).
 
 ## Inter-Service Integration Patterns
 

@@ -108,6 +108,7 @@ class OrchestratorService(BaseService):
         # Shared EV state — updated by MQTT, read by tools and brain
         self._ev_state: dict = {"plan": None, "pending_clarifications": []}
         self._proactive: ProactiveEngine | None = None
+        self._brain: Brain | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
 
     async def run(self) -> None:
@@ -201,6 +202,7 @@ class OrchestratorService(BaseService):
             knowledge=knowledge,
             memory_doc=memory_doc,
         )
+        self._brain = brain
 
         # Wire activity tracking into brain and tool executor
         brain._activity_tracker = self._activity
@@ -232,6 +234,11 @@ class OrchestratorService(BaseService):
         )
         self.mqtt.subscribe(
             "homelab/ev-forecast/clarification-needed", self._on_ev_clarification,
+        )
+
+        # --- Subscribe to dashboard chat commands ---
+        self.mqtt.subscribe(
+            "homelab/orchestrator/command/dashboard", self._on_dashboard_command,
         )
 
         # --- Register HA discovery entities ---
@@ -306,6 +313,51 @@ class OrchestratorService(BaseService):
                 self._proactive.on_ev_clarification_needed(clarifications),
                 self._loop,
             )
+
+    def _on_dashboard_command(self, topic: str, payload: dict) -> None:
+        """Handle commands from the dashboard (primarily chat messages)."""
+        command = payload.get("command", "")
+        if command == "chat" and self._brain and self._loop:
+            asyncio.run_coroutine_threadsafe(
+                self._handle_dashboard_chat(payload), self._loop,
+            )
+        else:
+            self.logger.debug("dashboard_command_unknown", command=command)
+
+    async def _handle_dashboard_chat(self, payload: dict) -> None:
+        """Process a chat message from the dashboard through the Brain."""
+        message = payload.get("message", "").strip()
+        request_id = payload.get("request_id", "")
+        user_name = payload.get("user_name", "Dashboard")
+
+        if not message:
+            return
+
+        self.logger.info(
+            "dashboard_chat_request",
+            request_id=request_id,
+            user=user_name,
+            msg_len=len(message),
+        )
+
+        try:
+            response = await self._brain.process_message(
+                message,
+                chat_id="dashboard",
+                user_name=user_name,
+            )
+        except Exception:
+            self.logger.exception("dashboard_chat_failed")
+            response = "Sorry, I encountered an error processing your request."
+
+        self.mqtt.publish(
+            "homelab/dashboard/chat-response",
+            {
+                "request_id": request_id,
+                "response": response,
+            },
+        )
+        self.logger.info("dashboard_chat_response_sent", request_id=request_id)
 
     # ------------------------------------------------------------------
     # Activity publishing

@@ -138,6 +138,22 @@ services:
     networks:
       - homelab
 
+  dashboard:
+    build:
+      context: .
+      dockerfile: services/dashboard/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8085:8085"
+    volumes:
+      - ./shared:/app/shared:ro
+      - dashboard_data:/app/data
+    depends_on:
+      - mqtt
+    networks:
+      - homelab
+
   # --- Template for new services ---
   # my-new-service:
   #   build:
@@ -162,6 +178,7 @@ volumes:
   ev_forecast_data:
   orchestrator_data:
   health_monitor_data:
+  dashboard_data:
   mosquitto_data:
   # influxdb_data:
   # ollama_data:
