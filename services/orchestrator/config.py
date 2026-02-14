@@ -86,6 +86,11 @@ class OrchestratorSettings(BaseSettings):
     max_decisions: int = 500  # max decision log entries
     enable_semantic_memory: bool = True  # vector-based long-term memory
 
+    # --- Knowledge store (structured facts + memory.md) ---
+    enable_knowledge_store: bool = True  # structured knowledge persistence
+    memory_document_max_size: int = 4000  # max chars for memory.md (injected into context)
+    knowledge_auto_extract: bool = True  # LLM auto-extracts structured facts from conversations
+
     # --- Semantic memory tuning ---
     semantic_memory_max_entries: int = 5000  # cap to keep file size reasonable
     semantic_memory_text_max_len: int = 2000  # truncate text before embedding

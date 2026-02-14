@@ -46,6 +46,7 @@ This file provides guidance for AI assistants working with this repository.
 │   │   ├── tools.py                         #   LLM tool definitions & execution
 │   │   ├── memory.py                        #   Persistent conversations, profiles, preferences
 │   │   ├── semantic_memory.py               #   Vector-based long-term memory (embeddings + search)
+│   │   ├── knowledge.py                    #   Structured knowledge store + memory.md manager
 │   │   ├── gcal.py                          #   Google Calendar integration (read family, write own)
 │   │   ├── proactive.py                     #   Scheduled briefings, alerts, suggestions
 │   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
@@ -89,6 +90,7 @@ This file provides guidance for AI assistants working with this repository.
 │   │   ├── vehicle.py                       #   Dual Audi Connect account handling
 │   │   ├── trips.py                         #   Calendar-based trip prediction
 │   │   ├── planner.py                       #   Smart charging plan generator
+│   │   ├── learned_destinations.py          #   Local cache for learned destinations (from orchestrator)
 │   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
 │   │   └── diagnose.py                      #   Step-by-step connectivity/data diagnostic
 │   ├── health-monitor/                      #   Health monitoring & alerting
@@ -426,6 +428,10 @@ The central intelligence layer that coordinates all services, communicates with 
 - `create_calendar_event` — Create reminders/events on orchestrator's own calendar
 - `recall_memory` — Semantic search over long-term memory (past conversations, facts, decisions)
 - `store_fact` — Store knowledge/facts in long-term semantic memory for future recall
+- `store_learned_fact` — Store structured knowledge (destinations, patterns, preferences) in the knowledge store for cross-service use
+- `get_learned_facts` — Query structured knowledge store before asking the user
+- `update_memory_notes` — Update the orchestrator's persistent memory.md notebook
+- `read_memory_notes` — Read the current memory notes
 - `request_service_refresh` — Send a command to a service (refresh forecast, retrain model, etc.)
 
 **Communication**: Telegram bot with commands `/start`, `/status`, `/forecast`, `/clear`, `/whoami`, `/help` plus free-text LLM conversation.
@@ -455,6 +461,17 @@ The central intelligence layer that coordinates all services, communicates with 
 - Categories: `conversation` (auto-stored exchanges), `fact` (explicitly stored knowledge), `decision` (orchestrator decisions)
 - Scale: up to 5000 entries (~20 MB JSON file), searches in milliseconds
 - Enabled by default (`ENABLE_SEMANTIC_MEMORY=true`), disable if no embedding API key is available
+
+**Smart Conversation Memory** (structured knowledge + living memory document):
+- Two complementary layers on top of semantic memory that close the learning feedback loop:
+  - **Knowledge Store** (`knowledge.py`, persistent in `/app/data/memory/knowledge.json`): Typed, structured facts that services can query programmatically. Types: `destination` (place + distance), `person_pattern` (behavioral pattern), `preference`, `correction`, `general`. Published via MQTT (`homelab/orchestrator/knowledge-update`) so downstream services consume learned knowledge automatically.
+  - **Memory Document** (`memory.md`, persistent in `/app/data/memory/memory.md`): A living Markdown document the LLM reads and maintains — like CLAUDE.md but for the AI's own notes. Injected into the system prompt on every conversation. The LLM updates it via the `update_memory_notes` tool when it learns something worth remembering. Human-readable and editable. Capped at 4000 chars (configurable via `MEMORY_DOCUMENT_MAX_SIZE`).
+- **Auto-extraction**: After each conversation turn, the LLM extracts structured facts (destinations with distances, person patterns, preferences, corrections) and stores them in the knowledge store with confidence=0.7 (LLM-inferred). User-confirmed facts get confidence=1.0.
+- **Trip clarification auto-learning**: When a trip clarification is resolved (user confirms distance via Telegram), the destination+distance is automatically stored in the knowledge store AND published via MQTT to ev-forecast, so the same question never needs to be asked again.
+- **Cross-service knowledge distribution**: The ev-forecast service subscribes to `homelab/orchestrator/knowledge-update` and maintains a local `learned_destinations.json` cache. On distance lookup, it checks: config destinations → learned destinations → geocoding → default 50km.
+- **Smart disambiguation**: When learned destinations have multiple entries for the same name (e.g., "Sarah" → Bocholt 80km, "Sarah" → Ibbenbüren 10km), the ev-forecast generates disambiguation questions: "Fährst du zu Sarah in Bocholt (80 km) oder Sarah in Ibbenbüren (10 km)?"
+- **LLM tools**: `store_learned_fact` (structured), `get_learned_facts` (query), `update_memory_notes` (write notebook), `read_memory_notes` (read notebook)
+- **Config** (env vars): `ENABLE_KNOWLEDGE_STORE` (default true), `MEMORY_DOCUMENT_MAX_SIZE` (default 4000), `KNOWLEDGE_AUTO_EXTRACT` (default true)
 
 **Google Calendar** (optional, via Service Account):
 - Family calendar (read-only) — absences, business trips, appointments
@@ -509,7 +526,7 @@ The central intelligence layer that coordinates all services, communicates with 
 - `sensor` — Uptime, LLM Provider, Messages Today, Tool Calls Today, Suggestions Sent Today, Last Tool Used, Last Decision, Last Suggestion, Services Online
 - `sensor` (reasoning) — Orchestrator Reasoning (with `full_reasoning`, `services_tracked`, `last_decision_time` as JSON attributes)
 
-**Config** (env vars): `LLM_PROVIDER`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`, `MORNING_BRIEFING_TIME`, `ENABLE_PROACTIVE_SUGGESTIONS`, `ENABLE_SEMANTIC_MEMORY`, `GRID_PRICE_CT`, `FEED_IN_TARIFF_CT`, `OIL_PRICE_PER_KWH_CT`, `HOUSEHOLD_USERS`, `GOOGLE_CALENDAR_CREDENTIALS_FILE`, `GOOGLE_CALENDAR_FAMILY_ID`, `GOOGLE_CALENDAR_ORCHESTRATOR_ID`. Most entity IDs have sensible defaults matching the existing HA setup.
+**Config** (env vars): `LLM_PROVIDER`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`, `MORNING_BRIEFING_TIME`, `ENABLE_PROACTIVE_SUGGESTIONS`, `ENABLE_SEMANTIC_MEMORY`, `ENABLE_KNOWLEDGE_STORE`, `MEMORY_DOCUMENT_MAX_SIZE`, `KNOWLEDGE_AUTO_EXTRACT`, `GRID_PRICE_CT`, `FEED_IN_TARIFF_CT`, `OIL_PRICE_PER_KWH_CT`, `HOUSEHOLD_USERS`, `GOOGLE_CALENDAR_CREDENTIALS_FILE`, `GOOGLE_CALENDAR_FAMILY_ID`, `GOOGLE_CALENDAR_ORCHESTRATOR_ID`. Most entity IDs have sensible defaults matching the existing HA setup.
 
 **Example use cases**:
 - "Do you need to charge your car tomorrow?" → checks PV forecast, EV battery, schedule

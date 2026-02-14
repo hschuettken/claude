@@ -7,6 +7,7 @@ history, and executes tool calls.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -14,6 +15,7 @@ from zoneinfo import ZoneInfo
 from shared.log import get_logger
 
 from config import OrchestratorSettings
+from knowledge import KnowledgeStore, MemoryDocument
 from llm.base import LLMProvider, LLMResponse, Message, ToolCall
 from memory import Memory
 from semantic_memory import SemanticMemory
@@ -56,6 +58,9 @@ Use the available tools to query real-time data. Do NOT guess sensor values.
 - Store and recall user preferences (learn over time)
 - Search your long-term memory for past conversations, facts, and decisions (recall_memory)
 - Store important facts and knowledge for future recall (store_fact)
+- Store structured knowledge (destinations, patterns, preferences) that other services use (store_learned_fact)
+- Query structured knowledge to check what you already know (get_learned_facts)
+- Read and update your personal memory notes (read_memory_notes, update_memory_notes)
 - Send notifications to household members
 - Read the family Google Calendar (absences, business trips, appointments) — READ ONLY
 - Write to the orchestrator's own Google Calendar (reminders, scheduled actions)
@@ -70,6 +75,17 @@ Use the available tools to query real-time data. Do NOT guess sensor values.
 - Respond in the user's language (German if they write German, English if English).
 - You can use emojis sparingly to make messages more readable on Telegram.
 - For energy comparisons: relate to everyday costs (e.g. "that's about 1.50€").
+
+## Learning & Memory
+- When you learn concrete facts (distances, preferences, corrections), store them:
+  - Use `store_learned_fact` for structured knowledge other services can query
+    (destinations with distances, person patterns, preferences)
+  - Use `update_memory_notes` to update your personal notebook with anything
+    worth remembering (nuanced context, rules, relationships, household quirks)
+- ALWAYS store destination corrections immediately (e.g. user says "it's only 10 km")
+- When a user corrects you, update both your memory notes AND the knowledge store
+- Check `get_learned_facts` before asking clarification questions — you may already know
+- Your memory notes (below) persist across conversations — keep them organized and concise
 
 ## Current Context
 - Time: {current_time}
@@ -88,6 +104,8 @@ class Brain:
         settings: OrchestratorSettings,
         semantic: SemanticMemory | None = None,
         ev_state: dict[str, Any] | None = None,
+        knowledge: KnowledgeStore | None = None,
+        memory_doc: MemoryDocument | None = None,
     ) -> None:
         self._llm = llm
         self._tools = tool_executor
@@ -95,6 +113,8 @@ class Brain:
         self._settings = settings
         self._semantic = semantic
         self._ev_state = ev_state or {}
+        self._knowledge = knowledge
+        self._memory_doc = memory_doc
         self._tz = ZoneInfo(settings.timezone)
         # Injected by OrchestratorService after construction
         self._activity_tracker: Any = None
@@ -244,6 +264,10 @@ class Brain:
         if ev_ctx:
             prompt += "\n" + ev_ctx
 
+        memory_notes = self._build_memory_notes_context()
+        if memory_notes:
+            prompt += "\n" + memory_notes
+
         return prompt
 
     # ------------------------------------------------------------------
@@ -274,6 +298,17 @@ class Brain:
             "respond_to_ev_trip_clarification tool with the event_id."
         )
         return "\n".join(lines)
+
+    def _build_memory_notes_context(self) -> str:
+        """Inject the memory.md content into the system prompt."""
+        if not self._memory_doc:
+            return ""
+
+        content = self._memory_doc.read()
+        if not content or content.strip() == "":
+            return ""
+
+        return f"## Memory Notes\n{content}"
 
     @staticmethod
     def _history_to_messages(raw: list[dict[str, Any]]) -> list[Message]:
@@ -353,6 +388,78 @@ class Brain:
             )
         except Exception:
             logger.debug("auto_store_failed")
+
+        # Also extract structured knowledge if enabled (fire-and-forget)
+        if self._knowledge and self._settings.knowledge_auto_extract:
+            try:
+                await self._auto_extract_knowledge(
+                    user_message, assistant_response, user_name,
+                )
+            except Exception:
+                logger.debug("auto_extract_knowledge_failed")
+
+    async def _auto_extract_knowledge(
+        self, user_message: str, assistant_response: str, user_name: str,
+    ) -> None:
+        """Ask the LLM to extract structured facts from a conversation turn.
+
+        Runs asynchronously after each conversation — does not slow down
+        the user-facing response.
+        """
+        if not self._knowledge:
+            return
+
+        prompt = (
+            "Extract any structured facts from this conversation exchange. "
+            "Return ONLY a JSON array (no markdown, no explanation). "
+            "Each element should have: type, key, data.\n"
+            "Types:\n"
+            '- "destination": {key: place name, data: {name, distance_km, person, notes}}\n'
+            '- "person_pattern": {key: descriptive_key, data: {person, pattern, context}}\n'
+            '- "preference": {key: descriptive_key, data: {user, value, context}}\n'
+            '- "correction": {key: descriptive_key, data: {original, corrected, context}}\n\n'
+            "Return [] if no structured facts were revealed.\n\n"
+            f"User ({user_name}): {user_message[:500]}\n"
+            f"Assistant: {assistant_response[:500]}"
+        )
+        try:
+            response = await self._llm.chat(
+                [Message(role="user", content=prompt)],
+                tools=None,
+            )
+            text = (response.content or "").strip()
+            # Strip markdown code fences if present
+            if text.startswith("```"):
+                text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+            if not text or text == "[]":
+                return
+
+            facts = json.loads(text)
+            if not isinstance(facts, list):
+                return
+
+            for fact in facts:
+                fact_type = fact.get("type", "")
+                key = fact.get("key", "")
+                data = fact.get("data", {})
+                if fact_type and key and data:
+                    self._knowledge.store(
+                        fact_type=fact_type,
+                        key=key,
+                        data=data,
+                        confidence=0.7,  # LLM-inferred, not user-confirmed
+                        source="auto_extract",
+                    )
+                    logger.info(
+                        "knowledge_auto_extracted",
+                        type=fact_type,
+                        key=key,
+                    )
+        except (json.JSONDecodeError, KeyError, TypeError):
+            logger.debug("knowledge_extraction_parse_failed")
+        except Exception:
+            logger.debug("knowledge_extraction_failed")
 
     async def _summarize_for_memory(
         self, user_message: str, assistant_response: str, user_name: str,

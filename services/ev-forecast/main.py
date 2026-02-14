@@ -33,6 +33,7 @@ from shared.log import get_logger
 from shared.mqtt_client import MQTTClient
 
 from config import EVForecastSettings
+from learned_destinations import LearnedDestinations
 from planner import ChargingPlan, ChargingPlanner
 from trips import GeoDistance, TripPredictor
 from vehicle import RefreshConfig, VehicleConfig, VehicleMonitor, VehicleState
@@ -96,6 +97,9 @@ class EVForecastService:
         self._home_lat = self.settings.home_latitude
         self._home_lon = self.settings.home_longitude
 
+        # Learned destinations from orchestrator (persistent)
+        self.learned_destinations = LearnedDestinations()
+
         # Trip predictor (initialized in start() after resolving home location)
         self.trips: TripPredictor | None = None
 
@@ -148,6 +152,7 @@ class EVForecastService:
             calendar_prefix_nicole=self.settings.calendar_prefix_nicole,
             timezone=self.settings.timezone,
             geo_distance=geo,
+            learned_destinations=self.learned_destinations,
         )
 
         # Load persisted state (before first vehicle read)
@@ -170,6 +175,12 @@ class EVForecastService:
         self.mqtt.subscribe(
             "homelab/orchestrator/command/ev-forecast",
             self._on_orchestrator_command,
+        )
+
+        # Subscribe to learned knowledge from orchestrator
+        self.mqtt.subscribe(
+            self.settings.knowledge_update_topic,
+            self.learned_destinations.on_knowledge_update,
         )
 
         # Initialize Google Calendar
@@ -402,6 +413,9 @@ class EVForecastService:
                 use_ev=use_ev,
                 distance_km=distance_km,
             )
+            # Trigger a plan update after clarification is resolved
+            if self._loop:
+                asyncio.run_coroutine_threadsafe(self._update_plan(), self._loop)
 
     # ------------------------------------------------------------------
     # Google Calendar initialization
