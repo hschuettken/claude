@@ -1,6 +1,32 @@
 # Architecture & Coding Guidelines
 
-> **Purpose**: Reusable architecture patterns and coding conventions for Python microservice projects. Copy this file into new repositories and adapt as needed.
+> **Purpose**: Reusable architecture patterns and coding conventions for Python microservice projects. **All repositories in this ecosystem MUST follow these guidelines** to ensure consistency, stability, and seamless inter-repo collaboration.
+
+---
+
+## Adoption Requirements for New Repositories
+
+Every repository that participates in this ecosystem **must**:
+
+1. **Follow the patterns in this document.** This is not optional guidance — it is the standard. Service structure, configuration, logging, error handling, and communication patterns must match what's described here.
+
+2. **Create its own documentation** in `docs/<repo-name>/`:
+   - `ARCHITECTURE_GUIDELINES.md` — Adapt this file to cover repo-specific architecture decisions, service descriptions, and data flows. Keep the shared patterns, add repo-specific sections.
+   - `TOOLS_AND_STACK.md` — Document the tools, dependencies, infrastructure, scripts, deploy workflows, and configuration specific to that repo. Use the same structure as the reference file from the `claude` repo.
+
+3. **Keep documentation in sync.** The `scripts/sync-docs.sh` script distributes docs across all repos. Each repo's `docs/<repo-name>/` folder is its own — other repos' docs appear alongside as read-only references. When you update your docs, run the sync script so all repos see the latest version.
+
+4. **Maintain the same operational standards:**
+   - Deploy scripts (`deploy-push.sh`, `deploy-pull.sh`) with retry logic
+   - Secrets encrypted via SOPS+age (`.env.enc`), never plain `.env` committed
+   - Git pre-commit hooks blocking secrets
+   - Everything configurable via `.env` (Pydantic settings, `extra="ignore"`)
+   - Structured logging (structlog, event names + kwargs)
+   - Docker health checks + MQTT heartbeats
+   - Per-service `diagnose.py` diagnostic scripts
+   - State persistence to `/app/data/state.json` where applicable
+
+5. **Document inter-repo interactions.** If your repo communicates with another repo's services (via MQTT, HTTP APIs, shared files), document the contract in both repos' docs.
 
 ---
 

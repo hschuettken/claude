@@ -612,9 +612,37 @@ HEALTHCHECK --interval=60s --timeout=5s --start-period=120s --retries=3 \
 
 Documentation files in `docs/<repo-name>/` are designed to be synced across multiple repositories. This ensures all repos share the same architecture guidelines, tool references, and coding conventions.
 
+### Requirements for every repo
+
+Every repository in the ecosystem **must**:
+
+1. **Create its own `docs/<repo-name>/` folder** with at least:
+   - `ARCHITECTURE_GUIDELINES.md` — repo-specific architecture, adapted from the `claude` repo's reference
+   - `TOOLS_AND_STACK.md` — repo-specific tools, dependencies, scripts, deploy workflows
+
+2. **Follow the patterns described in the shared docs.** These are not suggestions — they are the standard for the ecosystem. See the "Adoption Requirements" section in `ARCHITECTURE_GUIDELINES.md`.
+
+3. **Keep docs up to date.** When you add a service, change infrastructure, add scripts, or modify deploy workflows, update the docs in the same commit.
+
+### How the sync works
+
+The `claude` repo is the **primary source** for shared guidelines. The sync script distributes docs bidirectionally:
+
+```
+claude repo                           other repos
+───────────                           ───────────
+docs/claude/ARCHITECTURE_*.md    →    docs/claude/ARCHITECTURE_*.md
+docs/claude/TOOLS_AND_STACK.md   →    docs/claude/TOOLS_AND_STACK.md
+docs/repo-a/... (if pulled)     →    docs/repo-a/...
+
+docs/repo-a/...                  ←    docs/repo-a/...  (pulled back)
+```
+
+Each repo **owns** only its own `docs/<repo-name>/` folder. All other repo folders are read-only references synced in by the script.
+
 ### Sync script
 
-The `scripts/sync-docs.sh` script (see separate file) copies documentation from this repo's `docs/` folder into other repos and pushes the changes. Repo names are configured via the `SYNC_REPOS` variable in `.env`.
+The `scripts/sync-docs.sh` script copies documentation from this repo's `docs/` folder into other repos and pushes the changes. Repo names are configured via the `SYNC_REPOS` variable in `.env`.
 
 ### Configuration
 
@@ -649,6 +677,15 @@ Each repo only writes to its own `docs/<repo-name>/` subfolder. The sync script 
 ### Usage
 
 ```bash
+# Pull latest, then sync
+git pull origin main
 ./scripts/sync-docs.sh             # Sync all repos configured in .env
 ./scripts/sync-docs.sh repo-a      # Sync only a specific repo
 ```
+
+### Setting up a new repo for sync
+
+1. Add the repo to `SYNC_REPOS` in `.env` (in the `claude` repo)
+2. Run `./scripts/sync-docs.sh` — it will clone the new repo and push the shared docs
+3. In the new repo, create `docs/<repo-name>/ARCHITECTURE_GUIDELINES.md` and `TOOLS_AND_STACK.md`
+4. Run the sync again — the new repo's docs will be pulled back into `claude`
