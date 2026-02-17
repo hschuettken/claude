@@ -17,9 +17,11 @@
 #   2. For each destination repo:
 #      a. Clones (or pulls) the repo into SYNC_CLONE_DIR
 #      b. Pulls the destination's own docs/<repo-name>/ back into THIS repo
-#      c. Copies docs/ from THIS repo into the destination repo's docs/,
+#      c. Collects any "loose" docs (files/folders in docs/ not named after a
+#         synced repo) and organizes them into docs/<repo-name>/ in both repos
+#      d. Copies docs/ from THIS repo into the destination repo's docs/,
 #         EXCLUDING the destination's own docs/<repo-name>/ folder
-#      d. Commits and pushes changes in the destination repo
+#      e. Commits and pushes changes in the destination repo
 #   3. After all repos are synced, commits any new docs pulled into THIS repo
 #
 # Each repo owns its own docs/<repo-name>/ subfolder. The sync script never
@@ -68,6 +70,15 @@ fi
 
 # ─── Parse repo list ─────────────────────────────────────────────────────
 IFS=',' read -ra REPOS <<< "$SYNC_REPOS"
+
+# Build list of all known repo folder names (used to distinguish synced folders
+# from a destination's own loose docs)
+ALL_REPO_NAMES=("$THIS_REPO_NAME")
+for _r in "${REPOS[@]}"; do
+    _r="$(echo "$_r" | xargs)"
+    [ -z "$_r" ] && continue
+    ALL_REPO_NAMES+=("${_r##*/}")
+done
 
 echo "╔══════════════════════════════════════════════════════╗"
 echo "║           Documentation Sync                        ║"
@@ -203,6 +214,35 @@ for full_repo in "${REPOS[@]}"; do
             cp -r "$dest_docs_dir" "$local_dest"
             PULLED_NEW_DOCS=true
         fi
+    fi
+
+    # Step 2b: Collect "loose" docs — files or folders in the destination's docs/
+    # that aren't named after any synced repo. These are the destination's own
+    # docs that haven't been organized into docs/<repo_name>/ yet.
+    # We copy them into docs/<repo_name>/ in this repo AND move them in the
+    # destination so they survive the rsync --delete in Step 3.
+    if [ -d "$target_dir/docs" ]; then
+        for entry in "$target_dir/docs/"*; do
+            [ -e "$entry" ] || continue
+            entry_name="$(basename "$entry")"
+            # Skip entries named after known repos (these are synced folders)
+            is_repo_folder=false
+            for kr in "${ALL_REPO_NAMES[@]}"; do
+                if [ "$entry_name" = "$kr" ]; then
+                    is_repo_folder=true
+                    break
+                fi
+            done
+            if [ "$is_repo_folder" = false ]; then
+                echo "  Collecting loose doc '$entry_name' from $repo_name..."
+                mkdir -p "$REPO_ROOT/docs/$repo_name"
+                cp -r "$entry" "$REPO_ROOT/docs/$repo_name/$entry_name"
+                # Move into destination's docs/<repo_name>/ so it survives --delete
+                mkdir -p "$target_dir/docs/$repo_name"
+                mv "$entry" "$target_dir/docs/$repo_name/$entry_name"
+                PULLED_NEW_DOCS=true
+            fi
+        done
     fi
 
     # Step 3: Copy docs FROM this repo TO the destination repo
