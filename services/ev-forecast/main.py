@@ -1,9 +1,16 @@
 """EV Forecast Service — entry point and main loop.
 
-Monitors the Audi A6 e-tron via dual Audi Connect accounts, predicts
-upcoming driving needs from the family calendar, and generates demand-
-focused charging plans. The planner expresses what energy is needed
+Monitors the Audi A6 e-tron via Audi Connect (single or dual account mode),
+predicts upcoming driving needs from the family calendar, and generates
+demand-focused charging plans. The planner expresses what energy is needed
 and by when — the smart-ev-charging service handles PV optimization.
+
+Features:
+  - Dynamic consumption calculation: tracks actual kWh/100km from mileage
+    and SoC changes, adapting to driving style, temperature, and route type.
+  - Single account mode (default): uses Henning's Audi Connect directly.
+  - Dual account mode (optional): uses combined HA template sensors merging
+    two accounts with automatic active-account detection.
 
 Schedule:
   - Every 15 min: refresh vehicle state from Audi Connect
@@ -36,7 +43,7 @@ from config import EVForecastSettings
 from learned_destinations import LearnedDestinations
 from planner import ChargingPlan, ChargingPlanner
 from trips import GeoDistance, TripPredictor
-from vehicle import RefreshConfig, VehicleConfig, VehicleMonitor, VehicleState
+from vehicle import ConsumptionTracker, RefreshConfig, VehicleConfig, VehicleMonitor, VehicleState
 
 HEALTHCHECK_FILE = Path("/app/data/healthcheck")
 STATE_FILE = Path("/app/data/state.json")
@@ -71,7 +78,7 @@ class EVForecastService:
             password=self.settings.mqtt_password,
         )
 
-        # Vehicle monitor — reads combined HA template sensors
+        # Vehicle monitor — reads HA sensors (single or dual account mode)
         vehicle_config = VehicleConfig(
             soc_entity=self.settings.ev_soc_entity,
             range_entity=self.settings.ev_range_entity,
@@ -81,16 +88,27 @@ class EVForecastService:
             remaining_charge_entity=self.settings.ev_remaining_charge_entity,
             active_account_entity=self.settings.ev_active_account_entity,
         )
+
+        # Build refresh configs based on account mode
         refresh_configs = [
             RefreshConfig(name=self.settings.audi_account1_name, vin=self.settings.audi_account1_vin),
-            RefreshConfig(name=self.settings.audi_account2_name, vin=self.settings.audi_account2_vin),
         ]
+        if not self.settings.audi_single_account and self.settings.audi_account2_vin:
+            refresh_configs.append(
+                RefreshConfig(name=self.settings.audi_account2_name, vin=self.settings.audi_account2_vin),
+            )
         self.vehicle = VehicleMonitor(
             ha=self.ha,
             vehicle_config=vehicle_config,
             refresh_configs=refresh_configs,
             net_capacity_kwh=self.settings.ev_battery_capacity_net_kwh,
             stale_threshold_minutes=self.settings.audi_stale_threshold_minutes,
+        )
+
+        # Consumption tracker — calculates real kWh/100km from mileage + SoC
+        self.consumption_tracker = ConsumptionTracker(
+            battery_capacity_kwh=self.settings.ev_battery_capacity_gross_kwh,
+            default_consumption=self.settings.ev_consumption_kwh_per_100km,
         )
 
         # Home location (resolved in start())
@@ -126,7 +144,11 @@ class EVForecastService:
 
     async def start(self) -> None:
         """Initialize and start the service."""
-        logger.info("service_starting")
+        logger.info(
+            "service_starting",
+            audi_single_account=self.settings.audi_single_account,
+            default_consumption=self.settings.ev_consumption_kwh_per_100km,
+        )
 
         # Resolve home location (for geocoding)
         await self._resolve_home_location()
@@ -231,9 +253,19 @@ class EVForecastService:
     # ------------------------------------------------------------------
 
     async def _update_vehicle(self) -> None:
-        """Read vehicle state and publish to MQTT."""
+        """Read vehicle state, update consumption tracker, and publish to MQTT."""
         try:
             state = await self.vehicle.ensure_fresh_data()
+
+            # Feed consumption tracker with new mileage + SoC reading
+            self.consumption_tracker.update(state.mileage_km, state.soc_pct)
+
+            # Update trip predictor with latest consumption estimate
+            if self.trips is not None:
+                self.trips.consumption_kwh_per_100km = (
+                    self.consumption_tracker.consumption_kwh_per_100km
+                )
+
             payload = {
                 "soc_pct": state.soc_pct,
                 "range_km": state.range_km,
@@ -243,6 +275,9 @@ class EVForecastService:
                 "remaining_charge_min": state.remaining_charge_min,
                 "active_account": state.active_account,
                 "is_valid": state.is_valid,
+                "consumption_kwh_100km": self.consumption_tracker.consumption_kwh_per_100km,
+                "consumption_source": "measured" if self.consumption_tracker.has_data else "default",
+                "consumption_measurements": self.consumption_tracker.measurement_count,
                 "timestamp": datetime.now(self._tz).isoformat(),
             }
             self.mqtt.publish("homelab/ev-forecast/vehicle", payload)
@@ -651,6 +686,23 @@ class EVForecastService:
             },
         )
 
+        # Consumption (dynamic kWh/100km)
+        self.mqtt.publish_ha_discovery(
+            "sensor", "consumption", node_id=node, config={
+                "name": "EV Consumption",
+                "device": device,
+                "state_topic": vehicle_topic,
+                "value_template": "{{ value_json.consumption_kwh_100km | default('unknown') }}",
+                "unit_of_measurement": "kWh/100km",
+                "icon": "mdi:speedometer",
+                "json_attributes_topic": vehicle_topic,
+                "json_attributes_template": (
+                    '{{ {"source": value_json.consumption_source | default("default"), '
+                    '"measurements": value_json.consumption_measurements | default(0)} | tojson }}'
+                ),
+            },
+        )
+
         # Rich reasoning sensor with full plan details as JSON attributes
         self.mqtt.publish_ha_discovery(
             "sensor", "plan_reasoning", node_id=node, config={
@@ -678,7 +730,7 @@ class EVForecastService:
             },
         )
 
-        logger.info("ha_discovery_registered", entity_count=13)
+        logger.info("ha_discovery_registered", entity_count=14)
 
     # ------------------------------------------------------------------
     # Reasoning
@@ -688,9 +740,19 @@ class EVForecastService:
         """Compose detailed human-readable reasoning for the current plan."""
         lines: list[str] = []
 
+        ct = self.consumption_tracker
+        consumption_info = (
+            f"{ct.consumption_kwh_per_100km} kWh/100km "
+            f"({'measured' if ct.has_data else 'default'}, "
+            f"{ct.measurement_count} samples)"
+        )
+
         lines.append(
             f"Vehicle: SoC {vehicle.soc_pct}% | Range {vehicle.range_km} km | "
-            f"Account: {vehicle.active_account} | Plug: {vehicle.plug_state}"
+            f"Mileage: {vehicle.mileage_km} km | Plug: {vehicle.plug_state}"
+        )
+        lines.append(
+            f"Consumption: {consumption_info}"
         )
         lines.append(
             f"Plan: {plan.current_soc_pct}% SoC | "
@@ -727,8 +789,10 @@ class EVForecastService:
             "service": "ev-forecast",
             "uptime_seconds": round(time.monotonic() - self._start_time, 1),
             "ev_soc_pct": vehicle.soc_pct,
-            "active_account": vehicle.active_account,
+            "active_account": vehicle.active_account or "single",
             "has_plan": self._last_plan is not None,
+            "consumption_kwh_100km": self.consumption_tracker.consumption_kwh_per_100km,
+            "consumption_source": "measured" if self.consumption_tracker.has_data else "default",
         })
         self._touch_healthcheck()
 
@@ -737,7 +801,7 @@ class EVForecastService:
     # ------------------------------------------------------------------
 
     def _save_state(self) -> None:
-        """Persist current vehicle state and last plan to disk."""
+        """Persist current vehicle state, consumption tracker, and last plan to disk."""
         try:
             vehicle = self.vehicle.last_state
             state_data: dict[str, Any] = {
@@ -746,8 +810,10 @@ class EVForecastService:
                     "range_km": vehicle.range_km,
                     "charging_state": vehicle.charging_state,
                     "plug_state": vehicle.plug_state,
+                    "mileage_km": vehicle.mileage_km,
                     "active_account": vehicle.active_account,
                 },
+                "consumption_tracker": self.consumption_tracker.to_dict(),
                 "saved_at": datetime.now(self._tz).isoformat(),
             }
 
@@ -764,7 +830,7 @@ class EVForecastService:
             logger.debug("state_save_failed", exc_info=True)
 
     def _load_state(self) -> None:
-        """Load persisted state on startup to pre-populate vehicle data."""
+        """Load persisted state on startup to pre-populate vehicle data and consumption history."""
         try:
             if not STATE_FILE.exists():
                 return
@@ -779,14 +845,27 @@ class EVForecastService:
                     range_km=v.get("range_km"),
                     charging_state=v.get("charging_state", "unknown"),
                     plug_state=v.get("plug_state", "unknown"),
+                    mileage_km=v.get("mileage_km"),
                     active_account=v.get("active_account", ""),
                 )
                 self.vehicle._last_state = restored
-                logger.info(
-                    "state_loaded",
-                    soc_pct=soc,
-                    saved_at=data.get("saved_at"),
+
+            # Restore consumption tracker history
+            ct_data = data.get("consumption_tracker")
+            if ct_data:
+                self.consumption_tracker = ConsumptionTracker.from_dict(
+                    ct_data,
+                    capacity=self.settings.ev_battery_capacity_gross_kwh,
+                    default=self.settings.ev_consumption_kwh_per_100km,
                 )
+
+            logger.info(
+                "state_loaded",
+                soc_pct=soc,
+                consumption=self.consumption_tracker.consumption_kwh_per_100km,
+                consumption_measurements=self.consumption_tracker.measurement_count,
+                saved_at=data.get("saved_at"),
+            )
         except Exception:
             logger.debug("state_load_failed", exc_info=True)
 
