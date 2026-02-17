@@ -21,9 +21,9 @@ class DashboardSettings(BaseSettings):
     # --- EV entities ---
     ev_charge_power_entity: str = "sensor.amtron_meter_total_power_w"
     ev_session_energy_entity: str = "sensor.amtron_meter_total_energy_kwh"
-    ev_soc_entity: str = "sensor.audi_a6_avant_e_tron_state_of_charge_comb"
-    ev_range_entity: str = "sensor.audi_a6_avant_e_tron_range_comb"
-    ev_plug_entity: str = "binary_sensor.audi_a6_avant_e_tron_plugged_in_comb"
+    ev_soc_entity: str = "sensor.audi_a6_avant_e_tron_state_of_charge"
+    ev_range_entity: str = "sensor.audi_a6_avant_e_tron_range"
+    ev_plug_entity: str = "binary_sensor.audi_a6_avant_e_tron_plugged_in"
 
     # --- EV control entities ---
     ev_charge_mode_entity: str = "input_select.ev_charge_mode"
