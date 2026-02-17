@@ -14,24 +14,31 @@ class EVForecastSettings(BaseSettings):
     # --- EV Battery specs ---
     ev_battery_capacity_gross_kwh: float = 83.0   # Audi A6 e-tron gross
     ev_battery_capacity_net_kwh: float = 76.0     # Usable capacity
-    ev_consumption_kwh_per_100km: float = 22.0    # Average mileage
+    # Default consumption — used as fallback until enough real data is collected.
+    # The service calculates actual consumption dynamically from mileage + SoC changes.
+    ev_consumption_kwh_per_100km: float = 22.0
 
-    # --- Combined EV sensors (from HA template sensors in ev_audi_connect.yaml) ---
-    # These read from the *_comb template sensors that combine both Audi Connect
-    # accounts. HA determines the active account via mileage comparison; the
-    # service just reads the result.
-    ev_soc_entity: str = "sensor.audi_a6_avant_e_tron_state_of_charge_comb"
-    ev_range_entity: str = "sensor.audi_a6_avant_e_tron_range_comb"
-    ev_charging_entity: str = "sensor.audi_a6_avant_e_tron_charging_state_comb"
-    ev_plug_entity: str = "sensor.audi_a6_avant_e_tron_plug_state_comb"
-    ev_mileage_entity: str = "sensor.audi_a6_avant_e_tron_mileage_comb"
-    ev_remaining_charge_entity: str = "sensor.audi_a6_avant_e_tron_remaining_charge_time_comb"
-    ev_active_account_entity: str = "sensor.audi_a6_avant_e_tron_active_account_comb"
-    ev_climatisation_entity: str = "sensor.audi_a6_avant_e_tron_climatisation_state_comb"
+    # --- Audi Connect account mode ---
+    # true  = single account (Henning only, direct sensors — recommended)
+    # false = dual account (Henning + Nicole, requires combined _comb template sensors in HA)
+    audi_single_account: bool = True
+
+    # --- EV sensors ---
+    # Single-account defaults use direct Audi Connect entities (no _comb suffix).
+    # Dual-account mode should override these with combined _comb template sensors.
+    ev_soc_entity: str = "sensor.audi_a6_avant_e_tron_state_of_charge"
+    ev_range_entity: str = "sensor.audi_a6_avant_e_tron_range"
+    ev_charging_entity: str = "sensor.audi_a6_avant_e_tron_charging_state"
+    ev_plug_entity: str = "sensor.audi_a6_avant_e_tron_plug_state"
+    ev_mileage_entity: str = "sensor.audi_a6_avant_e_tron_mileage"
+    ev_remaining_charge_entity: str = "sensor.audi_a6_avant_e_tron_remaining_charge_time"
+    ev_active_account_entity: str = ""  # Only needed in dual-account mode
+    ev_climatisation_entity: str = "sensor.audi_a6_avant_e_tron_climatisation_state"
 
     # --- Audi Connect accounts (needed for cloud data refresh via VIN) ---
     audi_account1_name: str = "Henning"
     audi_account1_vin: str = ""
+    # Second account — only needed when audi_single_account=false
     audi_account2_name: str = "Nicole"
     audi_account2_vin: str = ""
 

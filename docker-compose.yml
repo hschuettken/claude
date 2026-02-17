@@ -151,8 +151,15 @@ services:
       - dashboard_data:/app/data
     depends_on:
       - mqtt
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.homelab-dashboard.rule=Host(`${TRAEFIK_DASHBOARD_HOST:-cockpit.local.schuettken.net}`)"
+      - "traefik.http.routers.homelab-dashboard.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.homelab-dashboard.tls=true"
+      - "traefik.http.services.homelab-dashboard.loadbalancer.server.port=8085"
     networks:
       - homelab
+      - traefik
 
   # --- Template for new services ---
   # my-new-service:
@@ -186,3 +193,6 @@ volumes:
 networks:
   homelab:
     driver: bridge
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK:-traefik}

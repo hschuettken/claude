@@ -642,14 +642,22 @@ EV charging based on PV surplus, user preferences, and departure deadlines.
 
 ### ev-forecast — EV Driving Forecast & Smart Charging Planner
 
-Monitors the Audi A6 e-tron (83 kWh gross / 76 kWh net) via dual Audi Connect accounts, predicts driving needs from the family calendar, and generates smart charging plans that maximize PV usage while ensuring the car is always ready.
+Monitors the Audi A6 e-tron (83 kWh gross / 76 kWh net) via Audi Connect, predicts driving needs from the family calendar, and generates smart charging plans that maximize PV usage while ensuring the car is always ready.
 
-**Vehicle**: Audi A6 e-tron, ~22 kWh/100 km average consumption.
+**Vehicle**: Audi A6 e-tron, consumption calculated dynamically from mileage + SoC changes (default 22 kWh/100 km until enough data is collected).
 
-**Dual Audi Connect accounts**: Henning and Nicole each have an Audi Connect account for the same car. Only the person who last drove sees valid sensor data — the other shows "unknown". HA template sensors (see `HomeAssistant_config/ev_audi_connect.yaml`) determine the active account via **mileage comparison** (higher mileage = last driver) and expose combined `_comb` entities. The service:
-1. Reads from combined HA template sensors (`sensor.audi_a6_avant_e_tron_state_of_charge_comb`, `sensor.audi_a6_avant_e_tron_range_comb`, `sensor.audi_a6_avant_e_tron_charging_state_comb`, `sensor.audi_a6_avant_e_tron_plug_state_comb`, `sensor.audi_a6_avant_e_tron_mileage_comb`, `sensor.audi_a6_avant_e_tron_climatisation_state_comb`, etc.) — HA handles active account selection
-2. Triggers `audiconnect.refresh_cloud_data` for both accounts to keep data fresh (account names + VINs still needed for cloud refresh)
-3. Individual account sensor config has been replaced with combined `_comb` sensor entity IDs in the service config
+**Audi Connect account modes** (`AUDI_SINGLE_ACCOUNT` env var):
+
+| Mode | Default | Description |
+|------|---------|-------------|
+| Single account (recommended) | `true` | Uses Henning's Audi Connect directly with standard sensor entities. No combined template sensors needed. |
+| Dual account (legacy) | `false` | Uses combined `_comb` HA template sensors merging Henning + Nicole accounts via mileage comparison. Requires `ev_audi_connect.yaml` HA package. |
+
+In single-account mode, the service reads direct Audi Connect entities (e.g. `sensor.audi_a6_avant_e_tron_state_of_charge`). The `active_account_entity` is left empty and only one VIN is used for cloud refresh.
+
+In dual-account mode (legacy), the service reads combined `_comb` entities and refreshes both accounts.
+
+**Dynamic consumption calculation**: The service tracks actual kWh/100km from mileage and SoC changes instead of using a fixed rate. When a driving segment is detected (mileage increased AND SoC decreased between readings), the consumption is calculated: `(soc_delta / 100 × battery_capacity) / km_delta × 100`. The rolling average of the last 10 measurements replaces the configured default. This adapts to seasonal changes (cold = higher consumption), driving style (highway vs city), and payload. Measurements are persisted across restarts. Only values in the 5–60 kWh/100km range pass the sanity check.
 
 **Calendar-based trip prediction**: Reads the shared family calendar. Events are parsed by prefix:
 - `H: <destination>` — Henning drives (e.g., "H: Aachen", "H: STR")
@@ -665,7 +673,7 @@ Monitors the Audi A6 e-tron (83 kWh gross / 76 kWh net) via dual Audi Connect ac
 **Trip clarification**: When the ev-forecast service can't determine if someone will use the EV (Henning for 100–350 km trips, unknown destinations), it publishes questions in German to `homelab/ev-forecast/clarification-needed`. Each clarification includes an `event_id` for tracking. The orchestrator forwards these to Telegram and routes user responses back via `homelab/ev-forecast/trip-response`.
 
 **Smart charging plan** (demand-focused): The planner expresses **demand** ("need X kWh by time Y"), not supply. PV optimization is left to the smart-ev-charging service. For the next 3 days, the planner:
-1. Calculates energy needed for each day's trips (distance × 22 kWh/100km)
+1. Calculates energy needed for each day's trips (distance × dynamic consumption rate)
 2. Adds safety buffer (min SoC 20% + buffer 10% + min arrival SoC 15%)
 3. Compares required SoC to current SoC, tracks running SoC across days
 4. Assigns urgency: none → low → medium → high → critical (based on time-to-deadline)
@@ -688,18 +696,19 @@ Monitors the Audi A6 e-tron (83 kWh gross / 76 kWh net) via dual Audi Connect ac
 
 **Schedule**: Vehicle state check every 15 min, plan update every 30 min.
 
-**HA output sensors** (via MQTT auto-discovery, "EV Forecast" device, 13 entities):
+**HA output sensors** (via MQTT auto-discovery, "EV Forecast" device, 14 entities):
 - `binary_sensor` — Service online/offline
 - `sensor` — EV SoC (%), EV Range (km), Active Account, Charging State, Plug State, Energy Needed Today (kWh), Recommended Charge Mode, Next Trip, Next Departure, Plan Status, Uptime
+- `sensor` — EV Consumption (kWh/100km, with `source` and `measurements` attributes — "measured" or "default")
 - `sensor` (reasoning) — Plan Reasoning (with `full_reasoning`, `current_soc_pct`, `total_energy_needed_kwh`, `today_urgency` as JSON attributes)
 
 **MQTT events**: `homelab/ev-forecast/vehicle`, `homelab/ev-forecast/plan`, `homelab/ev-forecast/clarification-needed`, `homelab/ev-forecast/heartbeat`
 
 **MQTT integration with orchestrator**: When a trip needs clarification (unknown distance or Henning's ambiguous trips), publishes to `homelab/ev-forecast/clarification-needed`. The orchestrator can ask via Telegram and respond on `homelab/ev-forecast/trip-response`.
 
-**HA YAML** (`HomeAssistant_config/ev_audi_connect.yaml`): HA package that combines both Audi Connect accounts into unified `_comb` entities via mileage-based active account detection. Also includes scripts for cloud/vehicle refresh and all vehicle actions (climate, lock, unlock, charger, etc.), plus a periodic cloud refresh automation (every 30 min). Include as a HA package: `homeassistant: packages: ev_audi: !include ev_audi_connect.yaml`. Requires `ev_vin` in `secrets.yaml`. Combined entities: `sensor.audi_a6_avant_e_tron_state_of_charge_comb`, `sensor.audi_a6_avant_e_tron_range_comb`, `sensor.audi_a6_avant_e_tron_charging_state_comb`, `sensor.audi_a6_avant_e_tron_plug_state_comb`, `sensor.audi_a6_avant_e_tron_mileage_comb`, `sensor.audi_a6_avant_e_tron_active_account_comb`, `sensor.audi_a6_avant_e_tron_climatisation_state_comb`, `binary_sensor.audi_a6_avant_e_tron_plugged_in_comb`, `binary_sensor.audi_a6_avant_e_tron_is_charging_comb`, `binary_sensor.audi_a6_avant_e_tron_climatisation_active_comb`. Scripts: `script.ev_refresh_cloud`, `script.ev_refresh_vehicle`, `script.ev_start_climate`, `script.ev_stop_climate`, `script.ev_start_window_heating`, `script.ev_lock`, `script.ev_unlock`, `script.ev_start_charger`, `script.ev_stop_charger`, `script.ev_set_target_soc`.
+**HA YAML** (`HomeAssistant_config/ev_audi_connect.yaml`): HA package for vehicle scripts and automation. In **single-account mode** (default), only the vehicle action scripts (`ev_refresh_cloud`, `ev_refresh_vehicle`, `ev_start_climate`, etc.) and periodic cloud refresh automation are needed — the combined `_comb` template sensors are not required. In **dual-account mode** (legacy), the package additionally provides combined `_comb` entities via mileage-based active account detection. Include as HA package: `homeassistant: packages: ev_audi: !include ev_audi_connect.yaml`. Scripts: `script.ev_refresh_cloud`, `script.ev_refresh_vehicle`, `script.ev_start_climate`, `script.ev_stop_climate`, `script.ev_start_window_heating`, `script.ev_lock`, `script.ev_unlock`, `script.ev_start_charger`, `script.ev_stop_charger`, `script.ev_set_target_soc`.
 
-**Config** (env vars): `EV_BATTERY_CAPACITY_GROSS_KWH`, `EV_BATTERY_CAPACITY_NET_KWH`, `EV_CONSUMPTION_KWH_PER_100KM`, `EV_SOC_ENTITY`, `EV_RANGE_ENTITY`, `EV_CHARGING_STATE_ENTITY`, `EV_PLUG_STATE_ENTITY`, `EV_MILEAGE_ENTITY`, `EV_CLIMATISATION_ENTITY` (combined sensor entity IDs — HA handles active account selection), `AUDI_ACCOUNT1_NAME` / `AUDI_ACCOUNT1_VIN`, `AUDI_ACCOUNT2_NAME` / `AUDI_ACCOUNT2_VIN` (needed for cloud refresh only), `NICOLE_COMMUTE_KM`, `NICOLE_COMMUTE_DAYS`, `HENNING_TRAIN_THRESHOLD_KM`, `KNOWN_DESTINATIONS` (JSON), `MIN_SOC_PCT`, `BUFFER_SOC_PCT`, `CRITICAL_URGENCY_HOURS`, `HIGH_URGENCY_HOURS`, `FAST_MODE_THRESHOLD_KWH`, `EARLY_DEPARTURE_HOUR`, `PLAN_UPDATE_MINUTES`, `VEHICLE_CHECK_MINUTES`, `SAFE_MODE_ENTITY`. Uses same `GOOGLE_CALENDAR_*` credentials as the orchestrator.
+**Config** (env vars): `AUDI_SINGLE_ACCOUNT` (true = single account, false = dual), `EV_BATTERY_CAPACITY_GROSS_KWH`, `EV_BATTERY_CAPACITY_NET_KWH`, `EV_CONSUMPTION_KWH_PER_100KM` (default fallback until dynamic data is available), `EV_SOC_ENTITY`, `EV_RANGE_ENTITY`, `EV_CHARGING_ENTITY`, `EV_PLUG_ENTITY`, `EV_MILEAGE_ENTITY`, `EV_CLIMATISATION_ENTITY`, `EV_ACTIVE_ACCOUNT_ENTITY` (only for dual-account mode), `AUDI_ACCOUNT1_NAME` / `AUDI_ACCOUNT1_VIN`, `AUDI_ACCOUNT2_NAME` / `AUDI_ACCOUNT2_VIN` (only for dual-account mode), `AUDI_REFRESH_INTERVAL_MINUTES`, `AUDI_STALE_THRESHOLD_MINUTES`, `CALENDAR_PREFIX_HENNING`, `CALENDAR_PREFIX_NICOLE`, `NICOLE_COMMUTE_KM`, `NICOLE_COMMUTE_DAYS`, `HENNING_TRAIN_THRESHOLD_KM`, `KNOWN_DESTINATIONS` (JSON), `MIN_SOC_PCT`, `BUFFER_SOC_PCT`, `PLANNING_HORIZON_DAYS`, `CRITICAL_URGENCY_HOURS`, `HIGH_URGENCY_HOURS`, `FAST_MODE_THRESHOLD_KWH`, `EARLY_DEPARTURE_HOUR`, `PLAN_UPDATE_MINUTES`, `VEHICLE_CHECK_MINUTES`, `SAFE_MODE_ENTITY`. Uses same `GOOGLE_CALENDAR_*` credentials as the orchestrator.
 
 ### health-monitor — Health Monitoring & Telegram Alerting
 
@@ -762,7 +771,7 @@ A modern dark-themed web dashboard built with [NiceGUI](https://nicegui.io/) (Py
 
 **Config** (env vars): `DASHBOARD_PORT` (8085), `DASHBOARD_TITLE`, `DASHBOARD_USER_NAME` (name shown in chat), `HA_POLL_INTERVAL` (10), `UI_REFRESH_INTERVAL` (3). All entity IDs are configurable with sensible defaults matching the existing HA setup. Uses the same `HA_URL`, `HA_TOKEN`, `MQTT_*` settings as other services.
 
-**Access**: `http://<server-ip>:8085` — no authentication (intended for local network / VPN use only).
+**Access**: `http://<server-ip>:8085` directly, or via Traefik reverse proxy at `https://cockpit.local.schuettken.net` (configurable via `TRAEFIK_DASHBOARD_HOST`). No authentication (intended for local network / VPN use only).
 
 ## Inter-Service Integration Patterns
 

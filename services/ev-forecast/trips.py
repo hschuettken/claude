@@ -187,6 +187,7 @@ class TripPredictor:
     ) -> None:
         self._destinations = {k.lower(): v for k, v in known_destinations.items()}
         self._consumption = consumption_kwh_per_100km
+        self._default_consumption = consumption_kwh_per_100km
         self._nicole_commute_km = nicole_commute_km
         self._nicole_commute_days = nicole_commute_days or ["mon", "tue", "wed", "thu"]
         self._nicole_departure = self._parse_time(nicole_departure_time)
@@ -200,6 +201,16 @@ class TripPredictor:
 
         # Pending clarifications: {event_id: Trip}
         self._pending_clarifications: dict[str, Trip] = {}
+
+    @property
+    def consumption_kwh_per_100km(self) -> float:
+        """Current consumption rate used for energy calculations."""
+        return self._consumption
+
+    @consumption_kwh_per_100km.setter
+    def consumption_kwh_per_100km(self, value: float) -> None:
+        """Update consumption rate (e.g. from dynamic consumption tracker)."""
+        self._consumption = value
 
     async def predict_trips(
         self,
