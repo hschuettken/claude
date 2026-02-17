@@ -114,8 +114,8 @@ clone_or_pull() {
                 return 1
             }
         else
-            git clone "https://github.com/$full_repo.git" "$target_dir" --branch "$SYNC_DOCS_BRANCH" 2>/dev/null || \
-            git clone "https://github.com/$full_repo.git" "$target_dir" 2>/dev/null || {
+            git clone "git@github.com:$full_repo.git" "$target_dir" --branch "$SYNC_DOCS_BRANCH" 2>/dev/null || \
+            git clone "git@github.com:$full_repo.git" "$target_dir" 2>/dev/null || {
                 echo "  ERROR: Failed to clone $full_repo"
                 return 1
             }
