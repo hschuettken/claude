@@ -16,8 +16,9 @@
 #   1. Reads the list of repos from SYNC_REPOS (in .env or env var)
 #   2. For each destination repo:
 #      a. Clones (or pulls) the repo into SYNC_CLONE_DIR
-#      b. Copies docs/ from THIS repo into the destination repo's docs/
-#      c. Copies docs/ from the destination repo back into THIS repo's docs/
+#      b. Pulls the destination's own docs/<repo-name>/ back into THIS repo
+#      c. Copies docs/ from THIS repo into the destination repo's docs/,
+#         EXCLUDING the destination's own docs/<repo-name>/ folder
 #      d. Commits and pushes changes in the destination repo
 #   3. After all repos are synced, commits any new docs pulled into THIS repo
 #
@@ -179,29 +180,58 @@ for full_repo in "${REPOS[@]}"; do
 
     target_dir="$SYNC_CLONE_DIR/$repo_name"
 
-    # Step 2: Copy docs FROM this repo TO the destination repo
-    echo "  Pushing docs to $repo_name..."
-    mkdir -p "$target_dir/docs"
-
-    # Copy all doc folders from this repo to the destination
-    # This includes docs/claude/ (this repo's docs) and any other repo docs
-    # that were previously pulled in
-    if [ -d "$REPO_ROOT/docs" ]; then
-        # Use rsync if available (preserves structure, handles deletions)
-        if command -v rsync &> /dev/null; then
-            rsync -a --delete "$REPO_ROOT/docs/" "$target_dir/docs/"
+    # Step 2: Pull the destination repo's own docs back into THIS repo FIRST
+    # (before we overwrite anything — the destination is authoritative for its
+    #  own docs/<repo_name>/ folder)
+    dest_docs_dir="$target_dir/docs/$repo_name"
+    if [ -d "$dest_docs_dir" ] && [ "$(ls -A "$dest_docs_dir" 2>/dev/null)" ]; then
+        local_dest="$REPO_ROOT/docs/$repo_name"
+        if [ -d "$local_dest" ]; then
+            # Check if there are actual differences
+            if ! diff -rq "$dest_docs_dir" "$local_dest" &>/dev/null; then
+                echo "  Pulling $repo_name's docs back into this repo..."
+                if command -v rsync &> /dev/null; then
+                    rsync -a "$dest_docs_dir/" "$local_dest/"
+                else
+                    rm -rf "$local_dest"
+                    cp -r "$dest_docs_dir" "$local_dest"
+                fi
+                PULLED_NEW_DOCS=true
+            fi
         else
-            # Fallback: remove old docs and copy fresh
-            rm -rf "$target_dir/docs"
-            cp -r "$REPO_ROOT/docs" "$target_dir/docs"
+            echo "  Pulling new docs from $repo_name into this repo..."
+            cp -r "$dest_docs_dir" "$local_dest"
+            PULLED_NEW_DOCS=true
         fi
     fi
 
-    # Step 3: Check if the destination repo has its own docs/<repo_name>/ that we
-    #         should pull back into this repo. We do this BEFORE committing/pushing
-    #         the destination, so we don't lose any docs the destination repo created.
-    #         (The destination's own docs are already in our copy — this handles the
-    #          case where someone edited docs directly in the destination repo.)
+    # Step 3: Copy docs FROM this repo TO the destination repo
+    # IMPORTANT: Exclude the destination's own docs/<repo_name>/ folder — the
+    # destination repo is the authority for its own docs and we must not
+    # overwrite or delete them.
+    echo "  Pushing docs to $repo_name..."
+    mkdir -p "$target_dir/docs"
+
+    if [ -d "$REPO_ROOT/docs" ]; then
+        if command -v rsync &> /dev/null; then
+            rsync -a --delete --exclude="$repo_name/" "$REPO_ROOT/docs/" "$target_dir/docs/"
+        else
+            # Fallback: save the destination's own docs, replace everything,
+            # then restore them
+            tmp_backup=""
+            if [ -d "$target_dir/docs/$repo_name" ]; then
+                tmp_backup="$(mktemp -d)"
+                cp -r "$target_dir/docs/$repo_name" "$tmp_backup/$repo_name"
+            fi
+            rm -rf "$target_dir/docs"
+            cp -r "$REPO_ROOT/docs" "$target_dir/docs"
+            if [ -n "$tmp_backup" ]; then
+                rm -rf "$target_dir/docs/$repo_name"
+                cp -r "$tmp_backup/$repo_name" "$target_dir/docs/$repo_name"
+                rm -rf "$tmp_backup"
+            fi
+        fi
+    fi
 
     # Step 4: Commit and push changes in the destination repo
     cd "$target_dir"
@@ -230,35 +260,11 @@ Automated sync via scripts/sync-docs.sh" 2>/dev/null
 
     cd "$REPO_ROOT"
 
-    # Step 5: Pull the destination repo's own docs back into THIS repo
-    # (in case they created docs/<repo_name>/ in their repo)
-    dest_docs_dir="$target_dir/docs/$repo_name"
-    if [ -d "$dest_docs_dir" ] && [ "$(ls -A "$dest_docs_dir" 2>/dev/null)" ]; then
-        local_dest="$REPO_ROOT/docs/$repo_name"
-        if [ -d "$local_dest" ]; then
-            # Check if there are actual differences
-            if ! diff -rq "$dest_docs_dir" "$local_dest" &>/dev/null; then
-                echo "  Pulling $repo_name's docs back into this repo..."
-                if command -v rsync &> /dev/null; then
-                    rsync -a "$dest_docs_dir/" "$local_dest/"
-                else
-                    rm -rf "$local_dest"
-                    cp -r "$dest_docs_dir" "$local_dest"
-                fi
-                PULLED_NEW_DOCS=true
-            fi
-        else
-            echo "  Pulling new docs from $repo_name into this repo..."
-            cp -r "$dest_docs_dir" "$local_dest"
-            PULLED_NEW_DOCS=true
-        fi
-    fi
-
     echo "[$repo_name] Done."
     echo ""
 done
 
-# ─── Step 6: Commit any docs pulled from other repos ─────────────────────
+# ─── Step 5: Commit any docs pulled from other repos ─────────────────────
 if [ "$PULLED_NEW_DOCS" = true ]; then
     echo "==> Committing docs pulled from other repos..."
     cd "$REPO_ROOT"
