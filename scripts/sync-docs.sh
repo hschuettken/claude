@@ -16,14 +16,12 @@
 #   1. Reads the list of repos from SYNC_REPOS (in .env or env var)
 #   2. For each destination repo:
 #      a. Clones (or pulls) the repo into SYNC_CLONE_DIR
-#      b. If docs/<repo-name>/ was deleted by a previous broken sync,
-#         recovers it from git history automatically
-#      c. Pulls the destination's own docs/<repo-name>/ back into THIS repo
-#      d. Collects any "loose" docs (files/folders in docs/ not named after a
+#      b. Pulls the destination's own docs/<repo-name>/ back into THIS repo
+#      c. Collects any "loose" docs (files/folders in docs/ not named after a
 #         synced repo) and organizes them into docs/<repo-name>/ in both repos
-#      e. Copies docs/ from THIS repo into the destination repo's docs/,
+#      d. Copies docs/ from THIS repo into the destination repo's docs/,
 #         EXCLUDING the destination's own docs/<repo-name>/ folder
-#      f. Commits and pushes changes in the destination repo
+#      e. Commits and pushes changes in the destination repo
 #   3. After all repos are synced, commits any new docs pulled into THIS repo
 #
 # Each repo owns its own docs/<repo-name>/ subfolder. The sync script never
@@ -192,25 +190,6 @@ for full_repo in "${REPOS[@]}"; do
     fi
 
     target_dir="$SYNC_CLONE_DIR/$repo_name"
-
-    # Step 1b: Recover docs/<repo_name>/ if a previous (broken) sync deleted them.
-    # The old script used rsync --delete without --exclude, which wiped the
-    # destination's own docs. Try to restore from git history.
-    if [ ! -d "$target_dir/docs/$repo_name" ]; then
-        cd "$target_dir"
-        last_ref="$(git log --all --format=%H -1 -- "docs/$repo_name/" 2>/dev/null || true)"
-        if [ -n "$last_ref" ]; then
-            echo "  docs/$repo_name/ missing — recovering from git history..."
-            if git checkout "$last_ref" -- "docs/$repo_name/" 2>/dev/null; then
-                echo "  Recovered docs/$repo_name/ from commit ${last_ref:0:7}."
-            elif git checkout "${last_ref}~1" -- "docs/$repo_name/" 2>/dev/null; then
-                echo "  Recovered docs/$repo_name/ from commit before ${last_ref:0:7}."
-            else
-                echo "  WARNING: Could not recover docs/$repo_name/ from git history."
-            fi
-        fi
-        cd "$REPO_ROOT"
-    fi
 
     # Step 2: Pull the destination repo's own docs back into THIS repo FIRST
     # (before we overwrite anything — the destination is authoritative for its
