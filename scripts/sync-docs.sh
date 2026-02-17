@@ -191,6 +191,13 @@ for full_repo in "${REPOS[@]}"; do
 
     target_dir="$SYNC_CLONE_DIR/$repo_name"
 
+    # Debug: show what the destination repo has in docs/
+    if [ -d "$target_dir/docs" ]; then
+        echo "  Remote docs/ contains: $(ls "$target_dir/docs/" 2>/dev/null | tr '\n' ' ')"
+    else
+        echo "  Remote has no docs/ folder"
+    fi
+
     # Step 2: Pull the destination repo's own docs back into THIS repo FIRST
     # (before we overwrite anything — the destination is authoritative for its
     #  own docs/<repo_name>/ folder)
