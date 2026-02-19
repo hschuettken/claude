@@ -88,13 +88,22 @@ services:
       dockerfile: services/orchestrator/Dockerfile
     restart: unless-stopped
     env_file: .env
+    ports:
+      - "8100:8100"
     volumes:
       - ./shared:/app/shared:ro
       - orchestrator_data:/app/data
     depends_on:
       - mqtt
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.homelab-orchestrator-api.rule=Host(`${TRAEFIK_ORCHESTRATOR_HOST:-api.local.schuettken.net}`)"
+      - "traefik.http.routers.homelab-orchestrator-api.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.homelab-orchestrator-api.tls=true"
+      - "traefik.http.services.homelab-orchestrator-api.loadbalancer.server.port=8100"
     networks:
       - homelab
+      - traefik
 
   ev-forecast:
     build:
