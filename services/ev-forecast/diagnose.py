@@ -160,7 +160,7 @@ async def check_audi(settings) -> None:
 
     ha = HomeAssistantClient(settings.ha_url, settings.ha_token)
     try:
-        # Test combined template sensors
+        # Test HA sensors
         combined_entities = {
             "SoC": settings.ev_soc_entity,
             "Range": settings.ev_range_entity,
@@ -168,9 +168,11 @@ async def check_audi(settings) -> None:
             "Plug": settings.ev_plug_entity,
             "Mileage": settings.ev_mileage_entity,
             "Remaining Charge": settings.ev_remaining_charge_entity,
-            "Active Account": settings.ev_active_account_entity,
         }
-        info("Combined HA template sensors:")
+        if not settings.audi_single_account and settings.ev_active_account_entity:
+            combined_entities["Active Account"] = settings.ev_active_account_entity
+        label = "Single-account HA sensors" if settings.audi_single_account else "Combined HA template sensors"
+        info(f"{label}:")
         valid_count = 0
         for prop, entity_id in combined_entities.items():
             try:
@@ -184,10 +186,10 @@ async def check_audi(settings) -> None:
             except Exception as e:
                 result(f"  {prop} ({entity_id})", False, str(e))
 
-        info(f"  -> {valid_count}/{len(combined_entities)} combined sensors have valid data")
+        info(f"  -> {valid_count}/{len(combined_entities)} sensors have valid data")
 
-        # Test vehicle monitor (combined sensor reading)
-        info("Testing vehicle monitor with combined sensors...")
+        # Test vehicle monitor
+        info("Testing vehicle monitor...")
         from vehicle import RefreshConfig, VehicleConfig, VehicleMonitor
         vehicle_config = VehicleConfig(
             soc_entity=settings.ev_soc_entity,
@@ -200,8 +202,11 @@ async def check_audi(settings) -> None:
         )
         refresh_configs = [
             RefreshConfig(name=settings.audi_account1_name, vin=settings.audi_account1_vin),
-            RefreshConfig(name=settings.audi_account2_name, vin=settings.audi_account2_vin),
         ]
+        if not settings.audi_single_account and settings.audi_account2_vin:
+            refresh_configs.append(
+                RefreshConfig(name=settings.audi_account2_name, vin=settings.audi_account2_vin),
+            )
         monitor = VehicleMonitor(
             ha, vehicle_config, refresh_configs, settings.ev_battery_capacity_net_kwh,
         )
@@ -400,7 +405,7 @@ async def check_plan(settings) -> None:
     ha = HomeAssistantClient(settings.ha_url, settings.ha_token)
 
     try:
-        # Read vehicle state via combined sensors
+        # Read vehicle state
         vehicle_config = VehicleConfig(
             soc_entity=settings.ev_soc_entity,
             range_entity=settings.ev_range_entity,
@@ -412,8 +417,11 @@ async def check_plan(settings) -> None:
         )
         refresh_configs = [
             RefreshConfig(name=settings.audi_account1_name, vin=settings.audi_account1_vin),
-            RefreshConfig(name=settings.audi_account2_name, vin=settings.audi_account2_vin),
         ]
+        if not settings.audi_single_account and settings.audi_account2_vin:
+            refresh_configs.append(
+                RefreshConfig(name=settings.audi_account2_name, vin=settings.audi_account2_vin),
+            )
         monitor = VehicleMonitor(
             ha, vehicle_config, refresh_configs, settings.ev_battery_capacity_net_kwh,
         )

@@ -122,6 +122,8 @@ class GeminiProvider(LLMProvider):
         text_parts: list[str] = []
 
         candidate = response.candidates[0]
+        if not candidate.content or not candidate.content.parts:
+            return LLMResponse(content=None, tool_calls=[])
         for part in candidate.content.parts:
             if hasattr(part, "function_call") and part.function_call:
                 fc = part.function_call
