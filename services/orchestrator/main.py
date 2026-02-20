@@ -368,6 +368,7 @@ class OrchestratorService(BaseService):
         while not self._shutdown_event.is_set():
             try:
                 self._publish_activity()
+                self._touch_healthcheck()
             except Exception:
                 self.logger.debug("activity_publish_failed")
             try:
