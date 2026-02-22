@@ -72,10 +72,26 @@ class ChargingPlan:
 
     @property
     def immediate_action(self) -> DayChargingRecommendation | None:
-        """The most urgent action (today or tonight for tomorrow)."""
-        if self.days:
-            return self.days[0]
-        return None
+        """The most urgent action to take now.
+
+        Returns today's recommendation unless today is just PV Surplus
+        and tomorrow needs active charging (overnight scenario).
+        """
+        if not self.days:
+            return None
+        today = self.days[0]
+        # If today already requires active charging, use it
+        if today.charge_mode != "PV Surplus":
+            return today
+        # Today is PV Surplus — check if tomorrow needs overnight charging
+        if len(self.days) > 1:
+            tomorrow = self.days[1]
+            if (
+                tomorrow.energy_to_charge_kwh > 0
+                and tomorrow.charge_mode != "PV Surplus"
+            ):
+                return tomorrow
+        return today
 
     @property
     def total_energy_needed_kwh(self) -> float:
@@ -243,7 +259,7 @@ class ChargingPlanner:
             try:
                 await self._ha.call_service("input_number", "set_value", {
                     "entity_id": target_energy_entity,
-                    "value": min(100, round(immediate.energy_to_charge_kwh)),
+                    "value": min(self._net_capacity, round(immediate.energy_to_charge_kwh)),
                 })
             except Exception:
                 logger.exception("set_target_energy_failed")

@@ -91,6 +91,8 @@ class SmartEVChargingService(BaseService):
                 await self._control_cycle(charger, strategy)
             except Exception:
                 self.logger.exception("control_cycle_error")
+            finally:
+                self._touch_healthcheck()
 
             # Wait for shutdown, force-cycle signal, or normal interval
             try:

@@ -239,8 +239,6 @@ class HealthMonitorService(BaseService):
                     "InfluxDB is healthy again.",
                 )
 
-            self._touch_healthcheck()
-
             try:
                 await asyncio.wait_for(
                     self._shutdown_event.wait(),

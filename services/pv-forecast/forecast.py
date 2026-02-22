@@ -237,13 +237,17 @@ class ForecastEngine:
             fs_values.get("west", {}),
         )
 
-        # Calculate remaining today
+        # Calculate remaining today (include fractional current hour)
         current_hour = now.hour
+        current_minute = now.minute
         remaining_kwh = 0.0
         for arr_forecast in (east_forecast, west_forecast):
             if arr_forecast and arr_forecast.today:
                 for h in arr_forecast.today.hourly:
-                    if h.time.hour > current_hour:
+                    if h.time.hour == current_hour:
+                        # Proportional remainder of current hour
+                        remaining_kwh += h.kwh * (60 - current_minute) / 60
+                    elif h.time.hour > current_hour:
                         remaining_kwh += h.kwh
 
         full = FullForecast(

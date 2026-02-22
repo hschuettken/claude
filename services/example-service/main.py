@@ -11,12 +11,8 @@ This service demonstrates:
 """
 
 import asyncio
-import time
-from pathlib import Path
 
 from shared.service import BaseService
-
-HEALTHCHECK_FILE = Path("/app/data/healthcheck")
 
 
 class ExampleService(BaseService):
@@ -58,7 +54,7 @@ class ExampleService(BaseService):
         # Example: publish an event
         self.publish("started", {"status": "ok"})
 
-        # Touch healthcheck on startup
+        # Touch healthcheck on startup (also auto-called from BaseService heartbeat)
         self._touch_healthcheck()
 
         # Keep running until shutdown signal
@@ -68,13 +64,6 @@ class ExampleService(BaseService):
         """Handle commands from the orchestrator service."""
         command = payload.get("command", "")
         self.logger.info("orchestrator_command", command=command)
-
-    def _touch_healthcheck(self) -> None:
-        try:
-            HEALTHCHECK_FILE.parent.mkdir(parents=True, exist_ok=True)
-            HEALTHCHECK_FILE.write_text(str(time.time()))
-        except OSError:
-            pass
 
 
 if __name__ == "__main__":

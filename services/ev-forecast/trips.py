@@ -503,8 +503,10 @@ class TripPredictor:
 
     def _is_commute_day(self, d: date) -> bool:
         """Check if this is one of Nicole's commute days."""
-        day_abbr = d.strftime("%a").lower()[:3]
-        return day_abbr in self._nicole_commute_days
+        # Use weekday() (0=Mon..6=Sun) instead of locale-dependent strftime("%a")
+        weekday_map = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+        commute_weekdays = {weekday_map[day] for day in self._nicole_commute_days if day in weekday_map}
+        return d.weekday() in commute_weekdays
 
     def _make_commute_trip(self, d: date) -> Trip:
         """Create Nicole's default commute trip."""
