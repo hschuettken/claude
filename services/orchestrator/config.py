@@ -107,6 +107,11 @@ class OrchestratorSettings(BaseSettings):
     memory_consolidation_batch_size: int = 10  # entries per consolidation batch
     memory_consolidation_min_batch_size: int = 5  # min entries to trigger consolidation
 
+    # --- API server (REST + MCP) ---
+    orchestrator_api_port: int = 8100  # Port for REST API + MCP server
+    orchestrator_api_key: str = ""  # X-API-Key for authentication (empty = deny all)
+    orchestrator_api_host: str = "0.0.0.0"  # Bind address
+
     # --- Household info ---
     household_users: str = "Henning,Nicole"  # comma-separated
     household_language: str = "de"  # default response language
