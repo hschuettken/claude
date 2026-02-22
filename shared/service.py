@@ -31,6 +31,7 @@ import asyncio
 import os
 import signal
 import time
+from pathlib import Path
 from typing import Any
 
 from shared.config import Settings
@@ -38,6 +39,9 @@ from shared.ha_client import HomeAssistantClient
 from shared.influx_client import InfluxClient
 from shared.log import get_logger
 from shared.mqtt_client import MQTTClient
+
+
+HEALTHCHECK_FILE = Path("/app/data/healthcheck")
 
 
 class BaseService:
@@ -200,6 +204,14 @@ class BaseService:
             pass
         return 0.0
 
+    def _touch_healthcheck(self) -> None:
+        """Write timestamp to healthcheck file for Docker HEALTHCHECK."""
+        try:
+            HEALTHCHECK_FILE.parent.mkdir(parents=True, exist_ok=True)
+            HEALTHCHECK_FILE.write_text(str(time.time()))
+        except OSError:
+            pass
+
     async def _heartbeat_loop(self) -> None:
         """Periodically publish heartbeat to MQTT."""
         interval = self.settings.heartbeat_interval_seconds
@@ -207,6 +219,10 @@ class BaseService:
         await asyncio.sleep(min(5, interval))
 
         while not self._shutdown_event.is_set():
+            # Touch healthcheck FIRST — even if MQTT publish fails,
+            # Docker still sees the service as alive.
+            self._touch_healthcheck()
+
             try:
                 payload: dict[str, Any] = {
                     "status": "online",

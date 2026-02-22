@@ -19,6 +19,7 @@ Output sensors in Home Assistant:
 """
 
 import asyncio
+import threading
 import time
 from pathlib import Path
 
@@ -149,13 +150,15 @@ class PVForecastService:
             hour=self.settings.model_retrain_hour,
             id="daily_retrain",
         )
-        self.scheduler.add_job(
-            self._heartbeat,
-            "interval",
-            seconds=self.settings.heartbeat_interval_seconds,
-            id="heartbeat",
-        )
         self.scheduler.start()
+
+        # Start heartbeat in a dedicated daemon thread so it can't be
+        # blocked by long-running scheduler jobs (ML training, InfluxDB queries).
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_thread_loop, daemon=True,
+        )
+        self._heartbeat_thread.start()
 
         logger.info(
             "service_started",
@@ -259,11 +262,10 @@ class PVForecastService:
             }
             self.mqtt.publish("homelab/pv-forecast/updated", summary)
 
-            # Touch healthcheck file for Docker healthcheck
-            self._touch_healthcheck()
-
         except Exception:
             logger.exception("forecast_failed")
+        finally:
+            self._touch_healthcheck()
 
     async def _fetch_forecast_solar_comparison(self) -> None:
         """Fetch Forecast.Solar values from HA for comparison sensors."""
@@ -589,14 +591,27 @@ class PVForecastService:
 
         logger.info("ha_discovery_registered", entity_count=23)
 
-    def _heartbeat(self) -> None:
-        """Publish MQTT heartbeat so other services know we're alive."""
-        self.mqtt.publish("homelab/pv-forecast/heartbeat", {
-            "status": "online",
-            "service": "pv-forecast",
-            "uptime_seconds": round(time.monotonic() - self._start_time, 1),
-        })
-        self._touch_healthcheck()
+    def _heartbeat_thread_loop(self) -> None:
+        """Publish heartbeat + touch healthcheck from a dedicated thread.
+
+        Runs independently of the asyncio event loop so it can't be blocked
+        by long-running scheduler jobs (ML training, InfluxDB queries).
+        """
+        interval = self.settings.heartbeat_interval_seconds
+        # Small initial delay so MQTT has time to connect
+        self._heartbeat_stop.wait(min(5, interval))
+
+        while not self._heartbeat_stop.is_set():
+            self._touch_healthcheck()
+            try:
+                self.mqtt.publish("homelab/pv-forecast/heartbeat", {
+                    "status": "online",
+                    "service": "pv-forecast",
+                    "uptime_seconds": round(time.monotonic() - self._start_time, 1),
+                })
+            except Exception:
+                logger.debug("heartbeat_publish_failed")
+            self._heartbeat_stop.wait(interval)
 
     def _touch_healthcheck(self) -> None:
         """Write timestamp to healthcheck file for Docker HEALTHCHECK."""
@@ -609,6 +624,8 @@ class PVForecastService:
     async def _shutdown(self) -> None:
         """Clean up resources."""
         logger.info("shutting_down")
+        if hasattr(self, "_heartbeat_stop"):
+            self._heartbeat_stop.set()
         self.scheduler.shutdown(wait=False)
         await self.ha.close()
         self.influx.close()

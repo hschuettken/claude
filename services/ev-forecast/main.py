@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -225,13 +226,15 @@ class EVForecastService:
             minutes=self.settings.plan_update_minutes,
             id="plan_update",
         )
-        self.scheduler.add_job(
-            self._heartbeat,
-            "interval",
-            seconds=self.settings.heartbeat_interval_seconds,
-            id="heartbeat",
-        )
         self.scheduler.start()
+
+        # Start heartbeat in a dedicated daemon thread so it can't be
+        # blocked by long-running scheduler jobs (HA API, Google Calendar).
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_thread_loop, daemon=True,
+        )
+        self._heartbeat_thread.start()
 
         logger.info(
             "service_started",
@@ -281,10 +284,11 @@ class EVForecastService:
                 "timestamp": datetime.now(self._tz).isoformat(),
             }
             self.mqtt.publish("homelab/ev-forecast/vehicle", payload)
-            self._touch_healthcheck()
             self._save_state()
         except Exception:
             logger.exception("vehicle_update_failed")
+        finally:
+            self._touch_healthcheck()
 
     # ------------------------------------------------------------------
     # Plan generation
@@ -346,11 +350,12 @@ class EVForecastService:
                     reason=day.reason,
                 )
 
-            self._touch_healthcheck()
             self._save_state()
 
         except Exception:
             logger.exception("plan_update_failed")
+        finally:
+            self._touch_healthcheck()
 
     async def _get_calendar_events(self) -> list[dict[str, Any]]:
         """Fetch calendar events for the planning horizon."""
@@ -781,20 +786,33 @@ class EVForecastService:
     # Heartbeat
     # ------------------------------------------------------------------
 
-    def _heartbeat(self) -> None:
-        """Publish MQTT heartbeat."""
-        vehicle = self.vehicle.last_state
-        self.mqtt.publish("homelab/ev-forecast/heartbeat", {
-            "status": "online",
-            "service": "ev-forecast",
-            "uptime_seconds": round(time.monotonic() - self._start_time, 1),
-            "ev_soc_pct": vehicle.soc_pct,
-            "active_account": vehicle.active_account or "single",
-            "has_plan": self._last_plan is not None,
-            "consumption_kwh_100km": self.consumption_tracker.consumption_kwh_per_100km,
-            "consumption_source": "measured" if self.consumption_tracker.has_data else "default",
-        })
-        self._touch_healthcheck()
+    def _heartbeat_thread_loop(self) -> None:
+        """Publish heartbeat + touch healthcheck from a dedicated thread.
+
+        Runs independently of the asyncio event loop so it can't be blocked
+        by long-running scheduler jobs (HA API, Google Calendar, geocoding).
+        """
+        interval = self.settings.heartbeat_interval_seconds
+        # Small initial delay so MQTT has time to connect
+        self._heartbeat_stop.wait(min(5, interval))
+
+        while not self._heartbeat_stop.is_set():
+            self._touch_healthcheck()
+            try:
+                vehicle = self.vehicle.last_state
+                self.mqtt.publish("homelab/ev-forecast/heartbeat", {
+                    "status": "online",
+                    "service": "ev-forecast",
+                    "uptime_seconds": round(time.monotonic() - self._start_time, 1),
+                    "ev_soc_pct": vehicle.soc_pct,
+                    "active_account": vehicle.active_account or "single",
+                    "has_plan": self._last_plan is not None,
+                    "consumption_kwh_100km": self.consumption_tracker.consumption_kwh_per_100km,
+                    "consumption_source": "measured" if self.consumption_tracker.has_data else "default",
+                })
+            except Exception:
+                logger.debug("heartbeat_publish_failed")
+            self._heartbeat_stop.wait(interval)
 
     # ------------------------------------------------------------------
     # State persistence
@@ -900,6 +918,8 @@ class EVForecastService:
 
     async def _shutdown(self) -> None:
         logger.info("shutting_down")
+        if hasattr(self, "_heartbeat_stop"):
+            self._heartbeat_stop.set()
         self.scheduler.shutdown(wait=False)
         self.mqtt.publish("homelab/ev-forecast/heartbeat", {
             "status": "offline",
