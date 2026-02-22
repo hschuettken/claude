@@ -104,9 +104,9 @@ class PVDataCollector:
         # do NOT reset at midnight (unlike daily energy sensors).
         hourly_kwh[hourly_kwh < 0] = 0
 
-        # Cap per-hour production at a reasonable maximum to filter outliers.
+        # Drop per-hour values above a reasonable maximum (outlier/sensor glitch).
         # A residential array rarely exceeds 20 kWh in a single hour.
-        hourly_kwh[hourly_kwh > 20] = 0
+        hourly_kwh[hourly_kwh > 20] = np.nan
 
         result = hourly_kwh.reset_index()
         result.columns = ["time", "kwh"]
@@ -273,6 +273,15 @@ class PVDataCollector:
         else:
             # Fallback if sunrise/sunset not in weather data
             merged = merged[(merged["hour"] >= 6) & (merged["hour"] <= 18)]
+
+        # Remove hours with negligible solar radiation (GHI < 5 W/m²).
+        # These are trivially dark and handled by a physics constraint at
+        # inference time. Including them in training dilutes the model with
+        # easy "dark → 0" examples instead of learning actual production.
+        if "shortwave_radiation" in merged.columns:
+            before = len(merged)
+            merged = merged[merged["shortwave_radiation"].fillna(0) >= 5]
+            logger.info("dark_hours_filtered", removed=before - len(merged))
 
         logger.info(
             "training_data_ready",

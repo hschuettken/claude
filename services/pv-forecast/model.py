@@ -25,7 +25,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import GradientBoostingRegressor
-from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import GroupKFold, cross_val_score
 
 from shared.log import get_logger
 
@@ -125,9 +125,19 @@ class PVModel:
         train_pred = self.model.predict(X)
         train_mae = float(np.mean(np.abs(y - train_pred)))
 
-        # Cross-validation R²
-        n_folds = min(self._cv_folds, len(X) // self._min_training_samples)
-        if n_folds >= 2:
+        # Cross-validation R² — use GroupKFold by date so that hours from
+        # the same day stay together. Random K-fold leaks intra-day
+        # correlation and gives unrealistic CV scores for time-series data.
+        groups = df["time"].dt.date if "time" in df.columns else None
+        n_groups = len(set(groups)) if groups is not None else len(X)
+        n_folds = min(self._cv_folds, n_groups)
+        if n_folds >= 2 and groups is not None:
+            gkf = GroupKFold(n_splits=n_folds)
+            cv_scores = cross_val_score(
+                self.model, X, y, cv=gkf, groups=groups.values, scoring="r2",
+            )
+            cv_r2 = float(cv_scores.mean())
+        elif n_folds >= 2:
             cv_scores = cross_val_score(self.model, X, y, cv=n_folds, scoring="r2")
             cv_r2 = float(cv_scores.mean())
         else:
