@@ -57,10 +57,17 @@ This file provides guidance for AI assistants working with this repository.
 │   │   │   ├── gemini.py                    #     Google Gemini (default)
 │   │   │   ├── openai_compat.py             #     OpenAI / Ollama
 │   │   │   └── anthropic_llm.py             #     Anthropic Claude
-│   │   └── channels/                        #   Communication channels
-│   │       ├── __init__.py
-│   │       ├── base.py                      #     Abstract channel interface
-│   │       └── telegram.py                  #     Telegram bot
+│   │   ├── channels/                        #   Communication channels
+│   │   │   ├── __init__.py
+│   │   │   ├── base.py                      #     Abstract channel interface
+│   │   │   └── telegram.py                  #     Telegram bot
+│   │   └── api/                             #   REST API + MCP server
+│   │       ├── __init__.py                  #     Package marker
+│   │       ├── auth.py                      #     API key middleware (X-API-Key header)
+│   │       ├── models.py                    #     Pydantic request/response models
+│   │       ├── routes.py                    #     FastAPI REST routes (/api/v1/*)
+│   │       ├── mcp_server.py                #     MCP tool & resource registration
+│   │       └── server.py                    #     FastAPI app factory + uvicorn
 │   ├── pv-forecast/                         #   AI solar production forecast
 │   │   ├── Dockerfile
 │   │   ├── requirements.txt                 #   scikit-learn, pandas, numpy
@@ -538,7 +545,44 @@ The central intelligence layer that coordinates all services, communicates with 
 - `sensor` — Uptime, LLM Provider, Messages Today, Tool Calls Today, Suggestions Sent Today, Last Tool Used, Last Decision, Last Suggestion, Services Online
 - `sensor` (reasoning) — Orchestrator Reasoning (with `full_reasoning`, `services_tracked`, `last_decision_time` as JSON attributes)
 
-**Config** (env vars): `LLM_PROVIDER`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`, `MORNING_BRIEFING_TIME`, `ENABLE_PROACTIVE_SUGGESTIONS`, `ENABLE_SEMANTIC_MEMORY`, `ENABLE_KNOWLEDGE_STORE`, `MEMORY_DOCUMENT_MAX_SIZE`, `KNOWLEDGE_AUTO_EXTRACT`, `GRID_PRICE_CT`, `FEED_IN_TARIFF_CT`, `OIL_PRICE_PER_KWH_CT`, `HOUSEHOLD_USERS`, `GOOGLE_CALENDAR_CREDENTIALS_FILE`, `GOOGLE_CALENDAR_FAMILY_ID`, `GOOGLE_CALENDAR_ORCHESTRATOR_ID`. Most entity IDs have sensible defaults matching the existing HA setup.
+**REST API + MCP Server** (optional, port 8100):
+
+The orchestrator exposes its full capabilities via HTTP for programmatic access and AI agent integration (e.g., OpenClaw):
+
+- **REST API** at `/api/v1/*` — standard HTTP endpoints for tools, chat, and status
+- **MCP server** at `/mcp` — Model Context Protocol (SSE transport) for AI agents
+
+Both require `X-API-Key` header authentication. The API server only starts when `ORCHESTRATOR_API_KEY` is configured.
+
+REST endpoints:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/_health` | Healthcheck (no auth) |
+| `GET` | `/api/v1/status` | Service status + activity |
+| `GET` | `/api/v1/tools` | List all tools with schemas |
+| `POST` | `/api/v1/tools/execute` | Execute a tool directly (bypasses LLM) |
+| `POST` | `/api/v1/chat` | Full Brain reasoning loop |
+
+MCP tools: All 23 orchestrator tools + `chat_with_orchestrator` (full Brain reasoning).
+
+MCP resources: `homelab://status`, `homelab://energy`, `homelab://pv-forecast`, `homelab://ev-charging`, `homelab://ev-forecast`, `homelab://weather`, `homelab://energy-prices`, `homelab://tools`.
+
+**Access**: `http://<server-ip>:8100` directly, or via Traefik at `https://api.local.schuettken.net`.
+
+OpenClaw MCP config:
+```json
+{
+  "mcpServers": {
+    "homelab": {
+      "url": "http://orchestrator:8100/mcp/sse",
+      "headers": {"X-API-Key": "YOUR_KEY"}
+    }
+  }
+}
+```
+
+**Config** (env vars): `LLM_PROVIDER`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`, `MORNING_BRIEFING_TIME`, `ENABLE_PROACTIVE_SUGGESTIONS`, `ENABLE_SEMANTIC_MEMORY`, `ENABLE_KNOWLEDGE_STORE`, `MEMORY_DOCUMENT_MAX_SIZE`, `KNOWLEDGE_AUTO_EXTRACT`, `GRID_PRICE_CT`, `FEED_IN_TARIFF_CT`, `OIL_PRICE_PER_KWH_CT`, `HOUSEHOLD_USERS`, `GOOGLE_CALENDAR_CREDENTIALS_FILE`, `GOOGLE_CALENDAR_FAMILY_ID`, `GOOGLE_CALENDAR_ORCHESTRATOR_ID`, `ORCHESTRATOR_API_KEY`, `ORCHESTRATOR_API_PORT` (8100), `ORCHESTRATOR_API_HOST` (0.0.0.0). Most entity IDs have sensible defaults matching the existing HA setup.
 
 **Example use cases**:
 - "Do you need to charge your car tomorrow?" → checks PV forecast, EV battery, schedule

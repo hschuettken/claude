@@ -9,6 +9,8 @@ Architecture:
     Memory (profiles)      Proactive (scheduled)
          ↕
     HA / InfluxDB / MQTT (home state)
+         ↕
+    REST API + MCP Server (programmatic access / OpenClaw)
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 from shared.service import BaseService
 
+from api.server import create_app, start_api_server
 from brain import Brain
 from gcal import GoogleCalendarClient
 from channels.telegram import TelegramChannel
@@ -257,6 +260,35 @@ class OrchestratorService(BaseService):
         # --- Start proactive engine ---
         await proactive.start(self._shutdown_event)
 
+        # --- Start REST API + MCP server ---
+        api_task: asyncio.Task | None = None
+        if self.settings.orchestrator_api_key:
+            api_app = create_app(
+                brain=brain,
+                tool_executor=tool_executor,
+                activity=self._activity,
+                settings=self.settings,
+                service_states=self._service_states,
+                start_time=time.monotonic(),
+            )
+            api_task = asyncio.create_task(
+                start_api_server(
+                    app=api_app,
+                    host=self.settings.orchestrator_api_host,
+                    port=self.settings.orchestrator_api_port,
+                    shutdown_event=self._shutdown_event,
+                ),
+            )
+            self.logger.info(
+                "api_server_started",
+                port=self.settings.orchestrator_api_port,
+            )
+        else:
+            self.logger.info(
+                "api_server_disabled",
+                reason="ORCHESTRATOR_API_KEY not set",
+            )
+
         self.logger.info("orchestrator_ready")
         self._touch_healthcheck()
 
@@ -264,6 +296,12 @@ class OrchestratorService(BaseService):
         await self.wait_for_shutdown()
 
         # --- Cleanup ---
+        if api_task and not api_task.done():
+            api_task.cancel()
+            try:
+                await api_task
+            except asyncio.CancelledError:
+                pass
         await proactive.stop()
         await telegram.stop()
         self.logger.info("orchestrator_stopped")
