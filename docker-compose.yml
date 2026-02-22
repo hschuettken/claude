@@ -89,7 +89,7 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - "8100:8100"
+      - "8050:8050"
     volumes:
       - ./shared:/app/shared:ro
       - orchestrator_data:/app/data
