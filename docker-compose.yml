@@ -3,16 +3,7 @@ services:
   # Infrastructure services
   # =============================================================
 
-  mqtt:
-    image: eclipse-mosquitto:2
-    restart: unless-stopped
-    ports:
-      - "1883:1883"
-    volumes:
-      - ./infrastructure/mosquitto/config:/mosquitto/config
-      - mosquitto_data:/mosquitto/data
-    networks:
-      - homelab
+  # mqtt: removed — using external MQTT at 192.168.0.73
 
   # Uncomment if you want to run InfluxDB locally (skip if external)
   # influxdb:
@@ -62,8 +53,6 @@ services:
     env_file: .env
     volumes:
       - pv_forecast_data:/app/data
-    depends_on:
-      - mqtt
     networks:
       - homelab
 
@@ -75,8 +64,6 @@ services:
     env_file: .env
     volumes:
       - smart_ev_charging_data:/app/data
-    depends_on:
-      - mqtt
     networks:
       - homelab
 
@@ -94,8 +81,6 @@ services:
       - "8050:8100"
     volumes:
       - orchestrator_data:/app/data
-    depends_on:
-      - mqtt
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.homelab-orchestrator-api.rule=Host(`${TRAEFIK_ORCHESTRATOR_HOST:-api.local.schuettken.net}`)"
@@ -115,8 +100,6 @@ services:
     env_file: .env
     volumes:
       - ev_forecast_data:/app/data
-    depends_on:
-      - mqtt
     networks:
       - homelab
 
@@ -129,8 +112,6 @@ services:
     volumes:
       - health_monitor_data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    depends_on:
-      - mqtt
     networks:
       - homelab
 
@@ -144,8 +125,6 @@ services:
       - "8085:8085"
     volumes:
       - dashboard_data:/app/data
-    depends_on:
-      - mqtt
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.homelab-dashboard.rule=Host(`${TRAEFIK_DASHBOARD_HOST:-cockpit.local.schuettken.net}`)"
@@ -180,7 +159,7 @@ volumes:
   orchestrator_data:
   health_monitor_data:
   dashboard_data:
-  mosquitto_data:
+  # mosquitto_data: removed — using external MQTT
   # influxdb_data:
   # ollama_data:
 
