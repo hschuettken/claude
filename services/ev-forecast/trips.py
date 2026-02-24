@@ -413,7 +413,47 @@ class TripPredictor:
             ):
                 needs_clarification = True
 
-            round_trip_km = distance_km * 2
+            # --- Multi-day trip detection ---
+            # For all-day events spanning multiple days (e.g. "N: Besuch Vanne" from
+            # Feb 28 to Mar 2), split into:
+            #   - First day: outbound only (one-way distance)
+            #   - Middle days: no driving (0 km, person is at destination)
+            #   - Last day: return only (one-way distance)
+            # Single-day events keep the full round trip.
+            multiday_phase = self._get_multiday_phase(event, trip_date)
+
+            if multiday_phase == "outbound":
+                round_trip_km = distance_km  # One-way only
+                logger.info(
+                    "multiday_outbound",
+                    person=person,
+                    destination=destination,
+                    distance_km=distance_km,
+                    date=trip_date.isoformat(),
+                )
+            elif multiday_phase == "middle":
+                # Person is at destination — no EV driving needed from home
+                logger.info(
+                    "multiday_middle_day",
+                    person=person,
+                    destination=destination,
+                    date=trip_date.isoformat(),
+                    reason="At destination, no driving from home",
+                )
+                continue  # Skip this day entirely
+            elif multiday_phase == "return":
+                round_trip_km = distance_km  # One-way return
+                logger.info(
+                    "multiday_return",
+                    person=person,
+                    destination=destination,
+                    distance_km=distance_km,
+                    date=trip_date.isoformat(),
+                )
+            else:
+                # Single-day event — full round trip
+                round_trip_km = distance_km * 2
+
             energy_kwh = self._estimate_energy(round_trip_km)
 
             # Determine departure/return times from event
@@ -555,6 +595,45 @@ class TripPredictor:
                 return learned_km
 
         return None
+
+    def _get_multiday_phase(self, event: dict[str, Any], target_date: date) -> str:
+        """Determine the phase of a multi-day event for a given date.
+
+        Returns:
+            "outbound" — first day (drive to destination)
+            "middle"   — middle days (staying at destination, no driving)
+            "return"   — last day (drive home); for Google Calendar all-day
+                         events the end date is exclusive, so the last driving
+                         day is end_date - 1
+            "single"   — not a multi-day event (normal round trip)
+        """
+        if not event.get("all_day", False):
+            return "single"
+
+        try:
+            start_date = date.fromisoformat(event.get("start", "")[:10])
+            end_date = date.fromisoformat(event.get("end", "")[:10])
+        except (ValueError, TypeError):
+            return "single"
+
+        # Google Calendar: all-day event end dates are exclusive
+        # e.g. Feb 28 - Mar 2 means Feb 28 and Mar 1 (2 days)
+        duration_days = (end_date - start_date).days
+        if duration_days <= 1:
+            return "single"  # Normal single-day all-day event
+
+        # Multi-day event!
+        # Last actual day is end_date - 1 (exclusive end)
+        last_day = end_date - timedelta(days=1)
+
+        if target_date == start_date:
+            return "outbound"
+        elif target_date == last_day:
+            return "return"
+        elif start_date < target_date < last_day:
+            return "middle"
+        else:
+            return "single"  # Should not happen, but safe fallback
 
     def _estimate_energy(self, distance_km: float) -> float:
         """Estimate energy needed for a trip (kWh)."""
