@@ -66,32 +66,33 @@ def create_mcp_server() -> Server:
                 description=func.get("description", ""),
                 inputSchema=func.get("parameters", {"type": "object", "properties": {}}),
             ))
-        # Special chat tool — full Brain reasoning
-        tools.append(Tool(
-            name="chat_with_orchestrator",
-            description=(
-                "Send a natural-language message to the home orchestrator AI. "
-                "The AI will reason about the request, call internal tools as "
-                "needed (energy data, forecasts, HA control, calendar, memory), "
-                "and return a natural-language response. Use this for complex "
-                "questions that require reasoning across multiple data sources."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "message": {
-                        "type": "string",
-                        "description": "The message or question to process",
+        # Special chat tool — only available when Brain is enabled
+        if _brain is not None:
+            tools.append(Tool(
+                name="chat_with_orchestrator",
+                description=(
+                    "Send a natural-language message to the home orchestrator AI. "
+                    "The AI will reason about the request, call internal tools as "
+                    "needed (energy data, forecasts, HA control, calendar, memory), "
+                    "and return a natural-language response. Use this for complex "
+                    "questions that require reasoning across multiple data sources."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string",
+                            "description": "The message or question to process",
+                        },
+                        "user_name": {
+                            "type": "string",
+                            "description": "Name of the caller (default: MCP)",
+                            "default": "MCP",
+                        },
                     },
-                    "user_name": {
-                        "type": "string",
-                        "description": "Name of the caller (default: MCP)",
-                        "default": "MCP",
-                    },
+                    "required": ["message"],
                 },
-                "required": ["message"],
-            },
-        ))
+            ))
         return tools
 
     @server.call_tool()
