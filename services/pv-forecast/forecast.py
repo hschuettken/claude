@@ -105,6 +105,9 @@ class ForecastEngine:
         self.data = data_collector
         self.weather = weather
         self.ha = ha
+        # Resolved lat/lon — set by the service after HA config resolution
+        self.latitude: float = settings.pv_latitude
+        self.longitude: float = settings.pv_longitude
 
         # One model per array
         self.models: dict[str, PVModel] = {}
@@ -171,8 +174,8 @@ class ForecastEngine:
                 capacity_kwp=capacity_kwp,
                 days_back=self.settings.data_history_days,
                 forecast_solar_entity_id=fs_entity_id,
-                latitude=self.settings.pv_latitude,
-                longitude=self.settings.pv_longitude,
+                latitude=self.latitude,
+                longitude=self.longitude,
             )
 
             if training_data.empty:
@@ -402,8 +405,8 @@ class ForecastEngine:
                 weather_day["forecast_solar_hourly_kwh"] = fs_value
 
             # Add solar features
-            lat = self.settings.pv_latitude
-            lon = self.settings.pv_longitude
+            lat = self.latitude
+            lon = self.longitude
             if lat != 0.0 and lon != 0.0:
                 weather_day = add_solar_features(weather_day, lat, lon)
 
@@ -427,7 +430,7 @@ class ForecastEngine:
                     capacity_kwp,
                     azimuth,
                     tilt,
-                    self.settings.pv_latitude,
+                    self.latitude,
                     system_efficiency=self.settings.fallback_system_efficiency,
                     peak_irradiance=self.settings.fallback_peak_irradiance,
                 )

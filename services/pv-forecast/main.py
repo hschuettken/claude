@@ -116,6 +116,9 @@ class PVForecastService:
         self.weather = OpenMeteoClient(self.latitude, self.longitude)
         self.data_collector = PVDataCollector(self.influx, self.weather, self.settings)
         self.engine = ForecastEngine(self.settings, self.data_collector, self.weather, self.ha)
+        # Pass resolved lat/lon (may have come from HA, not settings)
+        self.engine.latitude = self.latitude
+        self.engine.longitude = self.longitude
         self.publisher = HASensorPublisher(self.ha, self.settings.ha_sensor_prefix)
 
         # Connect MQTT for broadcasting events

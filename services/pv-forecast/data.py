@@ -435,7 +435,7 @@ class PVDataCollector:
             entity_id=entity_id,
             samples=len(merged),
             date_range=f"{start_date} to {end_date}",
-            has_forecast_solar="forecast_solar_kwh" in merged.columns,
+            has_forecast_solar="forecast_solar_hourly_kwh" in merged.columns,
         )
         return merged
 
