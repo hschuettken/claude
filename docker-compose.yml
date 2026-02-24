@@ -61,7 +61,6 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./shared:/app/shared:ro
       - pv_forecast_data:/app/data
     depends_on:
       - mqtt
@@ -75,7 +74,6 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./shared:/app/shared:ro
       - smart_ev_charging_data:/app/data
     depends_on:
       - mqtt
@@ -113,7 +111,6 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./shared:/app/shared:ro
       - ev_forecast_data:/app/data
     depends_on:
       - mqtt
@@ -127,7 +124,6 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./shared:/app/shared:ro
     depends_on:
       - mqtt
     networks:
@@ -140,7 +136,6 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./shared:/app/shared:ro
       - health_monitor_data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
@@ -157,7 +152,6 @@ services:
     ports:
       - "8085:8085"
     volumes:
-      - ./shared:/app/shared:ro
       - dashboard_data:/app/data
     depends_on:
       - mqtt
@@ -179,7 +173,6 @@ services:
   #   restart: unless-stopped
   #   env_file: .env
   #   volumes:
-  #     - ./shared:/app/shared:ro
   #   depends_on:
   #     - mqtt
   #   networks:
