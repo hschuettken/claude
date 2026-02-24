@@ -91,7 +91,7 @@ services:
     environment:
       PYTHONPATH: "/app:/app/shared"
     ports:
-      - "8050:8050"
+      - "8050:8100"
     volumes:
       - orchestrator_data:/app/data
     depends_on:
