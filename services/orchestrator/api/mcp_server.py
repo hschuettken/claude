@@ -100,8 +100,16 @@ def create_mcp_server() -> Server:
     ) -> list[TextContent]:
         args = arguments or {}
 
-        # Chat tool goes through the full Brain
+        # Chat tool goes through the full Brain (if enabled)
         if name == "chat_with_orchestrator":
+            if _brain is None:
+                return [TextContent(
+                    type="text",
+                    text=(
+                        "Orchestrator is running in headless mode; chat reasoning is disabled. "
+                        "Use direct tools instead (MCP/REST)."
+                    ),
+                )]
             message = args.get("message", "")
             user_name = args.get("user_name", "MCP")
             logger.info("mcp_chat", user=user_name, msg_len=len(message))
@@ -170,6 +178,18 @@ def create_mcp_server() -> Server:
                 description="Complete list of orchestrator tools with parameter schemas",
                 mimeType="application/json",
             ),
+            Resource(
+                uri="homelab://ha/entities",
+                name="Home Assistant Entities",
+                description="Pass-through listing of all Home Assistant entities",
+                mimeType="application/json",
+            ),
+            Resource(
+                uri="homelab://ha/services",
+                name="Home Assistant Services",
+                description="Pass-through listing of all Home Assistant service domains and services",
+                mimeType="application/json",
+            ),
         ]
 
     @server.read_resource()
@@ -218,6 +238,12 @@ def create_mcp_server() -> Server:
                     "parameters": func.get("parameters", {}),
                 })
             return json.dumps(tools)
+
+        if uri_str == "homelab://ha/entities":
+            return await _tool_executor.execute("list_ha_entities", {"limit": 500})
+
+        if uri_str == "homelab://ha/services":
+            return await _tool_executor.execute("list_ha_services", {})
 
         raise ValueError(f"Unknown resource: {uri_str}")
 

@@ -70,6 +70,13 @@ class HomeAssistantClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def get_services(self) -> list[dict[str, Any]]:
+        """Get all available service domains and services."""
+        client = await self._get_client()
+        resp = await client.get("/services")
+        resp.raise_for_status()
+        return resp.json()
+
     @async_retry(max_retries=2, base_delay=1.0, exceptions=(httpx.ConnectError, httpx.ConnectTimeout))
     async def call_service(
         self,

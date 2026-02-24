@@ -70,7 +70,7 @@ async def get_status() -> ServiceStatus:
     return ServiceStatus(
         status="online",
         uptime_seconds=round(time.monotonic() - _start_time, 1),
-        llm_provider=_settings.llm_provider,
+        llm_provider=("headless" if _brain is None else _settings.llm_provider),
         messages_today=_activity.messages_today,
         tools_today=_activity.tools_today,
         suggestions_today=_activity.suggestions_today,
@@ -125,6 +125,15 @@ async def chat(request: ChatRequest) -> ChatResponse:
         user=request.user_name,
         msg_len=len(request.message),
     )
+    if _brain is None:
+        return ChatResponse(
+            response=(
+                "Orchestrator runs in headless mode. Chat reasoning is disabled; "
+                "use /api/v1/tools/execute or MCP tools instead."
+            ),
+            chat_id=request.chat_id,
+        )
+
     response = await _brain.process_message(
         request.message,
         chat_id=request.chat_id,

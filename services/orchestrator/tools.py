@@ -55,6 +55,53 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "list_ha_entities",
+            "description": (
+                "List Home Assistant entities with optional filtering by domain and state. "
+                "Use this for generic pass-through discovery of everything available in HA."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "domain": {
+                        "type": "string",
+                        "description": "Optional domain filter (e.g. sensor, light, switch, climate)",
+                    },
+                    "state": {
+                        "type": "string",
+                        "description": "Optional exact state filter (e.g. on, off, unavailable)",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max entities to return (default 200)",
+                        "default": 200,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_ha_services",
+            "description": (
+                "List Home Assistant service domains and services. "
+                "Use this to discover callable actions for full HA pass-through control."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "domain": {
+                        "type": "string",
+                        "description": "Optional domain filter (e.g. light, switch, climate)",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_home_energy_summary",
             "description": (
                 "Get a comprehensive snapshot of the home's current energy state: "
@@ -693,6 +740,68 @@ class ToolExecutor:
                 for k, v in state.get("attributes", {}).items()
                 if k in ("hourly", "device_class", "state_class", "options")
             },
+        }
+
+    async def _tool_list_ha_entities(
+        self,
+        domain: str | None = None,
+        state: str | None = None,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        entities = await self.ha.get_states()
+        out: list[dict[str, Any]] = []
+        domain_norm = domain.lower() if domain else None
+        state_norm = state.lower() if state else None
+
+        for item in entities:
+            entity_id = item.get("entity_id", "")
+            entity_domain = entity_id.split(".", 1)[0] if "." in entity_id else ""
+            entity_state = str(item.get("state", ""))
+
+            if domain_norm and entity_domain != domain_norm:
+                continue
+            if state_norm and entity_state.lower() != state_norm:
+                continue
+
+            out.append({
+                "entity_id": entity_id,
+                "domain": entity_domain,
+                "state": entity_state,
+                "friendly_name": item.get("attributes", {}).get("friendly_name"),
+                "unit": item.get("attributes", {}).get("unit_of_measurement"),
+                "last_changed": item.get("last_changed"),
+            })
+
+            if len(out) >= max(1, min(limit, 2000)):
+                break
+
+        return {
+            "count": len(out),
+            "filters": {"domain": domain, "state": state, "limit": limit},
+            "entities": out,
+        }
+
+    async def _tool_list_ha_services(
+        self,
+        domain: str | None = None,
+    ) -> dict[str, Any]:
+        services = await self.ha.get_services()
+        if domain:
+            domain_lower = domain.lower()
+            services = [s for s in services if s.get("domain", "").lower() == domain_lower]
+
+        simplified = []
+        for d in services:
+            svc = d.get("services", {})
+            simplified.append({
+                "domain": d.get("domain"),
+                "services": sorted(list(svc.keys())),
+            })
+
+        return {
+            "count": len(simplified),
+            "domain_filter": domain,
+            "domains": simplified,
         }
 
     async def _tool_get_home_energy_summary(self) -> dict[str, Any]:
