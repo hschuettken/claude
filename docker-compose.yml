@@ -88,6 +88,8 @@ services:
     env_file: .env
     environment:
       PYTHONPATH: "/app:/app/shared"
+      CHROMA_AUTH_TOKEN: ${CHROMA_AUTH_TOKEN:-}
+      CHROMA_URL: http://192.168.0.50:8300
     ports:
       - "8050:8100"
     volumes:
