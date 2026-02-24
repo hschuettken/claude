@@ -119,17 +119,6 @@ services:
     networks:
       - homelab
 
-  example-service:
-    build:
-      context: .
-      dockerfile: services/example-service/Dockerfile
-    restart: unless-stopped
-    env_file: .env
-    depends_on:
-      - mqtt
-    networks:
-      - homelab
-
   health-monitor:
     build:
       context: .
