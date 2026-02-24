@@ -83,7 +83,7 @@ class EVForecastSettings(BaseSettings):
     default_assumed_soc_pct: float = 50.0  # Assumed SoC when actual is unknown
 
     # How far ahead to plan (days)
-    planning_horizon_days: int = 3
+    planning_horizon_days: int = 7
 
     # --- Urgency thresholds ---
     critical_urgency_hours: float = 2.0  # departure within this → critical

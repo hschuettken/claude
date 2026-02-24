@@ -308,8 +308,22 @@ class EVForecastService:
                 days=self.settings.planning_horizon_days,
             )
 
-            # Generate demand-focused plan (no PV forecast — smart-ev-charging handles supply)
-            plan = await self.planner.generate_plan(vehicle, day_plans)
+            # Get PV forecast (today's remaining kWh)
+            pv_forecast_kwh = []
+            try:
+                pv_state = await self.ha.get_state("sensor.pv_ai_forecast_today_remaining_kwh")
+                pv_today_kwh = float(pv_state.get("state", 0))
+                if pv_today_kwh > 0:
+                    pv_forecast_kwh.append(pv_today_kwh)
+                    logger.info("pv_forecast_read", today_remaining_kwh=pv_today_kwh)
+            except Exception:
+                logger.debug("pv_forecast_unavailable")
+
+            # Generate demand-focused plan with PV forecast awareness
+            plan = await self.planner.generate_plan(
+                vehicle, day_plans,
+                pv_forecast_kwh=pv_forecast_kwh if pv_forecast_kwh else None,
+            )
             self._last_plan = plan
 
             # Publish plan to MQTT (with reasoning for the rich sensor)

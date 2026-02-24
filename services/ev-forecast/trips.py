@@ -28,6 +28,23 @@ import structlog
 
 logger = structlog.get_logger()
 
+# --- Activity words that should NOT be geocoded ---
+ACTIVITY_WORDS = {
+    "kegeln", "bowling", "schwimmen", "yoga", "sport", "training",
+    "frühstück", "brunch", "mittagessen", "abendessen", "kaffee",
+    "treffen", "besuch", "feier", "party", "geburtstag", "hochzeit",
+    "stammtisch", "spieleabend", "filmabend", "grillen",
+    "arzt", "zahnarzt", "physio", "friseur", "termin",
+}
+
+# --- German prepositions and connectors to strip ---
+GERMAN_PREPOSITIONS = {
+    "mit", "bei", "zu", "zum", "zur", "von", "nach", "in", "am", "im",
+}
+
+# Default distance for local activities (round trip)
+LOCAL_ACTIVITY_DEFAULT_KM = 20
+
 
 @dataclass
 class Trip:
@@ -301,38 +318,66 @@ class TripPredictor:
             summary_lower = summary.lower()
 
             # Determine who drives and where
-            person, destination = self._parse_event_summary(summary)
-            if not person or not destination:
+            person, destination_raw = self._parse_event_summary(summary)
+            if not person or not destination_raw:
                 continue
 
-            # Look up distance (known table first, then geocoding)
-            distance_km = self._lookup_distance(destination)
-            needs_clarification = False
+            # Extract actual destination from German text (strip activity words, prepositions)
+            destination, is_local_activity = self._extract_destination_from_text(destination_raw)
 
-            if distance_km is None and self._geo:
-                # Try geocoding the destination
-                geo_km = await self._geo.estimate_distance(destination)
-                if geo_km is not None:
-                    distance_km = geo_km
-                    # Cache in known destinations for future lookups
-                    self._destinations[destination.lower().strip()] = geo_km
+            # Local activity (e.g. "Kegeln" with no place) — use default local distance
+            if is_local_activity:
+                distance_km = LOCAL_ACTIVITY_DEFAULT_KM / 2  # One-way distance
+                logger.info(
+                    "local_activity_detected",
+                    person=person,
+                    event=destination_raw,
+                    distance_km=distance_km,
+                )
+            else:
+                # Look up distance (known table first, then geocoding)
+                distance_km = self._lookup_distance(destination)
+                needs_clarification = False
+
+                if distance_km is None and self._geo:
+                    # Try geocoding the destination
+                    geo_km = await self._geo.estimate_distance(destination)
+                    if geo_km is not None:
+                        # Suspicious geocoding guard: if result is >200km and destination
+                        # doesn't look like a city name (not in known_destinations),
+                        # flag as suspicious rather than accepting blindly
+                        if geo_km > 200 and destination.lower() not in self._destinations:
+                            logger.warning(
+                                "suspicious_geocoding",
+                                person=person,
+                                destination=destination,
+                                geocoded_km=geo_km,
+                                reason="Result >200km for unknown destination — may be incorrect",
+                            )
+                            needs_clarification = True
+                            distance_km = geo_km  # Still use it but flag for review
+                        else:
+                            distance_km = geo_km
+
+                        # Cache in known destinations for future lookups
+                        self._destinations[destination.lower().strip()] = geo_km
+                        logger.info(
+                            "destination_geocoded",
+                            person=person,
+                            destination=destination,
+                            distance_km=geo_km,
+                        )
+
+                if distance_km is None:
+                    # Geocoding also failed — use conservative default
+                    distance_km = 50.0
+                    needs_clarification = True
                     logger.info(
-                        "destination_geocoded",
+                        "unknown_destination",
                         person=person,
                         destination=destination,
-                        distance_km=geo_km,
+                        default_km=distance_km,
                     )
-
-            if distance_km is None:
-                # Geocoding also failed — use conservative default
-                distance_km = 50.0
-                needs_clarification = True
-                logger.info(
-                    "unknown_destination",
-                    person=person,
-                    destination=destination,
-                    default_km=distance_km,
-                )
 
             # Henning: check if he takes the train for long distances
             if person.lower() == "henning" and distance_km > self._henning_train_km:
@@ -398,6 +443,47 @@ class TripPredictor:
                     return person, dest
 
         return "", ""
+
+    def _extract_destination_from_text(self, text: str) -> tuple[str, bool]:
+        """Extract destination/person name from German event text.
+
+        Handles events like:
+        - "Frühstück mit Kathrin" → extracts "Kathrin"
+        - "Besuch Vanne" → extracts "Vanne"
+        - "Treffen bei Sarah" → extracts "Sarah"
+        - "Kegeln" → recognizes as activity (no place)
+
+        Returns (destination_string, is_local_activity).
+        When is_local_activity=True, use LOCAL_ACTIVITY_DEFAULT_KM instead of geocoding.
+        """
+        text_lower = text.lower().strip()
+        words = text_lower.split()
+
+        # Strip activity words and prepositions
+        remaining_words = []
+        found_activity = False
+
+        for word in words:
+            if word in ACTIVITY_WORDS:
+                found_activity = True
+                continue
+            if word in GERMAN_PREPOSITIONS:
+                continue
+            remaining_words.append(word)
+
+        # What's left is likely a person name or place name
+        remaining_text = " ".join(remaining_words).strip()
+
+        # If only activity words with no person/place → local activity
+        if not remaining_text and found_activity:
+            return text, True
+
+        # If we found some text after stripping, that's likely the destination/person
+        if remaining_text:
+            return remaining_text, False
+
+        # Fallback: use original text
+        return text, False
 
     def _lookup_distance(self, destination: str) -> float | None:
         """Look up one-way distance for a destination.

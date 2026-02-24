@@ -114,6 +114,7 @@ class ChargingStrategy:
         battery_min_soc_pct: float = 20.0,
         battery_ev_assist_max_w: float = 2000.0,
         pv_forecast_good_kwh: float = 15.0,
+        night_charging_buffer_hours: float = 1.0,
     ) -> None:
         self.max_power_w = max_power_w
         self.min_power_w = min_power_w
@@ -124,6 +125,7 @@ class ChargingStrategy:
         self.battery_min_soc_pct = battery_min_soc_pct
         self.battery_ev_assist_max_w = battery_ev_assist_max_w
         self.pv_forecast_good_kwh = pv_forecast_good_kwh
+        self.night_charging_buffer_hours = night_charging_buffer_hours
 
         self._was_pv_charging = False
         self._last_target_w: int = 0
@@ -147,18 +149,30 @@ class ChargingStrategy:
             self._reset()
             return ChargingDecision(0, "No vehicle connected")
 
-        # --- Target SoC reached — continue with PV surplus if available ---
+        # --- Target SoC reached — continue topping up with PV surplus ---
         if ctx.target_reached:
-            # Plan target met — if PV surplus available, keep charging opportunistically
-            # (PV into car is more valuable than feeding back to grid)
+            # Plan target met — but in PV Surplus/Smart modes, continue topping up
+            # to 80% SoC (or ev_target_soc_pct) if PV surplus is available.
+            # Economics: PV → EV saves 7ct/kWh vs exporting.
             if ctx.mode in (ChargeMode.PV_SURPLUS, ChargeMode.SMART) and ctx.pv_power_w > 100:
-                surplus_decision = self._pv_surplus(ctx)
-                if surplus_decision.target_power_w > 0:
-                    surplus_decision.reason = (
-                        f"Plan target reached — continuing with PV surplus: "
-                        f"{surplus_decision.reason}"
-                    )
-                    return surplus_decision
+                # Check if we're below the actual target SoC (80% default)
+                if ctx.ev_soc_pct is not None and ctx.ev_soc_pct < ctx.ev_target_soc_pct:
+                    surplus_decision = self._pv_surplus(ctx)
+                    if surplus_decision.target_power_w > 0:
+                        surplus_decision.reason = (
+                            f"Plan target reached — topping up to {ctx.ev_target_soc_pct:.0f}% "
+                            f"(currently {ctx.ev_soc_pct:.0f}%): {surplus_decision.reason}"
+                        )
+                        return surplus_decision
+                else:
+                    # Already at target SoC (80%) — try PV surplus one more time
+                    surplus_decision = self._pv_surplus(ctx)
+                    if surplus_decision.target_power_w > 0:
+                        surplus_decision.reason = (
+                            f"Plan target reached — opportunistic PV surplus: "
+                            f"{surplus_decision.reason}"
+                        )
+                        return surplus_decision
 
             self._reset()
             if ctx.ev_soc_pct is not None:
@@ -210,17 +224,25 @@ class ChargingStrategy:
     def _pv_surplus(self, ctx: ChargingContext) -> ChargingDecision:
         """Track PV surplus — charge primarily from solar excess.
 
-        May add limited battery assist if forecast is good and SoC allows.
+        Economics: PV → EV saves 7ct/kWh vs exporting (employer reimburses 25ct,
+        feed-in only 7ct). So be MORE aggressive about PV charging:
+        - Lower hysteresis when EV SoC < 50% (car needs charge more urgently)
+        - Continue topping up to target SoC even after plan target is met
+        - When home battery >80%, prioritize EV over further battery charging
         """
         pv_only = self._calc_pv_only_available(ctx)
         assist, assist_reason = self._calc_battery_assist_detailed(ctx, pv_only)
         available = pv_only + assist
 
-        # Hysteresis: require more surplus to START than to KEEP charging
+        # Economic hysteresis: lower start threshold when EV SoC is low
+        # (more valuable to charge car than export to grid)
+        ev_soc_low = ctx.ev_soc_pct is not None and ctx.ev_soc_pct < 50
+        hysteresis_reduction = 150 if ev_soc_low else 0
+
         threshold = (
             self.min_power_w
             if self._was_pv_charging
-            else self.min_power_w + self.start_hysteresis_w
+            else self.min_power_w + self.start_hysteresis_w - hysteresis_reduction
         )
 
         base_fields = {
@@ -234,6 +256,11 @@ class ChargingStrategy:
             parts = [f"PV surplus {pv_only:.0f} W"]
             if assist > 0:
                 parts.append(f"+ {assist:.0f} W battery assist")
+            # Add economic reasoning when relevant
+            if ctx.battery_soc_pct > 80 and ctx.battery_power_w > 0:
+                parts.append("(prioritize EV over battery)")
+            if ev_soc_low:
+                parts.append("(low EV SoC — economic priority)")
             return ChargingDecision(
                 target, f"{' '.join(parts)} → {target} W", **base_fields,
             )
@@ -252,7 +279,15 @@ class ChargingStrategy:
         )
 
     def _smart(self, ctx: ChargingContext) -> ChargingDecision:
-        """PV surplus during the day; deadline logic handles grid fill."""
+        """PV surplus during the day; night charging window when full_by_morning=ON."""
+        # During nighttime (22:00-05:00) with full_by_morning and a deadline, use smart timing
+        current_hour = ctx.now.hour
+        is_nighttime = current_hour >= 22 or current_hour < 5
+
+        if is_nighttime and ctx.full_by_morning and ctx.departure_time:
+            return self._nighttime_smart(ctx)
+
+        # Daytime: PV surplus logic
         pv = self._pv_surplus(ctx)
         if pv.target_power_w > 0:
             return ChargingDecision(
@@ -266,6 +301,42 @@ class ChargingStrategy:
             pv_surplus_w=pv.pv_surplus_w,
             battery_assist_w=pv.battery_assist_w,
             battery_assist_reason=pv.battery_assist_reason,
+        )
+
+    def _nighttime_smart(self, ctx: ChargingContext) -> ChargingDecision:
+        """Smart nighttime charging: charge as late as possible before departure.
+
+        Calculate required charging time and start charging only when necessary
+        to meet the deadline (with a safety buffer).
+        """
+        energy_needed = ctx.energy_needed_kwh
+        if energy_needed <= 0:
+            return ChargingDecision(0, "Nighttime: target already reached")
+
+        hours_until_departure = self._hours_until(ctx.departure_time, ctx.now)
+
+        # Calculate required charging time at eco power
+        charging_power_kw = self.eco_power_w / 1000.0
+        hours_needed = energy_needed / charging_power_kw
+
+        # Add buffer for safety
+        hours_needed_with_buffer = hours_needed + self.night_charging_buffer_hours
+
+        # If we're within the charging window, start charging
+        if hours_until_departure <= hours_needed_with_buffer:
+            return ChargingDecision(
+                self.eco_power_w,
+                f"Night charging window: need {energy_needed:.1f} kWh in "
+                f"{hours_until_departure:.1f}h ({hours_needed:.1f}h + buffer)",
+            )
+
+        # Too early — wait to minimize grid usage
+        wait_hours = hours_until_departure - hours_needed_with_buffer
+        return ChargingDecision(
+            0,
+            f"Nighttime: waiting {wait_hours:.1f}h before charging "
+            f"({energy_needed:.1f} kWh needed, starts at "
+            f"{(ctx.now + timedelta(hours=wait_hours)).strftime('%H:%M')})",
         )
 
     # ------------------------------------------------------------------
@@ -408,7 +479,8 @@ class ChargingStrategy:
         - Cap discharge rate at battery_ev_assist_max_w (protect longevity)
         - Scale assist by PV forecast: good forecast → more aggressive
         - Only assist when there IS some PV surplus (just not enough alone)
-        - Never assist if battery is already discharging heavily for the house
+        - Economics: When battery >80% and PV surplus exists, prioritize EV
+          (every kWh PV→EV saves 7ct vs exporting)
         """
         # No assist if battery SoC too low
         if ctx.battery_soc_pct <= self.battery_min_soc_pct:
@@ -421,6 +493,12 @@ class ChargingStrategy:
         # No assist if PV surplus is negative (house consuming more than PV)
         if pv_only_available < 0:
             return 0.0, f"No PV surplus ({pv_only_available:.0f} W < 0)"
+
+        # Economic priority: when battery is >80% and there's PV surplus,
+        # be MORE aggressive with assist — it's better to use PV for EV
+        # than to continue charging an already-full battery
+        battery_full = ctx.battery_soc_pct > 80
+        economic_boost = 1.5 if battery_full else 1.0
 
         # Scale assist limit by PV forecast quality
         # Good forecast → allow up to max assist; poor forecast → reduce
@@ -435,7 +513,7 @@ class ChargingStrategy:
         )
         soc_factor = min(1.0, max(0.0, soc_headroom))
 
-        max_assist = self.battery_ev_assist_max_w * forecast_factor * soc_factor
+        max_assist = self.battery_ev_assist_max_w * forecast_factor * soc_factor * economic_boost
 
         # How much more we need to reach wallbox minimum
         shortfall = self.min_power_w - pv_only_available
@@ -443,11 +521,15 @@ class ChargingStrategy:
             return 0.0, "PV surplus sufficient (no assist needed)"
 
         assist = min(shortfall, max_assist)
-        reason = (
-            f"Shortfall {shortfall:.0f} W, "
-            f"max assist {max_assist:.0f} W "
-            f"(forecast {forecast_factor:.0%}, SoC {soc_factor:.0%})"
-        )
+        reason_parts = [
+            f"Shortfall {shortfall:.0f} W",
+            f"max {max_assist:.0f} W",
+            f"(forecast {forecast_factor:.0%}, SoC {soc_factor:.0%}",
+        ]
+        if battery_full:
+            reason_parts.append("+ economic boost")
+        reason_parts[-1] += ")"
+        reason = ", ".join(reason_parts)
         return assist, reason
 
     # ------------------------------------------------------------------
