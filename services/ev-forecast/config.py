@@ -67,7 +67,11 @@ class EVForecastSettings(BaseSettings):
 
     # Known destinations with one-way distances (km) — JSON string
     # Format: {"Münster": 60, "Aachen": 80, "STR": 500, "Stuttgart": 500, ...}
-    known_destinations: str = '{"Münster": 60, "Muenster": 60, "MS": 60, "Aachen": 80, "AC": 80, "Köln": 100, "Koeln": 100, "Düsseldorf": 80, "Duesseldorf": 80, "Dortmund": 80, "STR": 500, "Stuttgart": 500, "MUC": 500, "München": 500, "Muenchen": 500, "Berlin": 450, "BER": 450, "Hamburg": 300, "HAM": 300, "Frankfurt": 250, "FRA": 250, "Lengerich": 22}'
+    known_destinations: str = '{"Münster": 60, "Muenster": 60, "MS": 60, "Aachen": 80, "AC": 80, "Köln": 100, "Koeln": 100, "Düsseldorf": 80, "Duesseldorf": 80, "Dortmund": 80, "STR": 500, "Stuttgart": 500, "MUC": 500, "München": 500, "Muenchen": 500, "Berlin": 450, "BER": 450, "Hamburg": 300, "HAM": 300, "Frankfurt": 250, "FRA": 250, "Lengerich": 22, "Hopsten": 14, "Ibbenbüren": 10, "Ibbenbueren": 10, "Kathrin": 14, "Mareike": 10, "Vanne": 263}'
+
+    # Activities where the person does NOT use the EV (e.g. takes bike) — JSON string
+    # Format: {"Kegeln": "Henning"} means Henning bikes to Kegeln
+    no_ev_activities: str = '{"Kegeln": "Henning"}'
 
     # --- Geocoding for unknown destinations ---
     # Home coordinates (auto-detected from HA if 0)

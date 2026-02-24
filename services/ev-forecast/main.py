@@ -176,6 +176,7 @@ class EVForecastService:
             timezone=self.settings.timezone,
             geo_distance=geo,
             learned_destinations=self.learned_destinations,
+            no_ev_activities=json.loads(self.settings.no_ev_activities),
         )
 
         # Load persisted state (before first vehicle read)

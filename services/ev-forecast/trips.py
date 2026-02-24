@@ -201,8 +201,11 @@ class TripPredictor:
         timezone: str = "Europe/Berlin",
         geo_distance: GeoDistance | None = None,
         learned_destinations: Any = None,
+        no_ev_activities: dict[str, str] | None = None,
     ) -> None:
         self._destinations = {k.lower(): v for k, v in known_destinations.items()}
+        # Activities where specific people don't use EV (e.g. {"Kegeln": "Henning"})
+        self._no_ev_activities = {k.lower(): v.lower() for k, v in (no_ev_activities or {}).items()}
         self._consumption = consumption_kwh_per_100km
         self._default_consumption = consumption_kwh_per_100km
         self._nicole_commute_km = nicole_commute_km
@@ -321,6 +324,19 @@ class TripPredictor:
             person, destination_raw = self._parse_event_summary(summary)
             if not person or not destination_raw:
                 continue
+
+            # Check no-EV activities (e.g. Henning bikes to Kegeln)
+            dest_lower = destination_raw.lower().strip()
+            if dest_lower in self._no_ev_activities:
+                excluded_person = self._no_ev_activities[dest_lower]
+                if excluded_person == person.lower():
+                    logger.info(
+                        "no_ev_activity_skipped",
+                        person=person,
+                        activity=destination_raw,
+                        reason="Person uses alternative transport (e.g. bike)",
+                    )
+                    continue
 
             # Extract actual destination from German text (strip activity words, prepositions)
             destination, is_local_activity = self._extract_destination_from_text(destination_raw)
