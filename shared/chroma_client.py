@@ -1,17 +1,16 @@
 """Shared ChromaDB client for all homelab services.
 
-Provides a thin wrapper around chromadb.HttpClient with:
-- Auto-creation of collections on first access
-- Auth token from environment
-- Consistent collection naming
+Pure-HTTP wrapper — no chromadb pip dependency required.
+Uses urllib.request (stdlib) to talk to ChromaDB v2 REST API.
 """
 
-import os
-from typing import Any
-from urllib.parse import urlparse
+from __future__ import annotations
 
-import chromadb
-from chromadb.config import Settings
+import json
+import os
+import urllib.request
+import urllib.error
+from typing import Any
 
 from shared.log import get_logger
 
@@ -30,52 +29,87 @@ ALL_COLLECTIONS = [
     COLLECTION_AGENT_CONTEXT,
 ]
 
+_TENANT_PATH = "/api/v2/tenants/default_tenant/databases/default_database"
+
 
 class ChromaClient:
-    """Wrapper around chromadb.HttpClient for homelab services."""
+    """Pure-HTTP ChromaDB v2 client for homelab services."""
 
     def __init__(
         self,
         url: str | None = None,
         auth_token: str | None = None,
     ) -> None:
-        self._url = url or os.getenv("CHROMA_URL", "http://192.168.0.50:8300")
+        self._url = (url or os.getenv("CHROMA_URL", "http://192.168.0.50:8300")).rstrip("/")
         self._auth_token = auth_token or os.getenv("CHROMA_AUTH_TOKEN", "")
-
-        parsed = urlparse(self._url)
-        host = parsed.hostname or "192.168.0.50"
-        port = parsed.port or 8300
-
-        settings = (
-            Settings(
-                chroma_client_auth_provider="chromadb.auth.token_authn.TokenAuthClientProvider",
-                chroma_client_auth_credentials=self._auth_token,
-            )
-            if self._auth_token
-            else Settings()
-        )
-
-        self._client = chromadb.HttpClient(
-            host=host,
-            port=port,
-            settings=settings,
-        )
-        self._collections: dict[str, Any] = {}
+        self._headers = {
+            "Content-Type": "application/json",
+        }
+        if self._auth_token:
+            self._headers["Authorization"] = f"Bearer {self._auth_token}"
+        # Cache: collection name → collection id
+        self._collection_ids: dict[str, str] = {}
         logger.info("chroma_client_initialized", url=self._url)
 
-    @property
-    def client(self) -> chromadb.HttpClient:
-        return self._client
+    # ------------------------------------------------------------------
+    # Low-level HTTP
+    # ------------------------------------------------------------------
 
-    def get_collection(self, name: str) -> Any:
-        """Get or create a collection by name."""
-        if name not in self._collections:
-            self._collections[name] = self._client.get_or_create_collection(
-                name=name,
-                metadata={"hnsw:space": "cosine"},
-            )
-            logger.info("chroma_collection_ready", name=name)
-        return self._collections[name]
+    def _request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | list | None = None,
+    ) -> Any:
+        url = f"{self._url}{path}"
+        data = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(url, data=data, headers=self._headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                body = resp.read().decode()
+                if not body.strip():
+                    return {}
+                return json.loads(body)
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode() if exc.fp else ""
+            raise RuntimeError(f"ChromaDB {method} {path} → {exc.code}: {body}") from exc
+
+    # ------------------------------------------------------------------
+    # Collection management
+    # ------------------------------------------------------------------
+
+    def _resolve_collection_id(self, name: str) -> str:
+        """Get collection UUID by name, creating it if needed."""
+        if name in self._collection_ids:
+            return self._collection_ids[name]
+
+        # List existing
+        collections = self._request("GET", f"{_TENANT_PATH}/collections")
+        if isinstance(collections, list):
+            for c in collections:
+                self._collection_ids[c["name"]] = c["id"]
+
+        if name in self._collection_ids:
+            return self._collection_ids[name]
+
+        # Create
+        result = self._request("POST", f"{_TENANT_PATH}/collections", {
+            "name": name,
+            "metadata": {"hnsw:space": "cosine"},
+            "get_or_create": True,
+        })
+        cid = result["id"]
+        self._collection_ids[name] = cid
+        logger.info("chroma_collection_created", name=name, id=cid)
+        return cid
+
+    def get_collection(self, name: str) -> str:
+        """Alias for _resolve_collection_id — returns collection UUID."""
+        return self._resolve_collection_id(name)
+
+    # ------------------------------------------------------------------
+    # CRUD operations
+    # ------------------------------------------------------------------
 
     def store(
         self,
@@ -86,13 +120,13 @@ class ChromaClient:
         metadata: dict[str, Any] | None = None,
     ) -> None:
         """Store a document with pre-computed embedding."""
-        coll = self.get_collection(collection_name)
-        coll.upsert(
-            ids=[doc_id],
-            documents=[text],
-            embeddings=[embedding],
-            metadatas=[metadata or {}],
-        )
+        cid = self._resolve_collection_id(collection_name)
+        self._request("POST", f"{_TENANT_PATH}/collections/{cid}/upsert", {
+            "ids": [doc_id],
+            "documents": [text],
+            "embeddings": [embedding],
+            "metadatas": [metadata or {}],
+        })
 
     def search(
         self,
@@ -102,63 +136,62 @@ class ChromaClient:
         where: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Search by embedding vector. Returns list of {id, text, metadata, distance}."""
-        coll = self.get_collection(collection_name)
-        count = coll.count()
-        kwargs: dict[str, Any] = {
+        cid = self._resolve_collection_id(collection_name)
+        payload: dict[str, Any] = {
             "query_embeddings": [query_embedding],
-            "n_results": min(top_k, count) if count > 0 else top_k,
+            "n_results": top_k,
             "include": ["documents", "metadatas", "distances"],
         }
         if where:
-            kwargs["where"] = where
+            payload["where"] = where
 
         try:
-            results = coll.query(**kwargs)
+            results = self._request("POST", f"{_TENANT_PATH}/collections/{cid}/query", payload)
         except Exception as exc:
-            logger.warning(
-                "chroma_search_failed", collection=collection_name, error=str(exc)
-            )
+            logger.warning("chroma_search_failed", collection=collection_name, error=str(exc))
             return []
 
         out: list[dict[str, Any]] = []
-        if results and results["ids"] and results["ids"][0]:
-            for i, doc_id in enumerate(results["ids"][0]):
-                out.append(
-                    {
-                        "id": doc_id,
-                        "text": results["documents"][0][i] if results["documents"] else "",
-                        "metadata": (
-                            results["metadatas"][0][i] if results["metadatas"] else {}
-                        ),
-                        "distance": (
-                            results["distances"][0][i] if results["distances"] else 0.0
-                        ),
-                    }
-                )
+        ids = (results.get("ids") or [[]])[0]
+        docs = (results.get("documents") or [[]])[0]
+        metas = (results.get("metadatas") or [[]])[0]
+        dists = (results.get("distances") or [[]])[0]
+        for i, doc_id in enumerate(ids):
+            out.append({
+                "id": doc_id,
+                "text": docs[i] if i < len(docs) else "",
+                "metadata": metas[i] if i < len(metas) else {},
+                "distance": dists[i] if i < len(dists) else 0.0,
+            })
         return out
 
     def delete(self, collection_name: str, ids: list[str]) -> None:
         """Delete documents by ID."""
-        coll = self.get_collection(collection_name)
-        coll.delete(ids=ids)
+        cid = self._resolve_collection_id(collection_name)
+        self._request("POST", f"{_TENANT_PATH}/collections/{cid}/delete", {"ids": ids})
 
     def count(self, collection_name: str) -> int:
         """Get document count in a collection."""
-        return self.get_collection(collection_name).count()
+        cid = self._resolve_collection_id(collection_name)
+        result = self._request("POST", f"{_TENANT_PATH}/collections/{cid}/count", {})
+        return int(result) if isinstance(result, (int, float)) else 0
 
     def bootstrap_collections(self) -> dict[str, int]:
         """Ensure all standard collections exist. Returns {name: count}."""
         result = {}
         for name in ALL_COLLECTIONS:
-            coll = self.get_collection(name)
-            result[name] = coll.count()
-            logger.info("chroma_bootstrap", collection=name, count=coll.count())
+            self._resolve_collection_id(name)
+            try:
+                result[name] = self.count(name)
+            except Exception:
+                result[name] = 0
+            logger.info("chroma_bootstrap", collection=name, count=result[name])
         return result
 
     def heartbeat(self) -> bool:
         """Check if ChromaDB is reachable."""
         try:
-            self._client.heartbeat()
+            self._request("GET", "/api/v2/heartbeat")
             return True
         except Exception:
             return False
