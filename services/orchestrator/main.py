@@ -145,7 +145,17 @@ class OrchestratorService(BaseService):
         self.logger.info("orchestrator_ready", mode="headless")
         self._touch_healthcheck()
 
+        # Start periodic healthcheck writer (every 30s)
+        healthcheck_task = asyncio.create_task(self._healthcheck_loop())
+
         await self.wait_for_shutdown()
+
+        # Cancel background tasks
+        healthcheck_task.cancel()
+        try:
+            await healthcheck_task
+        except asyncio.CancelledError:
+            pass
 
         if api_task and not api_task.done():
             api_task.cancel()
@@ -187,6 +197,12 @@ class OrchestratorService(BaseService):
             HEALTHCHECK_FILE.write_text(str(time.time()))
         except OSError:
             pass
+
+    async def _healthcheck_loop(self) -> None:
+        """Periodic healthcheck writer — updates timestamp every 30s."""
+        while True:
+            await asyncio.sleep(30)
+            self._touch_healthcheck()
 
 
 if __name__ == "__main__":
