@@ -10,6 +10,8 @@ COPY services/dashboard/*.py /app/
 # NiceGUI web server port
 EXPOSE 8085
 
+# Bundle shared libs
+COPY shared/ /app/shared/
 HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
     CMD ["python", "healthcheck.py"]
 
