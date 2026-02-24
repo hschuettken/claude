@@ -331,7 +331,7 @@ class TripPredictor:
                 logger.info(
                     "local_activity_detected",
                     person=person,
-                    event=destination_raw,
+                    raw_text=destination_raw,
                     distance_km=distance_km,
                 )
             else:
