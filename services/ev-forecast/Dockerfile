@@ -1,4 +1,5 @@
 FROM homelab-base:latest
+ENV PYTHONPATH="/app"
 
 # Install service-specific dependencies
 COPY services/ev-forecast/requirements.txt /tmp/requirements.txt

@@ -1,4 +1,5 @@
 FROM homelab-base:latest
+ENV PYTHONPATH="/app"
 
 COPY services/smart-ev-charging/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt

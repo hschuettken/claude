@@ -1,4 +1,5 @@
 FROM homelab-base:latest
+ENV PYTHONPATH="/app"
 
 # Install dashboard-specific dependencies
 COPY services/dashboard/requirements.txt /tmp/requirements.txt
