@@ -165,6 +165,42 @@ class ChromaClient:
             })
         return out
 
+    def get(
+        self,
+        collection_name: str,
+        where: dict[str, Any] | None = None,
+        include: list[str] | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> dict[str, Any]:
+        """Fetch rows from a collection.
+
+        Returns a dict with flat arrays: ids, documents, metadatas, embeddings.
+        """
+        cid = self._resolve_collection_id(collection_name)
+        payload: dict[str, Any] = {}
+        if where:
+            payload["where"] = where
+        if include:
+            payload["include"] = include
+        if limit is not None:
+            payload["limit"] = int(limit)
+        if offset is not None:
+            payload["offset"] = int(offset)
+
+        try:
+            rows = self._request("POST", f"{_TENANT_PATH}/collections/{cid}/get", payload)
+        except Exception as exc:
+            logger.warning("chroma_get_failed", collection=collection_name, error=str(exc))
+            return {"ids": [], "documents": [], "metadatas": []}
+
+        return {
+            "ids": rows.get("ids") or [],
+            "documents": rows.get("documents") or [],
+            "metadatas": rows.get("metadatas") or [],
+            "embeddings": rows.get("embeddings") or [],
+        }
+
     def delete(self, collection_name: str, ids: list[str]) -> None:
         """Delete documents by ID."""
         cid = self._resolve_collection_id(collection_name)
@@ -173,8 +209,14 @@ class ChromaClient:
     def count(self, collection_name: str) -> int:
         """Get document count in a collection."""
         cid = self._resolve_collection_id(collection_name)
-        result = self._request("POST", f"{_TENANT_PATH}/collections/{cid}/count", {})
-        return int(result) if isinstance(result, (int, float)) else 0
+        result = self._request("GET", f"{_TENANT_PATH}/collections/{cid}/count")
+        if isinstance(result, (int, float)):
+            return int(result)
+        if isinstance(result, dict):
+            for key in ("count", "result", "value"):
+                if key in result:
+                    return int(result[key])
+        return 0
 
     def bootstrap_collections(self) -> dict[str, int]:
         """Ensure all standard collections exist. Returns {name: count}."""
