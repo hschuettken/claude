@@ -88,6 +88,8 @@ services:
       dockerfile: services/orchestrator/Dockerfile
     restart: unless-stopped
     env_file: .env
+    environment:
+      PYTHONPATH: "/app:/app/shared"
     ports:
       - "8050:8050"
     volumes:
