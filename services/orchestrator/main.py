@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from shared.chroma_client import ChromaClient
 from shared.service import BaseService
 
 from api.server import create_app, start_api_server
@@ -18,6 +19,7 @@ from config import OrchestratorSettings
 from gcal import GoogleCalendarClient
 from knowledge import KnowledgeStore, MemoryDocument
 from memory import Memory
+from semantic_memory import EmbeddingProvider, SemanticMemory
 from tools import ToolExecutor
 
 HEALTHCHECK_FILE = Path("/app/data/healthcheck")
@@ -101,6 +103,17 @@ class OrchestratorService(BaseService):
             timezone=self.settings.timezone,
         )
 
+        semantic_memory: SemanticMemory | None = None
+        try:
+            chroma = ChromaClient()
+            if not chroma.heartbeat():
+                raise RuntimeError("chroma_heartbeat_failed")
+            embedder = EmbeddingProvider(provider=self.settings.llm_provider, settings=self.settings)
+            semantic_memory = SemanticMemory(chroma=chroma, embedder=embedder)
+            self.logger.info("semantic_memory_enabled")
+        except Exception as exc:
+            self.logger.warning("semantic_memory_disabled", error=str(exc))
+
         tool_executor = ToolExecutor(
             ha=self.ha,
             influx=self.influx,
@@ -108,7 +121,7 @@ class OrchestratorService(BaseService):
             memory=memory,
             settings=self.settings,
             gcal=gcal if gcal.available else None,
-            semantic=None,
+            semantic=semantic_memory,
             ev_state=self._ev_state,
             knowledge=knowledge,
             memory_doc=memory_doc,
