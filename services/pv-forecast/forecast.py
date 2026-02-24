@@ -17,7 +17,7 @@ from shared.ha_client import HomeAssistantClient
 from shared.log import get_logger
 
 from config import PVForecastSettings
-from data import PVDataCollector
+from data import PVDataCollector, add_solar_features, compute_solar_position
 from model import FEATURE_COLS, PVModel, fallback_estimate
 from weather import OpenMeteoClient
 
@@ -30,6 +30,8 @@ class HourlyForecast:
 
     time: datetime
     kwh: float
+    kwh_low: float = 0.0   # 10th percentile (prediction interval lower bound)
+    kwh_high: float = 0.0  # 90th percentile (prediction interval upper bound)
 
 
 @dataclass
@@ -169,6 +171,8 @@ class ForecastEngine:
                 capacity_kwp=capacity_kwp,
                 days_back=self.settings.data_history_days,
                 forecast_solar_entity_id=fs_entity_id,
+                latitude=self.settings.pv_latitude,
+                longitude=self.settings.pv_longitude,
             )
 
             if training_data.empty:
@@ -322,6 +326,26 @@ class ForecastEngine:
 
         return result
 
+    def _get_yesterday_production(self, entity_id: str) -> dict[int, float]:
+        """Fetch yesterday's hourly production from InfluxDB for lagged features.
+
+        Returns dict mapping hour -> kwh.
+        """
+        if not entity_id:
+            return {}
+        try:
+            prod_df = self.data.get_production_history(entity_id, days_back=3)
+            if prod_df.empty:
+                return {}
+            yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date()
+            prod_df["date"] = prod_df["time"].dt.date
+            prod_df["hour"] = prod_df["time"].dt.hour
+            yday = prod_df[prod_df["date"] == yesterday]
+            return dict(zip(yday["hour"].values, yday["kwh"].values))
+        except Exception:
+            logger.warning("failed_fetch_yesterday_production", entity_id=entity_id)
+            return {}
+
     def _forecast_array(
         self,
         array_name: str,
@@ -340,6 +364,14 @@ class ForecastEngine:
         model_type = "ml" if use_ml else "fallback"
         forecast_solar = forecast_solar or {}
 
+        # Fetch yesterday's production for lagged features
+        entity_id = (
+            self.settings.pv_east_energy_entity_id
+            if array_name == "east"
+            else self.settings.pv_west_energy_entity_id
+        )
+        yesterday_prod = self._get_yesterday_production(entity_id)
+
         # Map day_key to Forecast.Solar key
         fs_day_map = {
             "today": "today",
@@ -356,13 +388,39 @@ class ForecastEngine:
             weather_day = weather_day.copy()
             weather_day["capacity_kwp"] = capacity_kwp
 
-            # Inject Forecast.Solar prediction (daily total for this day)
+            # Distribute Forecast.Solar daily total across hours proportional to GHI
             fs_key = fs_day_map.get(day_key, "")
             fs_value = forecast_solar.get(fs_key, 0.0)
-            weather_day["forecast_solar_kwh"] = fs_value
+            if "shortwave_radiation" in weather_day.columns and fs_value > 0:
+                ghi = weather_day["shortwave_radiation"].fillna(0)
+                ghi_sum = ghi.sum()
+                if ghi_sum > 0:
+                    weather_day["forecast_solar_hourly_kwh"] = fs_value * (ghi / ghi_sum)
+                else:
+                    weather_day["forecast_solar_hourly_kwh"] = fs_value
+            else:
+                weather_day["forecast_solar_hourly_kwh"] = fs_value
+
+            # Add solar features
+            lat = self.settings.pv_latitude
+            lon = self.settings.pv_longitude
+            if lat != 0.0 and lon != 0.0:
+                weather_day = add_solar_features(weather_day, lat, lon)
+
+            # Add lagged features (from yesterday's actual production)
+            weather_day["kwh_yesterday_same_hour"] = weather_day["hour"].map(
+                lambda h: yesterday_prod.get(h, 0.0)
+            )
+            # For rolling 3d mean at inference, use yesterday as best approximation
+            weather_day["kwh_rolling_3d_mean"] = weather_day["kwh_yesterday_same_hour"]
 
             if use_ml:
-                predictions = model.predict(weather_day)
+                result = model.predict(weather_day, return_intervals=True)
+                if isinstance(result, tuple):
+                    predictions, pred_low, pred_high = result
+                else:
+                    predictions = result
+                    pred_low = pred_high = predictions
             else:
                 predictions = fallback_estimate(
                     weather_day,
@@ -373,21 +431,29 @@ class ForecastEngine:
                     system_efficiency=self.settings.fallback_system_efficiency,
                     peak_irradiance=self.settings.fallback_peak_irradiance,
                 )
+                pred_low = pred_high = predictions
 
             # Physics constraint: zero out predictions where GHI ≈ 0 (dark hours).
-            # Even if the model predicts a small positive value, no sun = no power.
             ghi = weather_day["shortwave_radiation"].fillna(0).values
             predictions = np.where(ghi < 5.0, 0.0, predictions)
+            pred_low = np.where(ghi < 5.0, 0.0, pred_low)
+            pred_high = np.where(ghi < 5.0, 0.0, pred_high)
 
             # Clamp very small predictions to zero (reduce noise)
             predictions = np.where(predictions < 0.01, 0.0, predictions)
+            pred_low = np.where(pred_low < 0.01, 0.0, pred_low)
+            pred_high = np.where(pred_high < 0.01, 0.0, pred_high)
 
             hourly = [
                 HourlyForecast(
                     time=row["time"],
                     kwh=round(float(pred), 3),
+                    kwh_low=round(float(lo), 3),
+                    kwh_high=round(float(hi), 3),
                 )
-                for (_, row), pred in zip(weather_day.iterrows(), predictions)
+                for (_, row), pred, lo, hi in zip(
+                    weather_day.iterrows(), predictions, pred_low, pred_high,
+                )
             ]
             total = round(float(np.sum(predictions)), 2)
 

@@ -37,13 +37,13 @@ class PVForecastSettings(BaseSettings):
     model_dir: str = "/app/data/models"  # Where to persist trained models
 
     # --- ML hyperparameters (Gradient Boosting) ---
-    model_n_estimators: int = 200
-    model_max_depth: int = 5
+    model_n_estimators: int = 150
+    model_max_depth: int = 4
     model_learning_rate: float = 0.05
     model_subsample: float = 0.8
-    model_min_samples_leaf: int = 10
+    model_min_samples_leaf: int = 20
     model_min_training_samples: int = 50  # min rows before training
-    model_cv_folds: int = 3  # cross-validation folds
+    model_cv_folds: int = 5  # cross-validation folds (TimeSeriesSplit)
 
     # --- Fallback estimate parameters ---
     fallback_system_efficiency: float = 0.78  # inverter/wiring/soiling losses
