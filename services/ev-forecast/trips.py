@@ -324,6 +324,7 @@ class TripPredictor:
 
             # Extract actual destination from German text (strip activity words, prepositions)
             destination, is_local_activity = self._extract_destination_from_text(destination_raw)
+            needs_clarification = False
 
             # Local activity (e.g. "Kegeln" with no place) — use default local distance
             if is_local_activity:
@@ -337,7 +338,6 @@ class TripPredictor:
             else:
                 # Look up distance (known table first, then geocoding)
                 distance_km = self._lookup_distance(destination)
-                needs_clarification = False
 
                 if distance_km is None and self._geo:
                     # Try geocoding the destination
