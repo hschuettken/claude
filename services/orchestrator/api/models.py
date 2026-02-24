@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 
 # --- Chat ---
@@ -25,8 +25,33 @@ class ChatResponse(BaseModel):
 
 
 class ToolRequest(BaseModel):
-    tool_name: str
-    arguments: dict[str, Any] = Field(default_factory=dict)
+    """Tool execution request.
+
+    Accepts both modern and legacy field names:
+    - tool_name + arguments
+    - tool + parameters
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    tool_name: str = Field(alias="tool")
+    arguments: dict[str, Any] = Field(default_factory=dict, alias="parameters")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_legacy_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        # If caller sends `tool_name`, keep compatibility.
+        if "tool_name" in data and "tool" not in data:
+            data["tool"] = data["tool_name"]
+
+        # If caller sends `arguments`, keep compatibility.
+        if "arguments" in data and "parameters" not in data:
+            data["parameters"] = data["arguments"]
+
+        return data
 
 
 class ToolResponse(BaseModel):

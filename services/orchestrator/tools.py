@@ -913,18 +913,43 @@ class ToolExecutor:
         return {"success": True, "mode": mode}
 
     async def _tool_get_weather_forecast(self) -> dict[str, Any]:
-        try:
-            state = await self.ha.get_state(self.settings.weather_entity)
-            attrs = state.get("attributes", {})
-            return {
-                "current_condition": state.get("state"),
-                "temperature": attrs.get("temperature"),
-                "humidity": attrs.get("humidity"),
-                "wind_speed": attrs.get("wind_speed"),
-                "forecast": attrs.get("forecast", [])[:8],  # next 8 periods
-            }
-        except Exception:
-            return {"error": "Weather entity not available"}
+        # Try configured entity first, then a few sane fallbacks.
+        candidates = [
+            self.settings.weather_entity,
+            "weather.home",
+            "weather.forecast_home",
+            "weather.forecast_home_2",
+            "weather.openweathermap",
+        ]
+
+        last_error: str | None = None
+        for entity_id in dict.fromkeys(candidates):  # dedupe while keeping order
+            if not entity_id:
+                continue
+            try:
+                state = await self.ha.get_state(entity_id)
+                condition = state.get("state")
+                attrs = state.get("attributes", {})
+
+                # Skip unusable entities and try next fallback.
+                if condition in (None, "unknown", "unavailable"):
+                    continue
+
+                return {
+                    "entity_id": entity_id,
+                    "current_condition": condition,
+                    "temperature": attrs.get("temperature"),
+                    "humidity": attrs.get("humidity"),
+                    "wind_speed": attrs.get("wind_speed"),
+                    "forecast": attrs.get("forecast", [])[:8],  # next 8 periods
+                }
+            except Exception as exc:
+                last_error = str(exc)
+                continue
+
+        if last_error:
+            return {"error": f"Weather entity not available: {last_error}"}
+        return {"error": "Weather entity not available"}
 
     async def _tool_query_energy_history(
         self,
