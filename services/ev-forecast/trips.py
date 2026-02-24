@@ -478,8 +478,31 @@ class TripPredictor:
         if not remaining_text and found_activity:
             return text, True
 
-        # If we found some text after stripping, that's likely the destination/person
+        # If we found some text after stripping, determine if it's a person name or place
         if remaining_text:
+            # Heuristic: if activity words were stripped and what remains is a short
+            # word (1-2 words, no commas) that isn't a known destination, it's likely
+            # a person's name → treat as local visit
+            word_count = len(remaining_text.split())
+            is_known_place = remaining_text in self._destinations if hasattr(self, '_destinations') else False
+
+            if found_activity and word_count <= 2 and not is_known_place:
+                # Check learned destinations too
+                is_learned = False
+                if hasattr(self, '_learned') and self._learned:
+                    is_learned = self._learned.is_known(remaining_text)
+
+                if not is_learned:
+                    # Looks like a person name (e.g. "Kathrin" from "Frühstück mit Kathrin")
+                    # → treat as local visit rather than geocoding a person's name
+                    logger.info(
+                        "person_name_detected",
+                        name=remaining_text,
+                        original_text=text,
+                        reason="Short name after stripping activity words, not a known destination",
+                    )
+                    return remaining_text, True
+
             return remaining_text, False
 
         # Fallback: use original text
