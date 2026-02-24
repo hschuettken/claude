@@ -93,7 +93,6 @@ services:
     ports:
       - "8050:8050"
     volumes:
-      - ./shared:/app/shared:ro
       - orchestrator_data:/app/data
     depends_on:
       - mqtt
