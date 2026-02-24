@@ -104,15 +104,25 @@ class OrchestratorService(BaseService):
         )
 
         semantic_memory: SemanticMemory | None = None
-        try:
-            chroma = ChromaClient()
-            if not chroma.heartbeat():
-                raise RuntimeError("chroma_heartbeat_failed")
-            embedder = EmbeddingProvider(provider=self.settings.llm_provider, settings=self.settings)
-            semantic_memory = SemanticMemory(chroma=chroma, embedder=embedder)
-            self.logger.info("semantic_memory_enabled")
-        except Exception as exc:
-            self.logger.warning("semantic_memory_disabled", error=str(exc))
+        if self.settings.enable_semantic_memory:
+            try:
+                chroma = ChromaClient()
+                if not chroma.heartbeat():
+                    raise RuntimeError("chroma_heartbeat_failed")
+                embedder = EmbeddingProvider(provider=self.settings.llm_provider, settings=self.settings)
+                semantic_memory = SemanticMemory(
+                    chroma=chroma,
+                    embedder=embedder,
+                    max_entries=self.settings.semantic_memory_max_entries,
+                    text_max_len=self.settings.semantic_memory_text_max_len,
+                    recency_weight=self.settings.semantic_memory_recency_weight,
+                    recency_half_life_days=self.settings.semantic_memory_recency_half_life_days,
+                )
+                self.logger.info("semantic_memory_enabled")
+            except Exception as exc:
+                self.logger.warning("semantic_memory_disabled", error=str(exc))
+        else:
+            self.logger.info("semantic_memory_disabled", reason="ENABLE_SEMANTIC_MEMORY=false")
 
         tool_executor = ToolExecutor(
             ha=self.ha,

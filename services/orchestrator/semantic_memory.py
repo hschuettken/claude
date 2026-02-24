@@ -273,8 +273,8 @@ class SemanticMemory:
         cutoff = time.time() - min_age_days * 86400
 
         try:
-            coll = self._chroma.get_collection(self._collection)
-            rows = coll.get(
+            rows = self._chroma.get(
+                collection_name=self._collection,
                 where={"category": category},
                 include=["documents", "metadatas"],
             )
@@ -371,8 +371,10 @@ class SemanticMemory:
                 return
 
             overflow = total - self._max_entries
-            coll = self._chroma.get_collection(self._collection)
-            rows = coll.get(include=["metadatas"])
+            rows = self._chroma.get(
+                collection_name=self._collection,
+                include=["metadatas"],
+            )
             ids = rows.get("ids", []) or []
             metas = rows.get("metadatas", []) or []
             if not ids:

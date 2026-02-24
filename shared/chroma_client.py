@@ -209,7 +209,15 @@ class ChromaClient:
     def count(self, collection_name: str) -> int:
         """Get document count in a collection."""
         cid = self._resolve_collection_id(collection_name)
-        result = self._request("GET", f"{_TENANT_PATH}/collections/{cid}/count")
+
+        result: Any
+        try:
+            # Preferred for Chroma v2
+            result = self._request("GET", f"{_TENANT_PATH}/collections/{cid}/count")
+        except Exception:
+            # Fallback for older/proxy deployments expecting POST
+            result = self._request("POST", f"{_TENANT_PATH}/collections/{cid}/count", {})
+
         if isinstance(result, (int, float)):
             return int(result)
         if isinstance(result, dict):

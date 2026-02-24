@@ -352,12 +352,26 @@ async def check_memory(settings) -> None:
         return
 
     try:
+        from shared.chroma_client import ChromaClient
         from semantic_memory import EmbeddingProvider, SemanticMemory
+
+        chroma = ChromaClient()
+        if not chroma.heartbeat():
+            warn("ChromaDB not reachable — semantic memory disabled fallback is expected")
+            return
+
         embedder = EmbeddingProvider(
             provider=settings.llm_provider,
             settings=settings,
         )
-        semantic = SemanticMemory(embedder)
+        semantic = SemanticMemory(
+            chroma=chroma,
+            embedder=embedder,
+            max_entries=settings.semantic_memory_max_entries,
+            text_max_len=settings.semantic_memory_text_max_len,
+            recency_weight=settings.semantic_memory_recency_weight,
+            recency_half_life_days=settings.semantic_memory_recency_half_life_days,
+        )
         result("Semantic memory loaded", True,
                f"Entries: {semantic.entry_count}\n"
                f"Provider: {settings.llm_provider}")
