@@ -64,6 +64,8 @@ Secrets are stored encrypted in `.env.enc` (SOPS + age). The plain `.env` is git
 ./scripts/secrets-edit.sh      # Edit encrypted secrets in-place via $EDITOR
 ```
 
+For semantic memory, set both `CHROMA_URL` and `CHROMA_AUTH_TOKEN` in `.env`.
+
 **New machine setup:** Install `sops` + `age`, copy your age key to `.sops/age-key.txt`, then run `./scripts/secrets-decrypt.sh`. See [CLAUDE.md](CLAUDE.md) for details.
 
 ## Creating a New Service
