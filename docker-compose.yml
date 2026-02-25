@@ -135,6 +135,17 @@ services:
       - homelab
       - traefik
 
+  proxmox-api:
+    build:
+      context: .
+      dockerfile: services/proxmox-api/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8053:8100"
+    networks:
+      - homelab
+
   # --- Template for new services ---
   # my-new-service:
   #   build:
