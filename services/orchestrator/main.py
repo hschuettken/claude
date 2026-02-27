@@ -82,6 +82,8 @@ class OrchestratorService(BaseService):
         self._activity = ActivityTracker()
         self._service_states: dict[str, dict[str, Any]] = {}
         self._ev_state: dict = {"plan": None, "pending_clarifications": []}
+        self._ev_events: dict[str, dict[str, str]] = {}  # Track EV calendar events {date: {event_id, summary}}
+        self._gcal: GoogleCalendarClient | None = None
 
     async def run(self) -> None:
         self.mqtt.connect_background()
@@ -102,6 +104,11 @@ class OrchestratorService(BaseService):
             credentials_json=self.settings.google_calendar_credentials_json,
             timezone=self.settings.timezone,
         )
+        self._gcal = gcal if gcal.available else None
+
+        # Load existing EV calendar events to prevent duplicates
+        if self._gcal and self.settings.google_calendar_orchestrator_id:
+            await self._load_existing_ev_events()
 
         semantic_memory: SemanticMemory | None = None
         if self.settings.enable_semantic_memory:
@@ -203,9 +210,145 @@ class OrchestratorService(BaseService):
 
     def _on_ev_plan(self, topic: str, payload: dict) -> None:
         self._ev_state["plan"] = payload
+        # Update calendar events asynchronously
+        if self._gcal and self.settings.google_calendar_orchestrator_id:
+            asyncio.create_task(self._update_ev_calendar_events(payload))
 
     def _on_ev_clarification(self, topic: str, payload: dict) -> None:
         self._ev_state["pending_clarifications"] = payload.get("clarifications", [])
+
+    async def _load_existing_ev_events(self) -> None:
+        """Load existing EV calendar events from Google Calendar.
+        
+        Populates self._ev_events dict to prevent creating duplicates on restart.
+        """
+        try:
+            cal_id = self.settings.google_calendar_orchestrator_id
+            # Get events for next 14 days
+            events = await self._gcal.get_events(cal_id, days_ahead=14, max_results=50)
+            
+            for event in events:
+                summary = event.get("summary", "")
+                if summary.startswith("EV:"):
+                    start = event.get("start", "")
+                    if start:  # start is YYYY-MM-DD for all-day events
+                        self._ev_events[start] = {
+                            "event_id": event.get("id", ""),
+                            "summary": summary
+                        }
+                        self.logger.info("ev_calendar_event_loaded", date=start, summary=summary)
+        except Exception:
+            self.logger.exception("failed_to_load_existing_ev_events")
+
+    async def _update_ev_calendar_events(self, plan_data: dict[str, Any]) -> None:
+        """Create/update calendar events for significant EV charging needs.
+        
+        Called when the ev-forecast service publishes a new plan via MQTT.
+        Creates all-day events on the orchestrator calendar.
+        """
+        from datetime import date as date_type, timedelta
+
+        try:
+            cal_id = self.settings.google_calendar_orchestrator_id
+            days = plan_data.get("days", [])
+            active_dates: set[str] = set()
+
+            for day in days:
+                date_str = day.get("date", "")
+                urgency = day.get("urgency", "none")
+                charge_kwh = day.get("energy_to_charge_kwh", 0)
+
+                # Only create events for days that actually need charging
+                if urgency == "none" or charge_kwh <= 0:
+                    continue
+
+                active_dates.add(date_str)
+
+                # Build summary
+                trips = day.get("trips", [])
+                trip_parts = [f"{t['person']} → {t['destination']}" for t in trips]
+                departure = day.get("departure_time")
+
+                summary = f"EV: {charge_kwh:.0f} kWh laden"
+                if departure:
+                    summary += f" bis {departure}"
+                if trip_parts:
+                    summary += f" ({', '.join(trip_parts)})"
+
+                # Skip if event already exists with the same summary
+                existing = self._ev_events.get(date_str, {})
+                if existing.get("summary") == summary:
+                    continue
+
+                # Double-check calendar for existing events on this date (safety net)
+                try:
+                    cal_events = await self._gcal.get_events(
+                        cal_id, days_ahead=14, max_results=50
+                    )
+                    for evt in cal_events:
+                        if evt.get("start") == date_str and evt.get("summary") == summary:
+                            # Found duplicate in calendar - update our dict and skip
+                            self._ev_events[date_str] = {
+                                "event_id": evt.get("id", ""),
+                                "summary": summary
+                            }
+                            self.logger.info("ev_calendar_event_exists_skipped", date=date_str, summary=summary)
+                            existing = self._ev_events[date_str]
+                            break
+                    if existing.get("summary") == summary:
+                        continue
+                except Exception:
+                    self.logger.debug("ev_calendar_query_failed", date=date_str)
+
+                # Delete old event if exists (plan changed)
+                if existing.get("event_id"):
+                    try:
+                        await self._gcal.delete_event(cal_id, existing["event_id"])
+                    except Exception:
+                        pass
+
+                # Create new all-day event
+                try:
+                    d = date_type.fromisoformat(date_str)
+                    next_day = (d + timedelta(days=1)).isoformat()
+
+                    description = (
+                        f"Lademodus: {day.get('charge_mode', '?')}\n"
+                        f"Dringlichkeit: {urgency}\n"
+                        f"Energiebedarf Fahrten: {day.get('energy_needed_kwh', 0):.1f} kWh\n"
+                        f"Zu laden: {charge_kwh:.1f} kWh\n"
+                        f"Grund: {day.get('reason', '')}\n\n"
+                        f"Automatisch erstellt vom EV Forecast Service."
+                    )
+
+                    event = await self._gcal.create_event(
+                        calendar_id=cal_id,
+                        summary=summary,
+                        start=date_str,
+                        end=next_day,
+                        description=description,
+                        all_day=True,
+                    )
+                    self._ev_events[date_str] = {
+                        "event_id": event.get("id", ""),
+                        "summary": summary,
+                    }
+                    self.logger.info("ev_calendar_event_created", date=date_str, summary=summary)
+                except Exception:
+                    self.logger.exception("ev_calendar_event_failed", date=date_str)
+
+            # Clean up events for dates no longer needing charging
+            for date_str in list(self._ev_events):
+                if date_str not in active_dates:
+                    existing = self._ev_events.pop(date_str, {})
+                    if existing.get("event_id"):
+                        try:
+                            await self._gcal.delete_event(cal_id, existing["event_id"])
+                            self.logger.info("ev_calendar_event_removed", date=date_str)
+                        except Exception:
+                            pass
+        except Exception:
+            self.logger.exception("ev_calendar_update_failed")
 
     def health_check(self) -> dict[str, Any]:
         return {
