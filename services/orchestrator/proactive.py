@@ -269,9 +269,9 @@ class ProactiveEngine:
     async def on_ev_plan_update(self, plan_data: dict[str, Any]) -> None:
         """Create/update calendar events for significant EV charging needs.
 
-        Called when the ev-forecast service publishes a new plan via MQTT.
-        Creates all-day events on the orchestrator calendar so the household
-        can see upcoming charging requirements.
+        Ensures at most one EV charging event per day in the orchestrator
+        calendar. Existing events are updated in place; duplicate same-day
+        EV entries are removed.
         """
         if not self._gcal or not self._settings.google_calendar_orchestrator_id:
             return
@@ -279,6 +279,27 @@ class ProactiveEngine:
         cal_id = self._settings.google_calendar_orchestrator_id
         days = plan_data.get("days", [])
         active_dates: set[str] = set()
+
+        # Build current EV event index from Google Calendar (survives restarts)
+        ev_by_date: dict[str, list[dict[str, Any]]] = {}
+        try:
+            existing_events = await self._gcal.get_events(
+                calendar_id=cal_id,
+                days_ahead=max(len(days) + 3, 14),
+                days_back=1,
+                max_results=250,
+            )
+            for ev in existing_events:
+                if not ev.get("all_day"):
+                    continue
+                if not str(ev.get("summary", "")).startswith("EV:"):
+                    continue
+                start_date = str(ev.get("start", ""))[:10]
+                if len(start_date) != 10:
+                    continue
+                ev_by_date.setdefault(start_date, []).append(ev)
+        except Exception:
+            logger.exception("ev_calendar_index_failed")
 
         for day in days:
             date_str = day.get("date", "")
@@ -293,7 +314,7 @@ class ProactiveEngine:
 
             # Build summary
             trips = day.get("trips", [])
-            trip_parts = [f"{t['person']} \u2192 {t['destination']}" for t in trips]
+            trip_parts = [f"{t['person']} → {t['destination']}" for t in trips]
             departure = day.get("departure_time")
 
             summary = f"EV: {charge_kwh:.0f} kWh laden"
@@ -302,58 +323,79 @@ class ProactiveEngine:
             if trip_parts:
                 summary += f" ({', '.join(trip_parts)})"
 
-            # Skip if event already exists with the same summary
-            existing = self._ev_events.get(date_str, {})
-            if existing.get("summary") == summary:
-                continue
+            description = (
+                f"Lademodus: {day.get('charge_mode', '?')}\n"
+                f"Dringlichkeit: {urgency}\n"
+                f"Energiebedarf Fahrten: {day.get('energy_needed_kwh', 0):.1f} kWh\n"
+                f"Zu laden: {charge_kwh:.1f} kWh\n"
+                f"Grund: {day.get('reason', '')}\n\n"
+                f"Automatisch erstellt vom EV Forecast Service."
+            )
 
-            # Delete old event if exists (plan changed)
-            if existing.get("event_id"):
-                try:
-                    await self._gcal.delete_event(cal_id, existing["event_id"])
-                except Exception:
-                    pass
+            day_events = ev_by_date.get(date_str, [])
+            canonical = day_events[0] if day_events else None
+            duplicates = day_events[1:] if len(day_events) > 1 else []
 
-            # Create new all-day event
+            # Cleanup duplicates for this date
+            for dup in duplicates:
+                dup_id = dup.get("id", "")
+                if dup_id:
+                    try:
+                        await self._gcal.delete_event(cal_id, dup_id)
+                        logger.info("ev_calendar_duplicate_removed", date=date_str, event_id=dup_id)
+                    except Exception:
+                        logger.debug("ev_calendar_duplicate_remove_failed", date=date_str, event_id=dup_id)
+
             try:
-                d = date_type.fromisoformat(date_str)
-                next_day = (d + timedelta(days=1)).isoformat()
+                if canonical and canonical.get("id"):
+                    # Update existing daily event instead of creating a new one
+                    if canonical.get("summary") != summary or canonical.get("description", "") != description:
+                        updated = await self._gcal.update_event(
+                            calendar_id=cal_id,
+                            event_id=canonical["id"],
+                            summary=summary,
+                            description=description,
+                        )
+                        logger.info("ev_calendar_event_updated", date=date_str, summary=summary)
+                        event_id = updated.get("id", canonical["id"])
+                    else:
+                        event_id = canonical["id"]
+                else:
+                    # No event for this date yet -> create once
+                    d = date_type.fromisoformat(date_str)
+                    next_day = (d + timedelta(days=1)).isoformat()
+                    created = await self._gcal.create_event(
+                        calendar_id=cal_id,
+                        summary=summary,
+                        start=date_str,
+                        end=next_day,
+                        description=description,
+                        all_day=True,
+                    )
+                    event_id = created.get("id", "")
+                    logger.info("ev_calendar_event_created", date=date_str, summary=summary)
 
-                description = (
-                    f"Lademodus: {day.get('charge_mode', '?')}\n"
-                    f"Dringlichkeit: {urgency}\n"
-                    f"Energiebedarf Fahrten: {day.get('energy_needed_kwh', 0):.1f} kWh\n"
-                    f"Zu laden: {charge_kwh:.1f} kWh\n"
-                    f"Grund: {day.get('reason', '')}\n\n"
-                    f"Automatisch erstellt vom EV Forecast Service."
-                )
-
-                event = await self._gcal.create_event(
-                    calendar_id=cal_id,
-                    summary=summary,
-                    start=date_str,
-                    end=next_day,
-                    description=description,
-                    all_day=True,
-                )
                 self._ev_events[date_str] = {
-                    "event_id": event.get("id", ""),
+                    "event_id": event_id,
                     "summary": summary,
                 }
-                logger.info("ev_calendar_event_created", date=date_str, summary=summary)
             except Exception:
-                logger.exception("ev_calendar_event_failed", date=date_str)
+                logger.exception("ev_calendar_event_sync_failed", date=date_str)
 
-        # Clean up events for dates no longer needing charging
-        for date_str in list(self._ev_events):
-            if date_str not in active_dates:
-                existing = self._ev_events.pop(date_str, {})
-                if existing.get("event_id"):
-                    try:
-                        await self._gcal.delete_event(cal_id, existing["event_id"])
-                        logger.info("ev_calendar_event_removed", date=date_str)
-                    except Exception:
-                        pass
+        # Remove EV events for dates no longer needing charging
+        for date_str, day_events in ev_by_date.items():
+            if date_str in active_dates:
+                continue
+            for ev in day_events:
+                ev_id = ev.get("id", "")
+                if not ev_id:
+                    continue
+                try:
+                    await self._gcal.delete_event(cal_id, ev_id)
+                    logger.info("ev_calendar_event_removed", date=date_str, event_id=ev_id)
+                except Exception:
+                    logger.debug("ev_calendar_event_remove_failed", date=date_str, event_id=ev_id)
+            self._ev_events.pop(date_str, None)
 
     async def on_ev_clarification_needed(
         self, clarifications: list[dict[str, Any]],

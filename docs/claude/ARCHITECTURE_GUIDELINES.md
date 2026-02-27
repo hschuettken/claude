@@ -280,7 +280,7 @@ def get_logger(service_name: str) -> structlog.stdlib.BoundLogger:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
-            structlog.dev.ConsoleRenderer(),  # Human-readable for containers
+            structlog.processors.JSONRenderer(),  # JSON for containers/Loki
         ],
         wrapper_class=structlog.stdlib.BoundLogger,
         logger_factory=structlog.PrintLoggerFactory(),

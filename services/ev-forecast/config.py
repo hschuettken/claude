@@ -16,7 +16,14 @@ class EVForecastSettings(BaseSettings):
     ev_battery_capacity_net_kwh: float = 76.0     # Usable capacity
     # Default consumption — used as fallback until enough real data is collected.
     # The service calculates actual consumption dynamically from mileage + SoC changes.
-    ev_consumption_kwh_per_100km: float = 22.0
+    # For Audi A6 e-tron: ~18-20 kWh/100km in summer, ~22-26 kWh/100km in winter
+    # Highway driving can push this to 25-30 kWh/100km
+    ev_consumption_kwh_per_100km: float = 21.0
+    # Plausibility guard rails for estimate/fallback (prevents unrealistic values).
+    # Min increased from 18.0 to 17.0 to allow for optimal summer conditions
+    # but still reject clearly wrong measurements like 16 or below
+    ev_consumption_min_kwh_per_100km: float = 17.0
+    ev_consumption_max_kwh_per_100km: float = 35.0
 
     # --- Audi Connect account mode ---
     # true  = single account (Henning only, direct sensors — recommended)

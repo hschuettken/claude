@@ -138,6 +138,17 @@ class OrchestratorService(BaseService):
         )
         tool_executor._activity_tracker = self._activity
 
+        # Initialize proactive engine for EV calendar management (even in headless mode)
+        from proactive import ProactiveEngine
+        proactive = ProactiveEngine(
+            brain=None,  # No brain in headless mode
+            telegram=None,  # No telegram in headless mode
+            settings=self.settings,
+            gcal=gcal if gcal.available else None,
+            ev_state=self._ev_state,
+        )
+        self._proactive = proactive
+
         self.mqtt.subscribe("homelab/+/heartbeat", self._on_service_heartbeat)
         self.mqtt.subscribe("homelab/+/updated", self._on_service_update)
         self.mqtt.subscribe("homelab/ev-forecast/plan", self._on_ev_plan)
@@ -203,6 +214,9 @@ class OrchestratorService(BaseService):
 
     def _on_ev_plan(self, topic: str, payload: dict) -> None:
         self._ev_state["plan"] = payload
+        # Trigger calendar event update/cleanup
+        if hasattr(self, '_proactive'):
+            asyncio.create_task(self._proactive.on_ev_plan_update(payload))
 
     def _on_ev_clarification(self, topic: str, payload: dict) -> None:
         self._ev_state["pending_clarifications"] = payload.get("clarifications", [])

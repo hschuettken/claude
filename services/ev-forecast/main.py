@@ -110,6 +110,8 @@ class EVForecastService:
         self.consumption_tracker = ConsumptionTracker(
             battery_capacity_kwh=self.settings.ev_battery_capacity_gross_kwh,
             default_consumption=self.settings.ev_consumption_kwh_per_100km,
+            min_plausible_consumption=self.settings.ev_consumption_min_kwh_per_100km,
+            max_plausible_consumption=self.settings.ev_consumption_max_kwh_per_100km,
         )
 
         # Home location (resolved in start())
@@ -890,6 +892,8 @@ class EVForecastService:
                     ct_data,
                     capacity=self.settings.ev_battery_capacity_gross_kwh,
                     default=self.settings.ev_consumption_kwh_per_100km,
+                    min_plausible=self.settings.ev_consumption_min_kwh_per_100km,
+                    max_plausible=self.settings.ev_consumption_max_kwh_per_100km,
                 )
 
             logger.info(

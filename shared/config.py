@@ -52,5 +52,6 @@ class Settings(BaseSettings):
 
     # --- General ---
     log_level: str = "INFO"
+    log_format: str = "auto"  # auto | json | console
     timezone: str = "Europe/Berlin"
     heartbeat_interval_seconds: int = 60  # MQTT heartbeat interval (0 to disable)

@@ -207,6 +207,51 @@ class GoogleCalendarClient:
         return self._simplify_event(created)
 
     # ------------------------------------------------------------------
+    # Update events
+    # ------------------------------------------------------------------
+
+    async def update_event(
+        self,
+        calendar_id: str,
+        event_id: str,
+        summary: str,
+        description: str = "",
+    ) -> dict[str, Any]:
+        """Update an existing event (summary/description).
+
+        Returns simplified updated event dict.
+        """
+        return await asyncio.to_thread(
+            self._update_event_sync,
+            calendar_id,
+            event_id,
+            summary,
+            description,
+        )
+
+    def _update_event_sync(
+        self,
+        calendar_id: str,
+        event_id: str,
+        summary: str,
+        description: str,
+    ) -> dict[str, Any]:
+        service = self._get_service()
+        body: dict[str, Any] = {"summary": summary}
+        if description:
+            body["description"] = description
+        else:
+            body["description"] = ""
+
+        updated = (
+            service.events()
+            .patch(calendarId=calendar_id, eventId=event_id, body=body)
+            .execute()
+        )
+        logger.info("calendar_event_updated", calendar=calendar_id, event_id=event_id)
+        return self._simplify_event(updated)
+
+    # ------------------------------------------------------------------
     # Delete events
     # ------------------------------------------------------------------
 

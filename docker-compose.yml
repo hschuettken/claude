@@ -51,6 +51,8 @@ services:
       dockerfile: services/pv-forecast/Dockerfile
     restart: unless-stopped
     env_file: .env
+    environment:
+      LOG_FORMAT: ${LOG_FORMAT:-json}
     volumes:
       - pv_forecast_data:/app/data
     networks:
@@ -62,6 +64,8 @@ services:
       dockerfile: services/smart-ev-charging/Dockerfile
     restart: unless-stopped
     env_file: .env
+    environment:
+      LOG_FORMAT: ${LOG_FORMAT:-json}
     volumes:
       - smart_ev_charging_data:/app/data
     networks:
@@ -77,6 +81,7 @@ services:
       PYTHONPATH: "/app:/app/shared"
       CHROMA_AUTH_TOKEN: ${CHROMA_AUTH_TOKEN:-}
       CHROMA_URL: http://llm-chromadb:8000
+      LOG_FORMAT: ${LOG_FORMAT:-json}
     ports:
       - "8050:8100"
     volumes:
@@ -98,6 +103,8 @@ services:
       dockerfile: services/ev-forecast/Dockerfile
     restart: unless-stopped
     env_file: .env
+    environment:
+      LOG_FORMAT: ${LOG_FORMAT:-json}
     volumes:
       - ev_forecast_data:/app/data
     networks:
@@ -109,6 +116,8 @@ services:
       dockerfile: services/health-monitor/Dockerfile
     restart: unless-stopped
     env_file: .env
+    environment:
+      LOG_FORMAT: ${LOG_FORMAT:-json}
     volumes:
       - health_monitor_data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -121,6 +130,8 @@ services:
       dockerfile: services/dashboard/Dockerfile
     restart: unless-stopped
     env_file: .env
+    environment:
+      LOG_FORMAT: ${LOG_FORMAT:-json}
     ports:
       - "8085:8085"
     volumes:
@@ -141,6 +152,8 @@ services:
       dockerfile: services/proxmox-api/Dockerfile
     restart: unless-stopped
     env_file: .env
+    environment:
+      LOG_FORMAT: ${LOG_FORMAT:-json}
     ports:
       - "8053:8100"
     networks:

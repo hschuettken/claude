@@ -107,10 +107,14 @@ class ConsumptionTracker:
         battery_capacity_kwh: float = 83.0,
         default_consumption: float = 22.0,
         max_history: int = 50,
+        min_plausible_consumption: float = 18.0,
+        max_plausible_consumption: float = 35.0,
     ) -> None:
         self._capacity = battery_capacity_kwh
         self._default = default_consumption
         self._max_history = max_history
+        self._min_plausible = min_plausible_consumption
+        self._max_plausible = max_plausible_consumption
         # Rolling list of measured consumption values (kWh/100km)
         self._history: list[float] = []
         # Last reading for comparison
@@ -166,11 +170,38 @@ class ConsumptionTracker:
 
     @property
     def consumption_kwh_per_100km(self) -> float:
-        """Current consumption estimate: rolling average of last 10 or default."""
+        """Current consumption estimate.
+
+        Uses weighted rolling average favoring recent measurements (seasonal adaptation).
+        Blends with default for low sample counts, bounded to plausible range.
+        Recent samples weighted more heavily to adapt to seasonal changes (winter/summer).
+        """
         if not self._history:
-            return self._default
-        recent = self._history[-10:]
-        return round(sum(recent) / len(recent), 1)
+            base = self._default
+        else:
+            # Use last 20 samples for rolling average, but weight recent ones more
+            recent = self._history[-20:]
+            n = len(recent)
+            
+            if n <= 3:
+                # Very few samples: blend heavily with default
+                measured_avg = sum(recent) / n
+                weight_measured = 0.3 * n  # 30% weight per sample, max 90%
+                base = (measured_avg * weight_measured) + (self._default * (1.0 - weight_measured))
+            else:
+                # Enough samples: use weighted average favoring recent data
+                # Weight decay: most recent = 1.0, each older sample gets 0.95x weight
+                weights = [0.95 ** i for i in range(n)]
+                weights.reverse()  # Most recent gets highest weight
+                weighted_sum = sum(val * w for val, w in zip(recent, weights))
+                weight_sum = sum(weights)
+                measured_avg = weighted_sum / weight_sum
+                
+                # Reduce default influence as we get more data
+                weight_measured = min(1.0, n / 10.0)  # Full trust after 10 samples
+                base = (measured_avg * weight_measured) + (self._default * (1.0 - weight_measured))
+
+        return round(max(self._min_plausible, min(self._max_plausible, base)), 1)
 
     @property
     def has_data(self) -> bool:
@@ -198,9 +229,11 @@ class ConsumptionTracker:
         data: dict[str, Any],
         capacity: float,
         default: float,
+        min_plausible: float = 18.0,
+        max_plausible: float = 35.0,
     ) -> ConsumptionTracker:
         """Restore from persisted state."""
-        tracker = cls(capacity, default)
+        tracker = cls(capacity, default, min_plausible_consumption=min_plausible, max_plausible_consumption=max_plausible)
         tracker._history = data.get("history", [])
         tracker._last_mileage = data.get("last_mileage")
         tracker._last_soc = data.get("last_soc")
