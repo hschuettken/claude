@@ -378,23 +378,23 @@ class ChargingStrategy:
         if ctx.grid_power_w > 200 and not ctx.target_reached:
             return self._grid_export_prevention(ctx, pv)
 
-        # --- Evening grid charging fallback (17:00-22:00) ---
-        # After sunset, PV is gone but nighttime grid charging doesn't start
-        # until 22:00. Bridge this gap by charging at min power from grid.
+        # --- Dynamic grid charging fallback (season-independent) ---
+        # When PV can't sustain charging and we need energy by morning,
+        # decide based on tomorrow's PV forecast whether to charge now
+        # or wait for morning sun.
+        pv_only_check = self._calc_pv_only_available(ctx)
+        assist_check, _ = self._calc_battery_assist_detailed(ctx, pv_only_check)
+        pv_total_available = pv_only_check + assist_check
+
         if (
-            17 <= current_hour < 22
-            and not ctx.target_reached
-            and ctx.full_by_morning
-            and ctx.departure_time is not None
+            not ctx.target_reached
+            and (ctx.full_by_morning or ctx.departure_time is not None)
+            and pv_total_available < self.min_power_w
             and ctx.energy_needed_kwh > 0
         ):
-            hours_left = self._hours_until(ctx.departure_time, ctx.now)
-            return ChargingDecision(
-                self.min_power_w,
-                f"Smart: Evening grid charging (no PV, "
-                f"{ctx.energy_needed_kwh:.1f} kWh needed, "
-                f"departure in {hours_left:.1f} hours)",
-            )
+            fallback = self._dynamic_grid_fallback(ctx)
+            if fallback is not None:
+                return fallback
 
         return ChargingDecision(
             0, f"Smart: {pv.reason}",
@@ -560,6 +560,76 @@ class ChargingStrategy:
             f"Plan: {grid_portion_kwh:.1f} kWh grid + "
             f"{pv_morning_usable:.1f} kWh PV morning | "
             f"Total needed: {energy_needed:.1f} kWh",
+        )
+
+    def _dynamic_grid_fallback(self, ctx: ChargingContext) -> ChargingDecision | None:
+        """Dynamic grid charging fallback -- season-independent.
+
+        When PV surplus can't sustain charging and energy is needed by morning:
+        1. Check tomorrow's PV forecast for morning hours until departure
+        2. Calculate how much grid charging is needed vs what PV can cover
+        3. If grid is needed: charge at min power now
+        4. If PV can cover it: wait (but deadline escalation will catch us)
+
+        This replaces the old hardcoded 17:00-22:00 evening window.
+        It fires whenever PV drops below usable levels -- whether that's
+        16:00 in winter or 20:30 in summer.
+        """
+        energy_needed = ctx.energy_needed_kwh
+        departure = ctx.departure_time
+
+        # Calculate tomorrow morning's usable PV
+        pv_tomorrow_total = ctx.pv_forecast_tomorrow_kwh
+        pv_morning_usable = (
+            pv_tomorrow_total * self.pv_morning_fraction * self.charger_efficiency
+        )
+
+        # Cap PV estimate by what the charger can actually absorb
+        if departure:
+            departure_hour = departure.hour + departure.minute / 60.0
+        else:
+            departure_hour = 13.0  # default if no departure set
+        pv_start_hour = 8.0
+        pv_hours = max(0.0, departure_hour - pv_start_hour)
+        max_pv_charge = (self.max_power_w / 1000.0) * pv_hours
+        pv_morning_usable = min(pv_morning_usable, max_pv_charge, energy_needed)
+
+        # If PV forecast is very low, don't count on it
+        if pv_morning_usable < 3.0:
+            pv_morning_usable = 0.0
+
+        grid_portion = max(0.0, energy_needed - pv_morning_usable)
+
+        logger.info(
+            "dynamic_grid_fallback",
+            energy_needed=round(energy_needed, 1),
+            pv_tomorrow_total=round(pv_tomorrow_total, 1),
+            pv_morning_usable=round(pv_morning_usable, 1),
+            grid_portion=round(grid_portion, 1),
+            hour=ctx.now.hour,
+        )
+
+        if grid_portion > 0:
+            # Need grid power -- charge at minimum rate
+            hours_left = self._hours_until(departure, ctx.now) if departure else 12.0
+            return ChargingDecision(
+                self.min_power_w,
+                f"Smart: Dynamic grid fallback -- no PV available, "
+                f"{energy_needed:.1f} kWh needed "
+                f"(grid portion {grid_portion:.1f} kWh, "
+                f"tomorrow PV {pv_morning_usable:.1f} kWh usable, "
+                f"departure in {hours_left:.1f}h)",
+            )
+
+        # PV can cover everything tomorrow -- wait
+        # (deadline escalation will catch us if we run out of time)
+        hours_left = self._hours_until(departure, ctx.now) if departure else 12.0
+        return ChargingDecision(
+            0,
+            f"Smart: Waiting for tomorrow'ss PV "
+            f"({energy_needed:.1f} kWh needed, "
+            f"forecast {pv_morning_usable:.1f} kWh usable morning, "
+            f"departure in {hours_left:.1f}h)",
         )
 
     def _morning_pv_escalation(self, ctx: ChargingContext) -> ChargingDecision | None:
