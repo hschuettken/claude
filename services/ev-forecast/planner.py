@@ -231,6 +231,7 @@ class ChargingPlanner:
         target_energy_entity: str,
         audi_vin: str = "",
         audi_set_target_soc: bool = True,
+        wallbox_vehicle_state_entity: str = "",
     ) -> None:
         """Write the immediate plan to HA input helpers and optionally set Audi target SoC."""
         immediate = plan.immediate_action
@@ -292,12 +293,24 @@ class ChargingPlanner:
                 logger.exception("set_target_energy_failed")
 
         # Set Audi target SoC via audiconnect integration
-        # Only when: plugged in + AI-controlled mode (not Off)
+        # Only when: plugged in AT HOME (wallbox) + AI-controlled mode (not Off)
         ai_controlled_modes = {"Smart", "PV Surplus", "Manual"}
+        
+        # Check if car is plugged in at home wallbox
+        plugged_in_at_home = False
+        if wallbox_vehicle_state_entity and plan.vehicle_plugged_in:
+            try:
+                state = await self._ha.get_state(wallbox_vehicle_state_entity)
+                wallbox_state = state.get("state", "0")
+                # Amtron states: 2=Connected, 3=Charging, 4=Charging with vent
+                plugged_in_at_home = wallbox_state in ["2", "3", "4"]
+            except Exception:
+                logger.warning("wallbox_state_check_failed", entity=wallbox_vehicle_state_entity)
+        
         should_set_audi = (
             target_soc_pct is not None
             and audi_set_target_soc
-            and plan.vehicle_plugged_in
+            and plugged_in_at_home  # Must be at home wallbox, not away
             and immediate.charge_mode in ai_controlled_modes
         )
         
@@ -319,11 +332,15 @@ class ChargingPlanner:
                 logger.exception("set_audi_target_soc_failed")
         elif target_soc_pct is not None and audi_set_target_soc:
             # Log why we skipped
+            skip_reason = "mode_off" if immediate.charge_mode not in ai_controlled_modes else (
+                "not_at_home_wallbox" if not plugged_in_at_home else "unknown"
+            )
             logger.info(
                 "audi_target_soc_skipped",
                 plugged_in=plan.vehicle_plugged_in,
+                plugged_in_at_home=plugged_in_at_home,
                 mode=immediate.charge_mode,
-                reason="not_plugged_in_or_mode_off",
+                reason=skip_reason,
             )
 
         logger.info(
