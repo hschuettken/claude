@@ -229,8 +229,10 @@ class ChargingPlanner:
         full_by_morning_entity: str,
         departure_time_entity: str,
         target_energy_entity: str,
+        audi_vin: str = "",
+        audi_set_target_soc: bool = True,
     ) -> None:
-        """Write the immediate plan to HA input helpers."""
+        """Write the immediate plan to HA input helpers and optionally set Audi target SoC."""
         immediate = plan.immediate_action
         if not immediate:
             return
@@ -238,6 +240,17 @@ class ChargingPlanner:
         if not plan.vehicle_plugged_in:
             logger.info("vehicle_not_plugged_in, skipping_ha_update")
             return
+
+        # Calculate target SoC for Audi (current SoC + energy needed)
+        target_soc_pct = None
+        if audi_set_target_soc and immediate.energy_to_charge_kwh > 0:
+            # Current energy = current_soc_pct * net_capacity / 100
+            # Target energy = current energy + energy_to_charge
+            # Target SoC % = (target energy / net_capacity) * 100
+            current_energy_kwh = (plan.current_soc_pct / 100.0) * self._net_capacity
+            target_energy_kwh = current_energy_kwh + immediate.energy_to_charge_kwh
+            target_soc_pct = min(100.0, (target_energy_kwh / self._net_capacity) * 100.0)
+            target_soc_pct = round(target_soc_pct)
 
         # Set charge mode
         try:
@@ -278,10 +291,28 @@ class ChargingPlanner:
             except Exception:
                 logger.exception("set_target_energy_failed")
 
+        # Set Audi target SoC via audiconnect integration
+        if target_soc_pct is not None and audi_set_target_soc:
+            try:
+                service_data = {"target_soc": int(target_soc_pct)}
+                if audi_vin:
+                    service_data["vin"] = audi_vin
+                
+                await self._ha.call_service("audiconnect", "set_target_soc", service_data)
+                logger.info(
+                    "audi_target_soc_set",
+                    target_soc=int(target_soc_pct),
+                    current_soc=round(plan.current_soc_pct),
+                    energy_to_charge=round(immediate.energy_to_charge_kwh, 1),
+                )
+            except Exception:
+                logger.exception("set_audi_target_soc_failed")
+
         logger.info(
             "plan_applied",
             mode=immediate.charge_mode,
             target_kwh=round(immediate.energy_to_charge_kwh, 1),
+            audi_target_soc=int(target_soc_pct) if target_soc_pct else None,
             departure=immediate.departure_time.strftime("%H:%M") if immediate.departure_time else "none",
             urgency=immediate.urgency,
             reason=immediate.reason,

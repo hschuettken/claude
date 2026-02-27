@@ -343,6 +343,8 @@ class EVForecastService:
                     full_by_morning_entity=self.settings.full_by_morning_entity,
                     departure_time_entity=self.settings.departure_time_entity,
                     target_energy_entity=self.settings.target_energy_entity,
+                    audi_vin=self.settings.audi_vin,
+                    audi_set_target_soc=self.settings.audi_set_target_soc,
                 )
 
             # Publish any pending clarifications to orchestrator

@@ -100,6 +100,10 @@ class EVForecastSettings(BaseSettings):
     full_by_morning_entity: str = "input_boolean.ev_full_by_morning"
     departure_time_entity: str = "input_datetime.ev_departure_time"
     target_energy_entity: str = "input_number.ev_target_energy_kwh"
+    
+    # Audi Connect integration (optional, leave empty to disable)
+    audi_vin: str = ""  # Vehicle VIN for audiconnect.set_target_soc (auto-detected if empty)
+    audi_set_target_soc: bool = True  # Enable automatic Audi target SoC control
 
     # --- Scheduling ---
     plan_update_minutes: int = 30      # Re-evaluate plan every N minutes
