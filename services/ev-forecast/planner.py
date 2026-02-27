@@ -292,7 +292,16 @@ class ChargingPlanner:
                 logger.exception("set_target_energy_failed")
 
         # Set Audi target SoC via audiconnect integration
-        if target_soc_pct is not None and audi_set_target_soc:
+        # Only when: plugged in + AI-controlled mode (not Off)
+        ai_controlled_modes = {"Smart", "PV Surplus", "Manual"}
+        should_set_audi = (
+            target_soc_pct is not None
+            and audi_set_target_soc
+            and plan.vehicle_plugged_in
+            and immediate.charge_mode in ai_controlled_modes
+        )
+        
+        if should_set_audi:
             try:
                 service_data = {"target_soc": int(target_soc_pct)}
                 if audi_vin:
@@ -304,9 +313,18 @@ class ChargingPlanner:
                     target_soc=int(target_soc_pct),
                     current_soc=round(plan.current_soc_pct),
                     energy_to_charge=round(immediate.energy_to_charge_kwh, 1),
+                    mode=immediate.charge_mode,
                 )
             except Exception:
                 logger.exception("set_audi_target_soc_failed")
+        elif target_soc_pct is not None and audi_set_target_soc:
+            # Log why we skipped
+            logger.info(
+                "audi_target_soc_skipped",
+                plugged_in=plan.vehicle_plugged_in,
+                mode=immediate.charge_mode,
+                reason="not_plugged_in_or_mode_off",
+            )
 
         logger.info(
             "plan_applied",
