@@ -38,7 +38,9 @@ class EVChargingSettings(BaseSettings):
     battery_power_entity: str = "sensor.batteries_charge_discharge_power"
     battery_soc_entity: str = "sensor.batteries_state_of_capacity"
     battery_min_soc_pct: float = 20.0       # Floor — never drain below this for EV
-    battery_ev_assist_max_w: float = 2000.0  # Max battery discharge rate for EV assist
+    battery_ev_assist_max_w: float = 3500.0  # Max battery discharge rate for EV assist
+    battery_capacity_kwh: float = 7.0        # Home battery usable capacity
+    battery_target_eod_soc_pct: float = 90.0 # Acceptable end-of-day battery SoC
 
     # --- PV forecast (optional — for battery-aware decisions) ---
     pv_forecast_remaining_entity: str = "sensor.pv_ai_forecast_today_remaining_kwh"

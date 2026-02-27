@@ -33,6 +33,9 @@ class ChargingContext:
     battery_power_w: float     # positive = charging, negative = discharging
     battery_soc_pct: float     # 0–100 %
     pv_forecast_remaining_kwh: float  # remaining PV kWh expected today
+    house_power_w: float           # current household consumption (W)
+    battery_capacity_kwh: float    # home battery usable capacity (kWh)
+    battery_target_eod_soc_pct: float  # acceptable end-of-day battery SoC %
     full_by_morning: bool
     departure_time: time | None
     target_energy_kwh: float   # manual fallback target (kWh to add)
@@ -112,7 +115,9 @@ class ChargingStrategy:
         start_hysteresis_w: int = 300,
         ramp_step_w: int = 500,
         battery_min_soc_pct: float = 20.0,
-        battery_ev_assist_max_w: float = 2000.0,
+        battery_ev_assist_max_w: float = 3500.0,
+        battery_capacity_kwh: float = 7.0,
+        battery_target_eod_soc_pct: float = 90.0,
         pv_forecast_good_kwh: float = 15.0,
         night_charging_buffer_hours: float = 1.0,
     ) -> None:
@@ -124,6 +129,8 @@ class ChargingStrategy:
         self.ramp_step_w = ramp_step_w
         self.battery_min_soc_pct = battery_min_soc_pct
         self.battery_ev_assist_max_w = battery_ev_assist_max_w
+        self.battery_capacity_kwh = battery_capacity_kwh
+        self.battery_target_eod_soc_pct = battery_target_eod_soc_pct
         self.pv_forecast_good_kwh = pv_forecast_good_kwh
         self.night_charging_buffer_hours = night_charging_buffer_hours
 
@@ -279,7 +286,12 @@ class ChargingStrategy:
         )
 
     def _smart(self, ctx: ChargingContext) -> ChargingDecision:
-        """PV surplus during the day; night charging window when full_by_morning=ON."""
+        """PV surplus during the day; night charging window when full_by_morning=ON.
+
+        Key principle: NEVER export to grid when the EV target isn't reached.
+        Use battery to supplement PV if needed. Charging the EV at 25ct/kWh
+        reimbursement is always better than exporting at 7ct/kWh.
+        """
         # During nighttime (22:00-05:00) with full_by_morning and a deadline, use smart timing
         current_hour = ctx.now.hour
         is_nighttime = current_hour >= 22 or current_hour < 5
@@ -287,7 +299,7 @@ class ChargingStrategy:
         if is_nighttime and ctx.full_by_morning and ctx.departure_time:
             return self._nighttime_smart(ctx)
 
-        # Daytime: PV surplus logic
+        # Daytime: try PV surplus first
         pv = self._pv_surplus(ctx)
         if pv.target_power_w > 0:
             return ChargingDecision(
@@ -296,11 +308,74 @@ class ChargingStrategy:
                 battery_assist_w=pv.battery_assist_w,
                 battery_assist_reason=pv.battery_assist_reason,
             )
+
+        # Grid export prevention: if we're exporting to grid and target
+        # isn't reached, charge at min power using battery + PV.
+        # This is the core "smart" logic — don't waste energy to the grid.
+        if ctx.grid_power_w > 200 and not ctx.target_reached:
+            return self._grid_export_prevention(ctx, pv)
+
         return ChargingDecision(
             0, f"Smart: {pv.reason}",
             pv_surplus_w=pv.pv_surplus_w,
             battery_assist_w=pv.battery_assist_w,
             battery_assist_reason=pv.battery_assist_reason,
+        )
+
+    def _grid_export_prevention(
+        self, ctx: ChargingContext, pv_decision: ChargingDecision,
+    ) -> ChargingDecision:
+        """Prevent grid export by using battery + PV to charge the EV.
+
+        When we're exporting to grid and the EV needs charging, it makes
+        zero economic sense to export at 7ct when we can charge the EV at 25ct.
+        Use the home battery to bridge the gap to min_power_w.
+        """
+        # How much power is being exported + what PV surplus exists
+        pv_only = self._calc_pv_only_available(ctx)
+        total_available = max(0.0, pv_only)
+
+        # How much more do we need from battery to reach min charging power?
+        battery_needed = self.min_power_w - total_available
+
+        # Check battery constraints
+        if ctx.battery_soc_pct <= self.battery_min_soc_pct:
+            return ChargingDecision(
+                0,
+                f"Smart: exporting {ctx.grid_power_w:.0f} W but battery too low "
+                f"({ctx.battery_soc_pct:.0f}% <= {self.battery_min_soc_pct:.0f}%)",
+                pv_surplus_w=pv_decision.pv_surplus_w,
+                battery_assist_w=0,
+                battery_assist_reason=f"SoC at floor ({ctx.battery_soc_pct:.0f}%)",
+            )
+
+        # Can we get enough from battery?
+        battery_available = min(battery_needed, self.battery_ev_assist_max_w)
+
+        if total_available + battery_available >= self.min_power_w:
+            target = self._clamp(total_available + battery_available)
+            if target > 0:
+                return ChargingDecision(
+                    target,
+                    f"Smart: grid export prevention — PV {total_available:.0f} W "
+                    f"+ battery {battery_available:.0f} W → {target} W "
+                    f"(prevent {ctx.grid_power_w:.0f} W export)",
+                    pv_surplus_w=round(pv_only, 1),
+                    battery_assist_w=round(battery_available, 1),
+                    battery_assist_reason=(
+                        f"Export prevention: {battery_needed:.0f} W needed from battery, "
+                        f"SoC {ctx.battery_soc_pct:.0f}%"
+                    ),
+                )
+
+        # Can't reach min_power_w even with battery — still exporting though
+        return ChargingDecision(
+            0,
+            f"Smart: exporting {ctx.grid_power_w:.0f} W but can't reach min "
+            f"({total_available:.0f} + {battery_available:.0f} < {self.min_power_w} W)",
+            pv_surplus_w=pv_decision.pv_surplus_w,
+            battery_assist_w=0,
+            battery_assist_reason="Insufficient combined power for min charge rate",
         )
 
     def _nighttime_smart(self, ctx: ChargingContext) -> ChargingDecision:
@@ -474,63 +549,120 @@ class ChargingStrategy:
 
         Returns (assist_w, reason) tuple with explanation.
 
+        Philosophy: It's ALWAYS better to charge the EV than export to grid.
+        The employer reimburses 25ct/kWh; grid feed-in pays only 7ct/kWh.
+        So we aggressively use the battery to keep EV charging, as long as
+        the battery can be refilled to an acceptable level by end of day.
+
         Rules:
-        - Only assist when battery SoC is above the floor (battery_min_soc_pct)
-        - Cap discharge rate at battery_ev_assist_max_w (protect longevity)
-        - Scale assist by PV forecast: good forecast → more aggressive
-        - Only assist when there IS some PV surplus (just not enough alone)
-        - Economics: When battery >80% and PV surplus exists, prioritize EV
-          (every kWh PV→EV saves 7ct vs exporting)
+        - Battery SoC must be above the floor (battery_min_soc_pct)
+        - Cap discharge rate at battery_ev_assist_max_w (hardware limit)
+        - Check if forecast PV can refill the battery by end of day
+        - If battery is high (>80%) or forecast is good: full assist
+        - If battery can't be fully refilled: still assist if we'd
+          end above battery_target_eod_soc_pct (default 90%)
         """
-        # No assist if battery SoC too low
+        # Hard floor — never drain below this
         if ctx.battery_soc_pct <= self.battery_min_soc_pct:
             return 0.0, f"SoC {ctx.battery_soc_pct:.0f}% <= floor {self.battery_min_soc_pct:.0f}%"
 
-        # No assist if there's zero PV (e.g. nighttime) — save battery
-        if ctx.pv_power_w < 100:
-            return 0.0, f"No PV production ({ctx.pv_power_w:.0f} W < 100 W)"
+        # PV surplus already sufficient — no assist needed
+        if pv_only_available >= self.min_power_w:
+            return 0.0, "PV surplus sufficient (no assist needed)"
 
-        # No assist if PV surplus is negative (house consuming more than PV)
-        if pv_only_available < 0:
-            return 0.0, f"No PV surplus ({pv_only_available:.0f} W < 0)"
+        # How much battery power we need to bridge to min_power_w
+        # (can be negative pv_only → need full bridge; can be positive but < min → partial bridge)
+        shortfall = self.min_power_w - max(0.0, pv_only_available)
 
-        # Economic priority: when battery is >80% and there's PV surplus,
-        # be MORE aggressive with assist — it's better to use PV for EV
-        # than to continue charging an already-full battery
-        battery_full = ctx.battery_soc_pct > 80
-        economic_boost = 1.5 if battery_full else 1.0
+        # Calculate whether battery can be refilled by end of day
+        can_refill, refill_reason = self._can_battery_refill(ctx)
 
-        # Scale assist limit by PV forecast quality
-        # Good forecast → allow up to max assist; poor forecast → reduce
-        forecast_factor = min(
-            1.0, ctx.pv_forecast_remaining_kwh / self.pv_forecast_good_kwh,
-        )
-
-        # Scale by SoC: full battery → full assist, at floor → zero
+        # SoC headroom factor: full battery → full assist, at floor → zero
         soc_headroom = (
             (ctx.battery_soc_pct - self.battery_min_soc_pct)
             / (100.0 - self.battery_min_soc_pct)
         )
         soc_factor = min(1.0, max(0.0, soc_headroom))
 
-        max_assist = self.battery_ev_assist_max_w * forecast_factor * soc_factor * economic_boost
+        # Determine max assist based on refill outlook
+        if can_refill:
+            # Forecast shows battery can be refilled — go full power
+            max_assist = self.battery_ev_assist_max_w * soc_factor
+            strategy = "refill OK"
+        elif ctx.battery_soc_pct > 80:
+            # Battery is high — use it even if we can't fully refill.
+            # Better 90% EOD battery + charged EV than 100% battery + grid export.
+            max_assist = self.battery_ev_assist_max_w * soc_factor
+            strategy = f"SoC {ctx.battery_soc_pct:.0f}% > 80% (accept partial drain)"
+        else:
+            # Battery not that full AND can't refill — be conservative
+            # Scale by forecast quality
+            forecast_factor = min(
+                1.0, ctx.pv_forecast_remaining_kwh / self.pv_forecast_good_kwh,
+            )
+            max_assist = self.battery_ev_assist_max_w * forecast_factor * soc_factor * 0.5
+            strategy = f"conservative (forecast {forecast_factor:.0%})"
 
-        # How much more we need to reach wallbox minimum
-        shortfall = self.min_power_w - pv_only_available
-        if shortfall <= 0:
-            return 0.0, "PV surplus sufficient (no assist needed)"
+        if max_assist < 100:
+            return 0.0, f"Assist too small ({max_assist:.0f} W) — {strategy}, {refill_reason}"
 
         assist = min(shortfall, max_assist)
-        reason_parts = [
-            f"Shortfall {shortfall:.0f} W",
-            f"max {max_assist:.0f} W",
-            f"(forecast {forecast_factor:.0%}, SoC {soc_factor:.0%}",
-        ]
-        if battery_full:
-            reason_parts.append("+ economic boost")
-        reason_parts[-1] += ")"
-        reason = ", ".join(reason_parts)
+        reason = (
+            f"Shortfall {shortfall:.0f} W, assist {assist:.0f}/{max_assist:.0f} W "
+            f"— {strategy}, {refill_reason}"
+        )
         return assist, reason
+
+    def _can_battery_refill(self, ctx: ChargingContext) -> tuple[bool, str]:
+        """Check if remaining PV forecast can refill the battery by end of day.
+
+        Returns (can_refill, reason).
+        """
+        # Energy needed to reach target EOD SoC
+        target_soc = ctx.battery_target_eod_soc_pct
+        current_soc = ctx.battery_soc_pct
+        capacity = ctx.battery_capacity_kwh
+
+        # If battery is already above target, trivially yes
+        if current_soc >= target_soc:
+            return True, f"SoC {current_soc:.0f}% >= target {target_soc:.0f}%"
+
+        energy_to_refill = (target_soc - current_soc) / 100.0 * capacity
+
+        # Estimate remaining household consumption
+        # Use current house_power as proxy; assume ~5h remaining daylight
+        # (conservative for Germany afternoon)
+        hours_remaining = max(0.5, self._estimate_daylight_hours_remaining(ctx.now))
+        household_kwh = (ctx.house_power_w / 1000.0) * hours_remaining
+
+        # Available PV for battery = forecast remaining - household
+        available_for_battery = ctx.pv_forecast_remaining_kwh - household_kwh
+
+        can_refill = available_for_battery >= energy_to_refill
+        reason = (
+            f"need {energy_to_refill:.1f} kWh to reach {target_soc:.0f}%, "
+            f"forecast {ctx.pv_forecast_remaining_kwh:.1f} kWh - "
+            f"house {household_kwh:.1f} kWh = {available_for_battery:.1f} kWh available"
+        )
+        return can_refill, reason
+
+    @staticmethod
+    def _estimate_daylight_hours_remaining(now: datetime) -> float:
+        """Rough estimate of productive PV hours remaining today.
+
+        Uses a simple seasonal model for central Europe (50°N).
+        Returns hours of useful PV production remaining.
+        """
+        # Approximate sunset hour by month (Germany)
+        month = now.month
+        sunset_hours = {
+            1: 16.5, 2: 17.5, 3: 18.5, 4: 20.0, 5: 21.0, 6: 21.5,
+            7: 21.5, 8: 20.5, 9: 19.5, 10: 18.5, 11: 17.0, 12: 16.5,
+        }
+        # PV production drops off ~1h before actual sunset
+        effective_end = sunset_hours.get(month, 18.0) - 1.0
+        current_hour = now.hour + now.minute / 60.0
+        return max(0.0, effective_end - current_hour)
 
     # ------------------------------------------------------------------
     # Helpers

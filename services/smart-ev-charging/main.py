@@ -72,6 +72,8 @@ class SmartEVChargingService(BaseService):
             ramp_step_w=self.settings.ramp_step_w,
             battery_min_soc_pct=self.settings.battery_min_soc_pct,
             battery_ev_assist_max_w=self.settings.battery_ev_assist_max_w,
+            battery_capacity_kwh=self.settings.battery_capacity_kwh,
+            battery_target_eod_soc_pct=self.settings.battery_target_eod_soc_pct,
             pv_forecast_good_kwh=self.settings.pv_forecast_good_kwh,
         )
 
@@ -170,6 +172,9 @@ class SmartEVChargingService(BaseService):
             battery_power_w=battery_power,
             battery_soc_pct=battery_soc,
             pv_forecast_remaining_kwh=pv_forecast_remaining,
+            house_power_w=house_power,
+            battery_capacity_kwh=self.settings.battery_capacity_kwh,
+            battery_target_eod_soc_pct=self.settings.battery_target_eod_soc_pct,
             full_by_morning=full_by_morning,
             departure_time=departure_time,
             target_energy_kwh=target_energy,
