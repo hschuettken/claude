@@ -44,7 +44,13 @@ class EVChargingSettings(BaseSettings):
 
     # --- PV forecast (optional — for battery-aware decisions) ---
     pv_forecast_remaining_entity: str = "sensor.pv_ai_forecast_today_remaining_kwh"
+    pv_forecast_tomorrow_entity: str = "sensor.pv_ai_forecast_tomorrow_kwh"
     pv_forecast_good_kwh: float = 15.0  # Above this = "good day", allow more battery use
+    # Fraction of tomorrow's PV forecast usable before 13:00 (morning hours)
+    # In Germany ~40-50% of daily production is before 13:00 in spring/summer
+    pv_morning_fraction: float = 0.45
+    # Charger efficiency loss (cable, conversion) — conservative 90%
+    charger_efficiency: float = 0.90
 
     # --- HA helper entity IDs ---
     charge_mode_entity: str = "input_select.ev_charge_mode"

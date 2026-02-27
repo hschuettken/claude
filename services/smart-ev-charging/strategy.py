@@ -33,6 +33,7 @@ class ChargingContext:
     battery_power_w: float     # positive = charging, negative = discharging
     battery_soc_pct: float     # 0–100 %
     pv_forecast_remaining_kwh: float  # remaining PV kWh expected today
+    pv_forecast_tomorrow_kwh: float    # total PV forecast for tomorrow (kWh)
     house_power_w: float           # current household consumption (W)
     battery_capacity_kwh: float    # home battery usable capacity (kWh)
     battery_target_eod_soc_pct: float  # acceptable end-of-day battery SoC %
@@ -43,6 +44,7 @@ class ChargingContext:
     ev_soc_pct: float | None           # EV battery SoC from car (None = unavailable)
     ev_battery_capacity_kwh: float     # EV battery capacity (e.g. 77 kWh)
     ev_target_soc_pct: float           # target SoC % (e.g. 80)
+    overnight_grid_kwh_charged: float  # kWh already charged from grid this overnight session
     now: datetime
 
     @property
@@ -120,6 +122,9 @@ class ChargingStrategy:
         battery_target_eod_soc_pct: float = 90.0,
         pv_forecast_good_kwh: float = 15.0,
         night_charging_buffer_hours: float = 1.0,
+        pv_morning_fraction: float = 0.45,
+        charger_efficiency: float = 0.90,
+        morning_escalation_hour: int = 11,
     ) -> None:
         self.max_power_w = max_power_w
         self.min_power_w = min_power_w
@@ -133,6 +138,9 @@ class ChargingStrategy:
         self.battery_target_eod_soc_pct = battery_target_eod_soc_pct
         self.pv_forecast_good_kwh = pv_forecast_good_kwh
         self.night_charging_buffer_hours = night_charging_buffer_hours
+        self.pv_morning_fraction = pv_morning_fraction
+        self.charger_efficiency = charger_efficiency
+        self.morning_escalation_hour = morning_escalation_hour
 
         self._was_pv_charging = False
         self._last_target_w: int = 0
@@ -207,9 +215,19 @@ class ChargingStrategy:
             decision = ChargingDecision(0, f"Unknown mode: {ctx.mode}")
 
         # --- Full-by-morning deadline escalation ---
+        # Skip deadline escalation during morning PV-wait window (before escalation hour)
+        # when the strategy has intentionally paused grid charging to wait for PV
+        is_pv_wait_window = (
+            ctx.mode == ChargeMode.SMART
+            and ctx.full_by_morning
+            and 5 <= ctx.now.hour < self.morning_escalation_hour
+            and ctx.overnight_grid_kwh_charged > 0
+            and decision.target_power_w == 0
+            and "waiting for" in decision.reason.lower()
+        )
         if ctx.full_by_morning and ctx.mode in (
             ChargeMode.PV_SURPLUS, ChargeMode.SMART,
-        ):
+        ) and not is_pv_wait_window:
             decision = self._apply_deadline_escalation(ctx, decision)
 
         # --- Ramp limiting (smooth power transitions) ---
@@ -286,20 +304,58 @@ class ChargingStrategy:
         )
 
     def _smart(self, ctx: ChargingContext) -> ChargingDecision:
-        """PV surplus during the day; night charging window when full_by_morning=ON.
+        """PV surplus during the day; overnight grid+PV split when full_by_morning=ON.
 
-        Key principle: NEVER export to grid when the EV target isn't reached.
-        Use battery to supplement PV if needed. Charging the EV at 25ct/kWh
-        reimbursement is always better than exporting at 7ct/kWh.
+        Key principles:
+        - Grid charging overnight is fine and expected
+        - If tomorrow's PV forecast is good, only charge part from grid
+        - Stop grid charging once grid portion is done, let PV handle the rest
+        - Deadline escalation at 11:00 if not on track for departure
+        - NEVER export to grid when the EV target isn't reached
         """
-        # During nighttime (22:00-05:00) with full_by_morning and a deadline, use smart timing
         current_hour = ctx.now.hour
         is_nighttime = current_hour >= 22 or current_hour < 5
 
+        # --- Overnight: grid+PV split strategy ---
         if is_nighttime and ctx.full_by_morning and ctx.departure_time:
             return self._nighttime_smart(ctx)
 
-        # Daytime: try PV surplus first
+        # --- Early morning (05:00-08:00): waiting for PV phase ---
+        # Grid portion may be done; we're in the pause-and-wait-for-PV window
+        is_morning_wait = 5 <= current_hour < 8
+        if is_morning_wait and ctx.full_by_morning and ctx.departure_time:
+            # Check if grid portion is done and we're waiting for PV
+            energy_needed = ctx.energy_needed_kwh
+            if energy_needed > 0 and ctx.overnight_grid_kwh_charged > 0:
+                pv_tomorrow_total = ctx.pv_forecast_tomorrow_kwh
+                pv_morning_usable = (
+                    pv_tomorrow_total * self.pv_morning_fraction * self.charger_efficiency
+                )
+                grid_portion_kwh = max(0.0, (energy_needed + ctx.overnight_grid_kwh_charged) - pv_morning_usable) * 1.10
+                if pv_morning_usable >= 3.0 and ctx.overnight_grid_kwh_charged >= grid_portion_kwh * 0.95:
+                    # Grid portion done — wait for PV, but try PV surplus if available
+                    pv = self._pv_surplus(ctx)
+                    if pv.target_power_w > 0:
+                        return ChargingDecision(
+                            pv.target_power_w,
+                            f"Morning PV resume: {pv.reason}",
+                            pv_surplus_w=pv.pv_surplus_w,
+                            battery_assist_w=pv.battery_assist_w,
+                            battery_assist_reason=pv.battery_assist_reason,
+                        )
+                    return ChargingDecision(
+                        0,
+                        f"Morning: grid portion done ({ctx.overnight_grid_kwh_charged:.1f} kWh), "
+                        f"waiting for PV ({energy_needed:.1f} kWh remaining, "
+                        f"forecast {pv_morning_usable:.1f} kWh usable)",
+                    )
+
+        # --- Morning escalation check (11:00+) ---
+        escalation = self._morning_pv_escalation(ctx)
+        if escalation is not None:
+            return escalation
+
+        # --- Daytime: PV surplus first ---
         pv = self._pv_surplus(ctx)
         if pv.target_power_w > 0:
             return ChargingDecision(
@@ -311,7 +367,6 @@ class ChargingStrategy:
 
         # Grid export prevention: if we're exporting to grid and target
         # isn't reached, charge at min power using battery + PV.
-        # This is the core "smart" logic — don't waste energy to the grid.
         if ctx.grid_power_w > 200 and not ctx.target_reached:
             return self._grid_export_prevention(ctx, pv)
 
@@ -379,40 +434,162 @@ class ChargingStrategy:
         )
 
     def _nighttime_smart(self, ctx: ChargingContext) -> ChargingDecision:
-        """Smart nighttime charging: charge as late as possible before departure.
+        """Smart overnight charging: split between grid (overnight) and PV (morning).
 
-        Calculate required charging time and start charging only when necessary
-        to meet the deadline (with a safety buffer).
+        Strategy:
+        1. Calculate total energy needed to reach target SoC (100% or configured)
+        2. Estimate how much PV can deliver tomorrow morning (sunrise → departure)
+        3. Only charge (total_needed - pv_portion) from grid overnight
+        4. Stop grid charging once the grid portion is done
+        5. PV surplus mode handles the rest tomorrow morning
+        6. Deadline escalation at 11:00 if not on track
+
+        Example: need 35 kWh, tomorrow PV 08:00-13:00 ≈ 15 kWh usable
+                 → charge 20 kWh from grid overnight → pause → PV handles rest
         """
         energy_needed = ctx.energy_needed_kwh
         if energy_needed <= 0:
             return ChargingDecision(0, "Nighttime: target already reached")
 
-        hours_until_departure = self._hours_until(ctx.departure_time, ctx.now)
+        # --- Calculate PV morning contribution ---
+        pv_tomorrow_total = ctx.pv_forecast_tomorrow_kwh
+        # Usable PV before departure (morning fraction × efficiency × total)
+        pv_morning_usable = (
+            pv_tomorrow_total * self.pv_morning_fraction * self.charger_efficiency
+        )
 
-        # Calculate required charging time at eco power
-        charging_power_kw = self.eco_power_w / 1000.0
-        hours_needed = energy_needed / charging_power_kw
+        # Don't count on more PV than we need, and cap at a reasonable amount
+        # (can't charge faster than max_power × morning hours)
+        departure_hour = ctx.departure_time.hour + ctx.departure_time.minute / 60.0 if ctx.departure_time else 13.0
+        pv_start_hour = 8.0  # approximate sunrise / useful PV start
+        pv_hours = max(0.0, departure_hour - pv_start_hour)
+        max_pv_charge = (self.max_power_w / 1000.0) * pv_hours
+        pv_morning_usable = min(pv_morning_usable, max_pv_charge, energy_needed)
 
-        # Add buffer for safety
-        hours_needed_with_buffer = hours_needed + self.night_charging_buffer_hours
+        # --- Split: grid portion vs PV portion ---
+        grid_portion_kwh = max(0.0, energy_needed - pv_morning_usable)
 
-        # If we're within the charging window, start charging
-        if hours_until_departure <= hours_needed_with_buffer:
+        # Safety margin: charge 10% extra from grid (PV is weather-dependent)
+        grid_portion_kwh *= 1.10
+
+        # If PV forecast is very low (<5 kWh morning), don't bother splitting
+        if pv_morning_usable < 3.0:
+            grid_portion_kwh = energy_needed
+            pv_morning_usable = 0.0
+
+        logger.info(
+            "overnight_pv_split",
+            energy_needed=round(energy_needed, 1),
+            pv_tomorrow_total=round(pv_tomorrow_total, 1),
+            pv_morning_usable=round(pv_morning_usable, 1),
+            grid_portion=round(grid_portion_kwh, 1),
+            overnight_grid_charged=round(ctx.overnight_grid_kwh_charged, 1),
+        )
+
+        # --- Check if grid portion is already done ---
+        if ctx.overnight_grid_kwh_charged >= grid_portion_kwh:
+            remaining_for_pv = energy_needed - ctx.overnight_grid_kwh_charged
+            if remaining_for_pv <= 0:
+                return ChargingDecision(
+                    0, "Overnight grid charging complete — target reached",
+                )
             return ChargingDecision(
-                self.eco_power_w,
-                f"Night charging window: need {energy_needed:.1f} kWh in "
-                f"{hours_until_departure:.1f}h ({hours_needed:.1f}h + buffer)",
+                0,
+                f"Grid portion done ({ctx.overnight_grid_kwh_charged:.1f}/"
+                f"{grid_portion_kwh:.1f} kWh) — waiting for morning PV "
+                f"({remaining_for_pv:.1f} kWh remaining, "
+                f"forecast {pv_morning_usable:.1f} kWh usable)",
             )
 
-        # Too early — wait to minimize grid usage
-        wait_hours = hours_until_departure - hours_needed_with_buffer
+        # --- Still need to charge from grid overnight ---
+        grid_remaining = grid_portion_kwh - ctx.overnight_grid_kwh_charged
+
+        hours_until_departure = self._hours_until(ctx.departure_time, ctx.now)
+
+        # Calculate when we need to start grid charging to finish the grid portion
+        charging_power_kw = self.eco_power_w / 1000.0
+        hours_for_grid = grid_remaining / charging_power_kw
+        hours_needed_with_buffer = hours_for_grid + self.night_charging_buffer_hours
+
+        # We want grid charging done by ~06:00 so we can pause and wait for PV
+        # (but also need a deadline against departure)
+        grid_deadline_hour = min(6.0, departure_hour - pv_hours)
+        hours_until_grid_deadline = self._hours_until_hour(grid_deadline_hour, ctx.now)
+        effective_deadline = min(hours_until_departure, hours_until_grid_deadline)
+
+        if effective_deadline <= hours_needed_with_buffer:
+            return ChargingDecision(
+                self.eco_power_w,
+                f"Overnight grid charging: {grid_remaining:.1f}/{grid_portion_kwh:.1f} kWh "
+                f"(PV will handle {pv_morning_usable:.1f} kWh tomorrow morning) | "
+                f"charged {ctx.overnight_grid_kwh_charged:.1f} kWh so far",
+            )
+
+        # Too early — wait
+        wait_hours = effective_deadline - hours_needed_with_buffer
+        start_time = (ctx.now + timedelta(hours=wait_hours)).strftime("%H:%M")
         return ChargingDecision(
             0,
-            f"Nighttime: waiting {wait_hours:.1f}h before charging "
-            f"({energy_needed:.1f} kWh needed, starts at "
-            f"{(ctx.now + timedelta(hours=wait_hours)).strftime('%H:%M')})",
+            f"Overnight: waiting {wait_hours:.1f}h (starts ~{start_time}) | "
+            f"Plan: {grid_portion_kwh:.1f} kWh grid + "
+            f"{pv_morning_usable:.1f} kWh PV morning | "
+            f"Total needed: {energy_needed:.1f} kWh",
         )
+
+    def _morning_pv_escalation(self, ctx: ChargingContext) -> ChargingDecision | None:
+        """Deadline escalation: if by 11:00 we're not on track, go full grid power.
+
+        Returns a decision if escalation is needed, None otherwise.
+        """
+        if not ctx.full_by_morning or not ctx.departure_time:
+            return None
+
+        current_hour = ctx.now.hour
+        if current_hour < self.morning_escalation_hour:
+            return None
+
+        energy_needed = ctx.energy_needed_kwh
+        if energy_needed <= 0:
+            return None
+
+        hours_left = self._hours_until(ctx.departure_time, ctx.now)
+        if hours_left <= 0:
+            return ChargingDecision(
+                self.max_power_w,
+                f"Past departure — fast charging remaining {energy_needed:.1f} kWh",
+            )
+
+        # Required power to finish on time
+        required_w = (energy_needed / hours_left) * 1000 * 1.1
+
+        # If PV surplus alone can handle it, no escalation needed
+        pv_only = self._calc_pv_only_available(ctx)
+        if pv_only >= required_w:
+            return None
+
+        # Need grid assistance — escalate
+        escalated = self._clamp(int(required_w))
+        if escalated <= 0:
+            return None
+
+        return ChargingDecision(
+            escalated,
+            f"Morning escalation ({current_hour}:00): {energy_needed:.1f} kWh "
+            f"in {hours_left:.1f}h → need {required_w:.0f} W "
+            f"(PV only provides {pv_only:.0f} W, adding grid)",
+            deadline_active=True,
+            deadline_hours_left=round(hours_left, 2),
+            deadline_required_w=round(required_w, 1),
+            energy_remaining_kwh=round(energy_needed, 2),
+        )
+
+    @staticmethod
+    def _hours_until_hour(target_hour: float, now: datetime) -> float:
+        """Hours from now until a given hour (today or tomorrow)."""
+        current = now.hour + now.minute / 60.0
+        if target_hour > current:
+            return target_hour - current
+        return (24.0 - current) + target_hour
 
     # ------------------------------------------------------------------
     # Full-by-morning deadline escalation

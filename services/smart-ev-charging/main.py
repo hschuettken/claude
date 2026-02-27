@@ -37,6 +37,9 @@ class SmartEVChargingService(BaseService):
         self.settings: EVChargingSettings  # narrow type for IDE
         self.tz = ZoneInfo(self.settings.timezone)
         self._current_trace_id: str = ""
+        # Track overnight grid charging (reset at 22:00 when new overnight session starts)
+        self._overnight_grid_kwh_start: float = 0.0
+        self._overnight_session_active: bool = False
 
     async def run(self) -> None:
         self.mqtt.connect_background()
@@ -75,6 +78,8 @@ class SmartEVChargingService(BaseService):
             battery_capacity_kwh=self.settings.battery_capacity_kwh,
             battery_target_eod_soc_pct=self.settings.battery_target_eod_soc_pct,
             pv_forecast_good_kwh=self.settings.pv_forecast_good_kwh,
+            pv_morning_fraction=self.settings.pv_morning_fraction,
+            charger_efficiency=self.settings.charger_efficiency,
         )
 
         self.logger.info(
@@ -146,6 +151,9 @@ class SmartEVChargingService(BaseService):
         pv_forecast_remaining = await self._read_float(
             self.settings.pv_forecast_remaining_entity,
         )
+        pv_forecast_tomorrow = await self._read_float(
+            self.settings.pv_forecast_tomorrow_entity,
+        )
 
         # Household consumption (for monitoring)
         house_power = await self._read_float(self.settings.house_power_entity)
@@ -164,6 +172,30 @@ class SmartEVChargingService(BaseService):
             self.settings.target_soc_entity, default=80.0,
         )
 
+        # --- Overnight grid charging tracker ---
+        now = datetime.now(self.tz)
+        current_hour = now.hour
+        # Start new overnight session at 22:00
+        if current_hour == 22 and not self._overnight_session_active:
+            self._overnight_session_active = True
+            self._overnight_grid_kwh_start = wallbox.session_energy_kwh
+            self.logger.info(
+                "overnight_session_started",
+                session_energy_at_start=wallbox.session_energy_kwh,
+            )
+        # End overnight session at 08:00 (PV takes over)
+        if current_hour >= 8 and current_hour < 22 and self._overnight_session_active:
+            self._overnight_session_active = False
+            self.logger.info(
+                "overnight_session_ended",
+                grid_kwh_charged=wallbox.session_energy_kwh - self._overnight_grid_kwh_start,
+            )
+        overnight_grid_kwh = 0.0
+        if self._overnight_session_active or (5 <= current_hour < 8):
+            overnight_grid_kwh = max(
+                0.0, wallbox.session_energy_kwh - self._overnight_grid_kwh_start,
+            )
+
         ctx = ChargingContext(
             mode=mode,
             wallbox=wallbox,
@@ -172,6 +204,7 @@ class SmartEVChargingService(BaseService):
             battery_power_w=battery_power,
             battery_soc_pct=battery_soc,
             pv_forecast_remaining_kwh=pv_forecast_remaining,
+            pv_forecast_tomorrow_kwh=pv_forecast_tomorrow,
             house_power_w=house_power,
             battery_capacity_kwh=self.settings.battery_capacity_kwh,
             battery_target_eod_soc_pct=self.settings.battery_target_eod_soc_pct,
@@ -182,7 +215,8 @@ class SmartEVChargingService(BaseService):
             ev_soc_pct=ev_soc,
             ev_battery_capacity_kwh=ev_battery_capacity,
             ev_target_soc_pct=ev_target_soc,
-            now=datetime.now(self.tz),
+            overnight_grid_kwh_charged=overnight_grid_kwh,
+            now=now,
         )
 
         # 2) Decide target power
@@ -311,6 +345,8 @@ class SmartEVChargingService(BaseService):
             "ev_soc_pct": round(ctx.ev_soc_pct, 1) if ctx.ev_soc_pct is not None else None,
             "ev_target_soc_pct": round(ctx.ev_target_soc_pct),
             "pv_forecast_remaining_kwh": round(ctx.pv_forecast_remaining_kwh, 1),
+            "pv_forecast_tomorrow_kwh": round(ctx.pv_forecast_tomorrow_kwh, 1),
+            "overnight_grid_kwh_charged": round(ctx.overnight_grid_kwh_charged, 1),
             "full_by_morning": ctx.full_by_morning,
             "reason": decision.reason,
             # --- Enhanced decision context ---
