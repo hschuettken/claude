@@ -48,7 +48,7 @@ class VehicleState:
     @property
     def is_plugged_in(self) -> bool:
         return self.plug_state.lower() in (
-            "connected", "locked", "angeschlossen",
+            "connected", "locked", "angeschlossen", "on",
         )
 
     @property

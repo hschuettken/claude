@@ -232,8 +232,14 @@ class ChargingPlanner:
         audi_vin: str = "",
         audi_set_target_soc: bool = True,
         wallbox_vehicle_state_entity: str = "",
+        target_soc_entity: str = "",
     ) -> None:
-        """Write the immediate plan to HA input helpers and optionally set Audi target SoC."""
+        """Write the immediate plan to HA input helpers and optionally set Audi target SoC.
+
+        Respects manual overrides: if the current HA departure time or target
+        SoC was set to a value that differs from the plan AND from the last
+        value this planner wrote, assume manual override and preserve it.
+        """
         immediate = plan.immediate_action
         if not immediate:
             return
@@ -241,6 +247,48 @@ class ChargingPlanner:
         if not plan.vehicle_plugged_in:
             logger.info("vehicle_not_plugged_in, skipping_ha_update")
             return
+
+        # --- Detect manual overrides ---
+        # Read current HA values to detect if user/orchestrator changed them
+        manual_departure = False
+        manual_target_soc = False
+
+        try:
+            current_departure_state = await self._ha.get_state(departure_time_entity)
+            current_dep_str = current_departure_state.get("state", "")
+            if current_dep_str and current_dep_str not in ("unavailable", "unknown"):
+                parts = current_dep_str.split(":")
+                current_dep = time(int(parts[0]), int(parts[1]))
+                plan_dep = immediate.departure_time
+                last_dep = getattr(self, "_last_applied_departure", None)
+                # If current differs from both plan and last-applied → manual override
+                if plan_dep and current_dep != plan_dep and current_dep != last_dep:
+                    manual_departure = True
+                    logger.info(
+                        "manual_departure_override_detected",
+                        current=current_dep_str,
+                        plan=plan_dep.strftime("%H:%M") if plan_dep else None,
+                        last_applied=last_dep.strftime("%H:%M") if last_dep else None,
+                    )
+        except Exception:
+            pass
+
+        if target_soc_entity:
+            try:
+                current_soc_state = await self._ha.get_state(target_soc_entity)
+                current_soc_val = current_soc_state.get("state", "")
+                if current_soc_val not in ("unavailable", "unknown", ""):
+                    current_soc = float(current_soc_val)
+                    last_soc = getattr(self, "_last_applied_target_soc", None)
+                    if current_soc != last_soc and current_soc > (plan.current_soc_pct + 1):
+                        manual_target_soc = True
+                        logger.info(
+                            "manual_target_soc_override_detected",
+                            current=current_soc,
+                            last_applied=last_soc,
+                        )
+            except Exception:
+                pass
 
         # Calculate target SoC for Audi (current SoC + energy needed)
         target_soc_pct = None
@@ -272,15 +320,18 @@ class ChargingPlanner:
         except Exception:
             logger.exception("set_full_by_morning_failed")
 
-        # Set departure time
-        if immediate.departure_time:
+        # Set departure time (respect manual override)
+        if immediate.departure_time and not manual_departure:
             try:
                 await self._ha.call_service("input_datetime", "set_datetime", {
                     "entity_id": departure_time_entity,
                     "time": immediate.departure_time.strftime("%H:%M:%S"),
                 })
+                self._last_applied_departure = immediate.departure_time
             except Exception:
                 logger.exception("set_departure_time_failed")
+        elif manual_departure:
+            logger.info("departure_time_preserved_manual_override")
 
         # Set target energy
         if immediate.energy_to_charge_kwh > 0:

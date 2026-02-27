@@ -9,6 +9,16 @@ energy:
 tts:
   - platform: google_translate
 
+lovelace:
+  mode: storage
+  dashboards:
+    lovelace-ev-energy:
+      mode: yaml
+      title: "⚡ EV & Energy"
+      icon: mdi:ev-station
+      show_in_sidebar: true
+      filename: dashboards/ev-pv-dashboard.yaml
+
 automation: !include automations.yaml
 script: !include scripts.yaml
 scene: !include scenes.yaml

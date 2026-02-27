@@ -36,7 +36,7 @@ class EVForecastSettings(BaseSettings):
     ev_soc_entity: str = "sensor.audi_a6_avant_e_tron_state_of_charge"
     ev_range_entity: str = "sensor.audi_a6_avant_e_tron_range"
     ev_charging_entity: str = "sensor.audi_a6_avant_e_tron_charging_state"
-    ev_plug_entity: str = "sensor.audi_a6_avant_e_tron_plug_state"
+    ev_plug_entity: str = "binary_sensor.audi_a6_avant_e_tron_plug_state"
     ev_mileage_entity: str = "sensor.audi_a6_avant_e_tron_mileage"
     ev_remaining_charge_entity: str = "sensor.audi_a6_avant_e_tron_remaining_charge_time"
     ev_active_account_entity: str = ""  # Only needed in dual-account mode
@@ -107,6 +107,7 @@ class EVForecastSettings(BaseSettings):
     full_by_morning_entity: str = "input_boolean.ev_full_by_morning"
     departure_time_entity: str = "input_datetime.ev_departure_time"
     target_energy_entity: str = "input_number.ev_target_energy_kwh"
+    target_soc_entity: str = "input_number.ev_target_soc_pct"
     
     # Audi Connect integration (optional, leave empty to disable)
     audi_vin: str = ""  # Vehicle VIN for audiconnect.set_target_soc (auto-detected if empty)

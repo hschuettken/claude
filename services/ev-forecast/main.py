@@ -348,6 +348,7 @@ class EVForecastService:
                     audi_vin=self.settings.audi_vin,
                     audi_set_target_soc=self.settings.audi_set_target_soc,
                     wallbox_vehicle_state_entity=self.settings.wallbox_vehicle_state_entity,
+                    target_soc_entity=self.settings.target_soc_entity,
                 )
 
             # Publish any pending clarifications to orchestrator
