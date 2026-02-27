@@ -108,6 +108,10 @@ class ProactiveEngine:
                 asyncio.create_task(self._memory_consolidation_loop(shutdown_event))
             )
 
+        # Load existing EV calendar events to prevent duplicates
+        if self._gcal and self._settings.google_calendar_orchestrator_id:
+            await self._load_existing_ev_events()
+
         logger.info(
             "proactive_started",
             morning=self._settings.enable_morning_briefing,
@@ -123,6 +127,29 @@ class ProactiveEngine:
             except asyncio.CancelledError:
                 pass
         self._tasks.clear()
+
+    async def _load_existing_ev_events(self) -> None:
+        """Load existing EV calendar events from Google Calendar.
+        
+        Populates self._ev_events dict to prevent creating duplicates on restart.
+        """
+        try:
+            cal_id = self._settings.google_calendar_orchestrator_id
+            # Get events for next 14 days
+            events = await self._gcal.get_events(cal_id, days_ahead=14, max_results=50)
+            
+            for event in events:
+                summary = event.get("summary", "")
+                if summary.startswith("EV:"):
+                    start = event.get("start", "")
+                    if start:  # start is YYYY-MM-DD for all-day events
+                        self._ev_events[start] = {
+                            "event_id": event.get("id", ""),
+                            "summary": summary
+                        }
+                        logger.info("ev_calendar_event_loaded", date=start, summary=summary)
+        except Exception:
+            logger.exception("failed_to_load_existing_ev_events")
 
     # ------------------------------------------------------------------
     # Briefing scheduler
@@ -306,6 +333,29 @@ class ProactiveEngine:
             existing = self._ev_events.get(date_str, {})
             if existing.get("summary") == summary:
                 continue
+
+            # Double-check calendar for existing events on this date (safety net)
+            # This prevents duplicates if _ev_events dict was cleared/lost
+            try:
+                cal_events = await self._gcal.get_events(
+                    cal_id, days_ahead=14, max_results=50
+                )
+                for evt in cal_events:
+                    if evt.get("start") == date_str and evt.get("summary") == summary:
+                        # Found duplicate in calendar - update our dict and skip
+                        self._ev_events[date_str] = {
+                            "event_id": evt.get("id", ""),
+                            "summary": summary
+                        }
+                        logger.info("ev_calendar_event_exists_skipped", date=date_str, summary=summary)
+                        # Use a flag to skip creation after this loop
+                        existing = self._ev_events[date_str]
+                        break
+                if existing.get("summary") == summary:
+                    continue
+            except Exception:
+                logger.debug("ev_calendar_query_failed", date=date_str)
+                # If query fails, proceed with creation (may create duplicate but logged)
 
             # Delete old event if exists (plan changed)
             if existing.get("event_id"):
