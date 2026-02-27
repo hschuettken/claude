@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,10 @@ if TYPE_CHECKING:
 import structlog
 
 logger = structlog.get_logger()
+
+# Debounce: once vehicle is detected as connected, keep it connected
+# for at least this many seconds before marking as disconnected.
+VEHICLE_DEBOUNCE_SECONDS = 300  # 5 minutes
 
 # Amtron vehicle state codes (register 122)
 VEHICLE_STATE_NO_VEHICLE = "1"      # A — No vehicle
@@ -59,14 +64,22 @@ class WallboxController:
         self._energy_session_entity = energy_session_entity
         self._hems_power_number = hems_power_number
         self._last_set_power: int | None = None
+        # Debounce state for vehicle detection
+        self._last_connected_time: float = 0.0
+        self._debounced_connected: bool = False
 
     async def read_state(self) -> WallboxState:
-        """Read current wallbox state from HA entities."""
+        """Read current wallbox state from HA entities.
+
+        Vehicle state is debounced: once connected, stays connected for
+        at least VEHICLE_DEBOUNCE_SECONDS before marking as disconnected.
+        This prevents flapping between "Connected" and "No vehicle".
+        """
         vehicle_raw = await self._get_state(self._vehicle_state_entity, "0")
         power = await self._get_float_state(self._power_entity)
         energy = await self._get_float_state(self._energy_session_entity)
 
-        vehicle_connected = vehicle_raw in (
+        raw_connected = vehicle_raw in (
             VEHICLE_STATE_CONNECTED,
             VEHICLE_STATE_CHARGING,
             VEHICLE_STATE_CHARGING_VENT,
@@ -76,9 +89,30 @@ class WallboxController:
             VEHICLE_STATE_CHARGING_VENT,
         )
 
+        # Debounce vehicle connected state
+        now = time.monotonic()
+        if raw_connected:
+            self._last_connected_time = now
+            self._debounced_connected = True
+        elif self._debounced_connected:
+            # Vehicle reports disconnected — hold connected state for debounce period
+            elapsed = now - self._last_connected_time
+            if elapsed < VEHICLE_DEBOUNCE_SECONDS:
+                logger.debug(
+                    "vehicle_state_debounced",
+                    raw=vehicle_raw,
+                    held_for=f"{elapsed:.0f}s",
+                    debounce=VEHICLE_DEBOUNCE_SECONDS,
+                )
+                # Override: keep as connected
+                vehicle_raw = VEHICLE_STATE_CONNECTED
+                raw_connected = True
+            else:
+                self._debounced_connected = False
+
         return WallboxState(
             vehicle_state_raw=vehicle_raw,
-            vehicle_connected=vehicle_connected,
+            vehicle_connected=raw_connected,
             vehicle_charging=vehicle_charging,
             current_power_w=power,
             session_energy_kwh=energy,
