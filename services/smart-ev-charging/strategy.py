@@ -261,8 +261,16 @@ class ChargingStrategy:
 
         # Economic hysteresis: lower start threshold when EV SoC is low
         # (more valuable to charge car than export to grid)
+        # Also eliminate hysteresis when battery SoC >= 80% — battery can
+        # easily bridge small dips, no need for a conservative threshold.
         ev_soc_low = ctx.ev_soc_pct is not None and ctx.ev_soc_pct < 50
-        hysteresis_reduction = 150 if ev_soc_low else 0
+        battery_high = ctx.battery_soc_pct >= 80
+        if battery_high:
+            hysteresis_reduction = self.start_hysteresis_w  # eliminate entirely
+        elif ev_soc_low:
+            hysteresis_reduction = 150
+        else:
+            hysteresis_reduction = 0
 
         threshold = (
             self.min_power_w
@@ -369,6 +377,24 @@ class ChargingStrategy:
         # isn't reached, charge at min power using battery + PV.
         if ctx.grid_power_w > 200 and not ctx.target_reached:
             return self._grid_export_prevention(ctx, pv)
+
+        # --- Evening grid charging fallback (17:00-22:00) ---
+        # After sunset, PV is gone but nighttime grid charging doesn't start
+        # until 22:00. Bridge this gap by charging at min power from grid.
+        if (
+            17 <= current_hour < 22
+            and not ctx.target_reached
+            and ctx.full_by_morning
+            and ctx.departure_time is not None
+            and ctx.energy_needed_kwh > 0
+        ):
+            hours_left = self._hours_until(ctx.departure_time, ctx.now)
+            return ChargingDecision(
+                self.min_power_w,
+                f"Smart: Evening grid charging (no PV, "
+                f"{ctx.energy_needed_kwh:.1f} kWh needed, "
+                f"departure in {hours_left:.1f} hours)",
+            )
 
         return ChargingDecision(
             0, f"Smart: {pv.reason}",
