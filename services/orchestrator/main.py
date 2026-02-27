@@ -212,7 +212,12 @@ class OrchestratorService(BaseService):
         self._ev_state["plan"] = payload
         # Update calendar events asynchronously
         if self._gcal and self.settings.google_calendar_orchestrator_id:
-            asyncio.create_task(self._update_ev_calendar_events(payload))
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._update_ev_calendar_events(payload))
+            except RuntimeError:
+                # No running loop - skip calendar update
+                self.logger.warning("ev_calendar_update_skipped", reason="no_event_loop")
 
     def _on_ev_clarification(self, topic: str, payload: dict) -> None:
         self._ev_state["pending_clarifications"] = payload.get("clarifications", [])
