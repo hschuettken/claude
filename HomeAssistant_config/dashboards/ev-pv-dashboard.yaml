@@ -14,7 +14,7 @@ views:
         cards:
           # --- Big SOC Gauge ---
           - type: gauge
-            entity: sensor.audi_a6_avant_e_tron_state_of_charge_comb
+            entity: sensor.audi_a6_avant_e_tron_state_of_charge
             name: "Battery"
             unit: "%"
             needle: true
@@ -28,31 +28,31 @@ views:
           # --- Key Stats ---
           - type: entities
             entities:
-              - entity: sensor.audi_a6_avant_e_tron_state_of_charge_comb
+              - entity: sensor.audi_a6_avant_e_tron_state_of_charge
                 name: "State of Charge"
                 icon: mdi:car-battery
-              - entity: sensor.audi_a6_avant_e_tron_target_state_of_charge_comb
+              - entity: sensor.audi_a6_avant_e_tron_target_state_of_charge
                 name: "Target SOC"
                 icon: mdi:battery-charging-high
-              - entity: sensor.audi_a6_avant_e_tron_range_comb
+              - entity: sensor.audi_a6_avant_e_tron_range
                 name: "Range"
                 icon: mdi:map-marker-distance
-              - entity: sensor.audi_a6_avant_e_tron_charging_power_comb
+              - entity: sensor.audi_a6_avant_e_tron_charging_power
                 name: "Charging Power"
                 icon: mdi:flash
-              - entity: sensor.audi_a6_avant_e_tron_charging_state_comb
+              - entity: sensor.audi_a6_avant_e_tron_charging_state
                 name: "Charging State"
                 icon: mdi:ev-plug-type2
-              - entity: sensor.audi_a6_avant_e_tron_plug_state_comb
+              - entity: binary_sensor.audi_a6_avant_e_tron_plug_state
                 name: "Plug State"
                 icon: mdi:power-plug
-              - entity: sensor.audi_a6_avant_e_tron_remaining_charge_time_comb
+              - entity: sensor.audi_a6_avant_e_tron_remaining_charge_time
                 name: "Time to Full"
                 icon: mdi:battery-clock-outline
-              - entity: sensor.audi_a6_avant_e_tron_mileage_comb
+              - entity: sensor.audi_a6_avant_e_tron_mileage
                 name: "Mileage"
                 icon: mdi:counter
-              - entity: sensor.audi_a6_avant_e_tron_active_account_comb
+              - entity: sensor.ev_forecast_active_audi_account
                 name: "Active Driver"
                 icon: mdi:account-check
 
@@ -85,14 +85,34 @@ views:
                 name: "Battery Capacity"
                 icon: mdi:car-battery
 
+          # --- Smart Charging Status ---
+          - type: entities
+            title: "Smart Charging"
+            entities:
+              - entity: sensor.smart_ev_charging_kwh_remaining
+                name: "kWh Remaining"
+                icon: mdi:battery-charging
+              - entity: sensor.smart_ev_charging_estimated_completion_time
+                name: "Est. Completion"
+                icon: mdi:clock-check-outline
+              - entity: sensor.smart_ev_charging_energy_needed
+                name: "Energy Needed"
+                icon: mdi:battery-charging-outline
+              - entity: binary_sensor.smart_ev_charging_departure_passed
+                name: "Departure Passed"
+                icon: mdi:car-clock
+              - entity: sensor.smart_ev_charging_decision_reasoning
+                name: "Decision"
+                icon: mdi:head-cog-outline
+
           # --- Wallbox (Amtron) Status ---
           - type: entities
             title: "Amtron Wallbox"
             entities:
-              - entity: sensor.amtron_vehicle_state
+              - entity: sensor.amtron_vehicle_state_tpl
                 name: "Vehicle State"
                 icon: mdi:car-electric
-              - entity: sensor.amtron_availability
+              - entity: sensor.amtron_availability_tpl
                 name: "Availability"
                 icon: mdi:check-circle
               - entity: sensor.amtron_meter_total_power_w
@@ -104,19 +124,19 @@ views:
               - entity: number.amtron_hems_power_limit_w
                 name: "HEMS Power Limit"
                 icon: mdi:speedometer
-              - entity: sensor.amtron_relay_state
+              - entity: sensor.amtron_relay_state_tpl
                 name: "Relay"
                 icon: mdi:electric-switch
-              - entity: sensor.amtron_plug_lock
+              - entity: sensor.amtron_plug_lock_tpl
                 name: "Plug Lock"
                 icon: mdi:lock
               - entity: switch.amtron_pause_charging
                 name: "Pause Charging"
                 icon: mdi:pause-circle
-              - entity: sensor.amtron_charged_duration_hms
+              - entity: sensor.amtron_charged_duration_hh_mm_ss_tpl
                 name: "Charge Duration"
                 icon: mdi:timer
-              - entity: sensor.amtron_firmware_version
+              - entity: sensor.amtron_firmware_version_full_tpl
                 name: "Firmware"
                 icon: mdi:chip
 
@@ -201,7 +221,7 @@ views:
             title: "EV SOC (24h)"
             hours_to_show: 24
             entities:
-              - entity: sensor.audi_a6_avant_e_tron_state_of_charge_comb
+              - entity: sensor.audi_a6_avant_e_tron_state_of_charge
                 name: "EV SOC"
 
           # --- PV Production History ---
@@ -254,19 +274,19 @@ views:
             title: "Security"
             columns: 4
             entities:
-              - entity: binary_sensor.audi_a6_avant_e_tron_doors_locked_comb
+              - entity: binary_sensor.audi_a6_avant_e_tron_doors_lock
                 name: "Locked"
-              - entity: binary_sensor.audi_a6_avant_e_tron_doors_comb
+              - entity: binary_sensor.audi_a6_avant_e_tron_doors
                 name: "Doors"
-              - entity: binary_sensor.audi_a6_avant_e_tron_windows_comb
+              - entity: binary_sensor.audi_a6_avant_e_tron_windows
                 name: "Windows"
-              - entity: binary_sensor.audi_a6_avant_e_tron_trunk_comb
+              - entity: binary_sensor.audi_a6_avant_e_tron_trunk
                 name: "Trunk"
-              - entity: binary_sensor.audi_a6_avant_e_tron_plugged_in_comb
+              - entity: binary_sensor.audi_a6_avant_e_tron_plug_state
                 name: "Plugged In"
-              - entity: binary_sensor.audi_a6_avant_e_tron_is_charging_comb
+              - entity: binary_sensor.smart_ev_charging_vehicle_connected
                 name: "Charging"
-              - entity: sensor.audi_a6_avant_e_tron_climatisation_state_comb
+              - entity: sensor.audi_a6_avant_e_tron_climatisation_state
                 name: "Climate"
-              - entity: sensor.audi_a6_avant_e_tron_external_power_comb
+              - entity: sensor.audi_a6_avant_e_tron_external_power
                 name: "Ext. Power"
