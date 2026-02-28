@@ -61,7 +61,7 @@ class EVChargingSettings(BaseSettings):
 
     # --- Wallbox power limits ---
     wallbox_max_power_w: int = 11000  # 16A x 3ph x 230V
-    wallbox_min_power_w: int = 3600   # ~5.2A x 3ph x 230V (lowered for battery-assist)
+    wallbox_min_power_w: int = 4000   # ~5.2A x 3ph x 230V (lowered for battery-assist)
     eco_charge_power_w: int = 5000    # ~7A x 3ph x 230V
 
     # --- PV surplus control ---
