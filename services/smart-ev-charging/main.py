@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -37,9 +37,20 @@ class SmartEVChargingService(BaseService):
         self.settings: EVChargingSettings  # narrow type for IDE
         self.tz = ZoneInfo(self.settings.timezone)
         self._current_trace_id: str = ""
-        # Track overnight grid charging (reset at 22:00 when new overnight session starts)
-        self._overnight_grid_kwh_start: float = 0.0
+
+        # --- BUG #2 FIX: Cumulative grid kWh tracker ---
+        # Persists across plug cycles, reset only on new overnight session start
+        self._cumulative_grid_kwh: float = 0.0
+        self._last_session_energy: float = 0.0  # track deltas
+        self._grid_charging_active: bool = False  # is current cycle grid-charging?
         self._overnight_session_active: bool = False
+
+        # --- BUG #3: Car target SOC drift check ---
+        self._cycle_count: int = 0
+        self._last_soc_push_time: float = 0.0
+
+        # --- Feature #6: Plug/unplug resilience ---
+        self._last_vehicle_connected: bool = False
 
     async def run(self) -> None:
         self.mqtt.connect_background()
@@ -92,7 +103,7 @@ class SmartEVChargingService(BaseService):
             battery_max_assist=self.settings.battery_ev_assist_max_w,
         )
 
-        # Control loop — runs until SIGTERM / SIGINT
+        # Control loop
         while not self._shutdown_event.is_set():
             try:
                 await self._control_cycle(charger, strategy)
@@ -101,7 +112,6 @@ class SmartEVChargingService(BaseService):
             finally:
                 self._touch_healthcheck()
 
-            # Wait for shutdown, force-cycle signal, or normal interval
             try:
                 done, _ = await asyncio.wait(
                     [
@@ -117,7 +127,7 @@ class SmartEVChargingService(BaseService):
                     self._force_cycle.clear()
                     self.logger.info("forced_cycle_triggered")
             except asyncio.TimeoutError:
-                pass  # normal — interval elapsed
+                pass
 
     # ------------------------------------------------------------------
     # Control cycle
@@ -129,6 +139,7 @@ class SmartEVChargingService(BaseService):
         strategy: ChargingStrategy,
     ) -> None:
         """Single iteration: read → decide → apply → publish."""
+        self._cycle_count += 1
 
         # 1) Read all inputs from HA
         mode = await self._read_charge_mode()
@@ -139,15 +150,9 @@ class SmartEVChargingService(BaseService):
         departure_time = await self._read_time(self.settings.departure_time_entity)
         target_energy = await self._read_float(self.settings.target_energy_entity)
 
-        # Home battery state
-        battery_power = await self._read_float(
-            self.settings.battery_power_entity,
-        )
-        battery_soc = await self._read_float(
-            self.settings.battery_soc_entity,
-        )
+        battery_power = await self._read_float(self.settings.battery_power_entity)
+        battery_soc = await self._read_float(self.settings.battery_soc_entity)
 
-        # PV forecast (defaults to 0 if unavailable)
         pv_forecast_remaining = await self._read_float(
             self.settings.pv_forecast_remaining_entity,
         )
@@ -155,15 +160,11 @@ class SmartEVChargingService(BaseService):
             self.settings.pv_forecast_tomorrow_entity,
         )
 
-        # Household consumption (for monitoring)
         house_power = await self._read_float(self.settings.house_power_entity)
 
-        # EV battery SoC (from car, e.g. Audi Connect) — None if not configured
         ev_soc: float | None = None
         if self.settings.ev_soc_entity:
-            ev_soc = await self._read_float_optional(
-                self.settings.ev_soc_entity,
-            )
+            ev_soc = await self._read_float_optional(self.settings.ev_soc_entity)
 
         ev_battery_capacity = await self._read_float(
             self.settings.ev_battery_capacity_entity, default=77.0,
@@ -172,29 +173,70 @@ class SmartEVChargingService(BaseService):
             self.settings.target_soc_entity, default=80.0,
         )
 
-        # --- Overnight grid charging tracker ---
         now = datetime.now(self.tz)
+
+        # --- Feature #6: Plug/unplug resilience ---
+        vehicle_just_plugged = (
+            wallbox.vehicle_connected and not self._last_vehicle_connected
+        )
+        if vehicle_just_plugged:
+            self.logger.info(
+                "vehicle_replugged",
+                ev_soc=round(ev_soc) if ev_soc is not None else None,
+                ev_target_soc=round(ev_target_soc),
+                mode=mode.value,
+                full_by_morning=full_by_morning,
+                session_energy_kwh=round(wallbox.session_energy_kwh, 2),
+            )
+            # Force immediate re-evaluation (already in a cycle, so just log)
+        self._last_vehicle_connected = wallbox.vehicle_connected
+
+        # --- BUG #2 FIX: Cumulative grid kWh tracker ---
+        # Track grid charging based on power deltas, not session energy
         current_hour = now.hour
+
         # Start new overnight session at 22:00
         if current_hour == 22 and not self._overnight_session_active:
             self._overnight_session_active = True
-            self._overnight_grid_kwh_start = wallbox.session_energy_kwh
+            self._cumulative_grid_kwh = 0.0
+            self._last_session_energy = wallbox.session_energy_kwh
             self.logger.info(
                 "overnight_session_started",
                 session_energy_at_start=wallbox.session_energy_kwh,
             )
-        # End overnight session at 08:00 (PV takes over)
-        if current_hour >= 8 and current_hour < 22 and self._overnight_session_active:
+
+        # End overnight session at 08:00
+        if 8 <= current_hour < 22 and self._overnight_session_active:
             self._overnight_session_active = False
             self.logger.info(
                 "overnight_session_ended",
-                grid_kwh_charged=wallbox.session_energy_kwh - self._overnight_grid_kwh_start,
+                cumulative_grid_kwh=round(self._cumulative_grid_kwh, 2),
             )
-        overnight_grid_kwh = 0.0
-        if self._overnight_session_active or (5 <= current_hour < 8):
-            overnight_grid_kwh = max(
-                0.0, wallbox.session_energy_kwh - self._overnight_grid_kwh_start,
+
+        # Track grid charging increments (works across unplug/replug)
+        # If session energy went DOWN (replug reset), don't subtract
+        session_delta = wallbox.session_energy_kwh - self._last_session_energy
+        if session_delta < 0:
+            # Session was reset (unplug/replug) — ignore the negative delta
+            session_delta = 0.0
+        if self._grid_charging_active and session_delta > 0:
+            self._cumulative_grid_kwh += session_delta
+        self._last_session_energy = wallbox.session_energy_kwh
+
+        # Determine if current charging is grid-based (nighttime or grid fallback)
+        # We'll set this AFTER the decision so it's used next cycle
+        overnight_grid_kwh = self._cumulative_grid_kwh
+
+        # --- BUG #1/#4: Determine if departure has passed ---
+        departure_passed = False
+        if departure_time is not None:
+            dep_dt = now.replace(
+                hour=departure_time.hour,
+                minute=departure_time.minute,
+                second=0,
+                microsecond=0,
             )
+            departure_passed = dep_dt <= now
 
         ctx = ChargingContext(
             mode=mode,
@@ -208,7 +250,7 @@ class SmartEVChargingService(BaseService):
             house_power_w=house_power,
             battery_capacity_kwh=self.settings.battery_capacity_kwh,
             battery_target_eod_soc_pct=self.settings.battery_target_eod_soc_pct,
-            full_by_morning=full_by_morning,
+            full_by_morning=full_by_morning if not departure_passed else False,  # BUG #4
             departure_time=departure_time,
             target_energy_kwh=target_energy,
             session_energy_kwh=wallbox.session_energy_kwh,
@@ -217,12 +259,23 @@ class SmartEVChargingService(BaseService):
             ev_target_soc_pct=ev_target_soc,
             overnight_grid_kwh_charged=overnight_grid_kwh,
             now=now,
+            departure_passed=departure_passed,
         )
 
         # 2) Decide target power
         decision = strategy.decide(ctx)
 
-        # 3) Apply to wallbox (blocked in safe mode)
+        # Update grid charging flag for next cycle's tracking
+        # Grid charging = charging at night or during grid fallback (not PV surplus)
+        is_night = current_hour >= 22 or current_hour < 8
+        self._grid_charging_active = (
+            decision.target_power_w > 0
+            and (is_night or "grid" in decision.reason.lower())
+            and "pv surplus" not in decision.reason.lower()
+            and "pv resume" not in decision.reason.lower()
+        )
+
+        # 3) Apply to wallbox
         if not decision.skip_control:
             if await self.is_safe_mode():
                 self.logger.warning(
@@ -236,8 +289,26 @@ class SmartEVChargingService(BaseService):
             else:
                 await charger.set_power_limit(decision.target_power_w)
 
+        # --- BUG #3: Car target SOC drift check ---
+        if (
+            self._cycle_count % self.settings.car_target_soc_check_interval == 0
+            and wallbox.vehicle_connected
+        ):
+            await self._check_car_target_soc(ev_target_soc, now)
+
+        # --- Feature #5: Calculate and publish kWh remaining + ETA ---
+        kwh_remaining = ctx.energy_needed_kwh
+        estimated_completion: str | None = None
+        if decision.target_power_w > 0 and kwh_remaining > 0:
+            # Use actual current power for more accurate ETA
+            actual_power_kw = max(wallbox.current_power_w, decision.target_power_w) / 1000.0
+            if actual_power_kw > 0:
+                hours_to_complete = kwh_remaining / actual_power_kw
+                completion_dt = now + timedelta(hours=hours_to_complete)
+                estimated_completion = completion_dt.strftime("%H:%M")
+
         # 4) Publish status
-        self._publish_status(ctx, decision, house_power)
+        self._publish_status(ctx, decision, house_power, kwh_remaining, estimated_completion)
         self._touch_healthcheck()
 
         self.logger.info(
@@ -256,7 +327,40 @@ class SmartEVChargingService(BaseService):
             forecast_kwh=round(pv_forecast_remaining, 1),
             target_w=decision.target_power_w,
             reason=decision.reason,
+            departure_passed=departure_passed,
+            cumulative_grid_kwh=round(self._cumulative_grid_kwh, 2),
         )
+
+    # ------------------------------------------------------------------
+    # BUG #3: Car target SOC drift correction
+    # ------------------------------------------------------------------
+
+    async def _check_car_target_soc(self, desired_soc: float, now: datetime) -> None:
+        """Check if the car's target SOC matches our desired SOC, correct if not."""
+        # Cooldown check
+        elapsed = time.monotonic() - self._last_soc_push_time
+        if elapsed < self.settings.car_target_soc_cooldown_seconds:
+            return
+
+        car_target_soc = await self._read_float_optional(
+            self.settings.car_target_soc_entity,
+        )
+        if car_target_soc is None:
+            return  # Can't read car's target SOC
+
+        if abs(car_target_soc - desired_soc) >= 1.0:
+            self.logger.info(
+                "car_target_soc_corrected",
+                car=round(car_target_soc),
+                desired=round(desired_soc),
+            )
+            try:
+                await self.ha.call_service("script", "turn_on", {
+                    "entity_id": self.settings.car_target_soc_script,
+                })
+                self._last_soc_push_time = time.monotonic()
+            except Exception:
+                self.logger.exception("car_target_soc_push_failed")
 
     # ------------------------------------------------------------------
     # HA state readers
@@ -281,7 +385,6 @@ class SmartEVChargingService(BaseService):
             return default
 
     async def _read_float_optional(self, entity_id: str) -> float | None:
-        """Read a float sensor, returning None if unavailable."""
         try:
             state = await self.ha.get_state(entity_id)
             val = state.get("state", "")
@@ -319,6 +422,8 @@ class SmartEVChargingService(BaseService):
         ctx: ChargingContext,
         decision: ChargingDecision,
         house_power: float = 0.0,
+        kwh_remaining: float = 0.0,
+        estimated_completion: str | None = None,
     ) -> None:
         pv_available = max(
             0,
@@ -348,7 +453,11 @@ class SmartEVChargingService(BaseService):
             "pv_forecast_tomorrow_kwh": round(ctx.pv_forecast_tomorrow_kwh, 1),
             "overnight_grid_kwh_charged": round(ctx.overnight_grid_kwh_charged, 1),
             "full_by_morning": ctx.full_by_morning,
+            "departure_passed": ctx.departure_passed,
             "reason": decision.reason,
+            # --- Feature #5: kWh remaining + ETA ---
+            "kwh_remaining": round(kwh_remaining, 2),
+            "estimated_completion_time": estimated_completion,
             # --- Enhanced decision context ---
             "pv_surplus_w": round(decision.pv_surplus_w),
             "battery_assist_w": round(decision.battery_assist_w),
@@ -373,21 +482,21 @@ class SmartEVChargingService(BaseService):
         """Compose detailed human-readable reasoning for the current decision."""
         lines: list[str] = []
 
-        # Mode & vehicle
         lines.append(f"Mode: {ctx.mode.value} | Vehicle: {ctx.wallbox.vehicle_state_text}")
+
+        if ctx.departure_passed:
+            lines.append("⚠️ Departure time has passed — deadline cleared, PV surplus mode")
 
         if not ctx.wallbox.vehicle_connected:
             lines.append("→ No vehicle connected, nothing to do.")
             return "\n".join(lines)
 
-        # EV SoC info
         if ctx.ev_soc_pct is not None:
             lines.append(
                 f"EV SoC: {ctx.ev_soc_pct:.0f}% → target {ctx.ev_target_soc_pct:.0f}% | "
                 f"Energy needed: {ctx.energy_needed_kwh:.1f} kWh"
             )
 
-        # Energy balance
         grid_dir = "export" if ctx.grid_power_w > 0 else "import"
         bat_dir = "charging" if ctx.battery_power_w > 0 else "discharging"
         lines.append(
@@ -399,7 +508,6 @@ class SmartEVChargingService(BaseService):
             f"SoC {ctx.battery_soc_pct:.0f}%)"
         )
 
-        # PV surplus calculation
         if ctx.mode in (ChargeMode.PV_SURPLUS, ChargeMode.SMART):
             lines.append(
                 f"PV surplus: {decision.pv_surplus_w:.0f} W "
@@ -414,13 +522,11 @@ class SmartEVChargingService(BaseService):
             elif decision.battery_assist_reason:
                 lines.append(f"Battery assist: off — {decision.battery_assist_reason}")
 
-        # Forecast context
         lines.append(
             f"PV forecast remaining: {ctx.pv_forecast_remaining_kwh:.1f} kWh"
         )
 
-        # Full-by-morning / deadline
-        if ctx.full_by_morning:
+        if ctx.full_by_morning and not ctx.departure_passed:
             lines.append(
                 f"Full-by-morning: ON | Target: {ctx.target_energy_kwh:.0f} kWh | "
                 f"Charged: {ctx.wallbox.session_energy_kwh:.1f} kWh | "
@@ -434,7 +540,6 @@ class SmartEVChargingService(BaseService):
                     f"Required: {decision.deadline_required_w:.0f} W avg"
                 )
 
-        # Final decision
         if decision.skip_control:
             lines.append("→ Manual mode: not controlling wallbox")
         elif decision.target_power_w > 0:
@@ -446,26 +551,19 @@ class SmartEVChargingService(BaseService):
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
-    # MQTT auto-discovery
-    # ------------------------------------------------------------------
-
-    # ------------------------------------------------------------------
     # Orchestrator command handler
     # ------------------------------------------------------------------
 
     def _on_orchestrator_command(self, topic: str, payload: dict) -> None:
-        """Handle commands from the orchestrator service."""
         command = payload.get("command", "")
         self.logger.info("orchestrator_command", command=command)
 
         if command == "refresh":
-            # Trigger an immediate control cycle
             self._force_cycle.set()
         else:
             self.logger.debug("unknown_command", command=command)
 
     def _on_ev_forecast_plan(self, topic: str, payload: dict) -> None:
-        """Capture trace_id from ev-forecast plan for cross-service correlation."""
         trace_id = payload.get("trace_id", "")
         if trace_id:
             self._current_trace_id = trace_id
@@ -795,7 +893,50 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        # --- Decision reasoning (the key sensor for understanding decisions) ---
+        # --- Feature #5: kWh remaining & estimated completion ---
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "kwh_remaining", node_id=node, config={
+                "name": "kWh Remaining",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.kwh_remaining }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:battery-charging",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "estimated_completion_time", node_id=node, config={
+                "name": "Estimated Completion",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": (
+                    "{{ value_json.estimated_completion_time "
+                    "if value_json.estimated_completion_time "
+                    "else 'unknown' }}"
+                ),
+                "icon": "mdi:clock-check-outline",
+            },
+        )
+
+        # --- Departure passed sensor ---
+
+        self.mqtt.publish_ha_discovery(
+            "binary_sensor", "departure_passed", node_id=node, config={
+                "name": "Departure Passed",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": (
+                    "{{ 'ON' if value_json.departure_passed else 'OFF' }}"
+                ),
+                "icon": "mdi:car-clock",
+                "entity_category": "diagnostic",
+            },
+        )
+
+        # --- Decision reasoning ---
 
         self.mqtt.publish_ha_discovery(
             "sensor", "decision_reasoning", node_id=node, config={
@@ -813,13 +954,16 @@ class SmartEVChargingService(BaseService):
                     '"deadline_active": value_json.deadline_active, '
                     '"deadline_hours_left": value_json.deadline_hours_left, '
                     '"deadline_required_w": value_json.deadline_required_w, '
-                    '"energy_remaining_kwh": value_json.energy_remaining_kwh} | tojson }}'
+                    '"energy_remaining_kwh": value_json.energy_remaining_kwh, '
+                    '"departure_passed": value_json.departure_passed, '
+                    '"kwh_remaining": value_json.kwh_remaining, '
+                    '"estimated_completion_time": value_json.estimated_completion_time} | tojson }}'
                 ),
                 "icon": "mdi:head-cog-outline",
             },
         )
 
-        self.logger.info("ha_discovery_registered", entity_count=24)
+        self.logger.info("ha_discovery_registered", entity_count=28)
 
     # ------------------------------------------------------------------
     # Healthcheck
