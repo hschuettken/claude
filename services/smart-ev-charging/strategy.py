@@ -279,7 +279,8 @@ class ChargingStrategy:
         No deadline logic, no "waiting for tomorrow's PV".
         """
         current_hour = ctx.now.hour
-        is_nighttime = current_hour >= 22 or current_hour < 5
+        # Overnight charging window: 20:00-05:00 (extended for post-departure handling)
+        is_nighttime = current_hour >= 20 or current_hour < 5
 
         # Departure passed — but if full_by_morning is ON and car still needs
         # charging, treat departure_time as TOMORROW's departure and use
