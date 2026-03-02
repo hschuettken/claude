@@ -42,7 +42,7 @@ class EVChargingSettings(BaseSettings):
     battery_min_soc_pct: float = 20.0
     battery_ev_assist_max_w: float = 3500.0
     battery_capacity_kwh: float = 7.0
-    battery_target_eod_soc_pct: float = 90.0
+    battery_target_eod_soc_pct: float = 100.0  # Target 100% battery by end of day
 
     # --- PV forecast ---
     pv_forecast_remaining_entity: str = "sensor.pv_ai_forecast_today_remaining_kwh"

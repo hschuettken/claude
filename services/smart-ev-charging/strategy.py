@@ -293,7 +293,7 @@ class ChargingStrategy:
                     battery_assist_reason=pv.battery_assist_reason,
                 )
             # Grid export prevention still applies
-            if ctx.grid_power_w > 200 and not ctx.target_reached:
+            if ctx.grid_power_w > 50 and not ctx.target_reached:
                 return self._grid_export_prevention(ctx, pv)
             return ChargingDecision(
                 0,
@@ -375,7 +375,7 @@ class ChargingStrategy:
             )
 
         # Grid export prevention
-        if ctx.grid_power_w > 200 and not ctx.target_reached:
+        if ctx.grid_power_w > 50 and not ctx.target_reached:
             return self._grid_export_prevention(ctx, pv)
 
         # --- Dynamic grid charging fallback ---
