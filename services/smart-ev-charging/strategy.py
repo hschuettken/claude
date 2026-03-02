@@ -505,31 +505,31 @@ class ChargingStrategy:
         if hours_until_departure is None:
             hours_until_departure = 12.0
 
-        charging_power_kw = self.eco_power_w / 1000.0
+        # Use MINIMUM power to spread charging over maximum time
+        charging_power_kw = self.min_power_w / 1000.0
         hours_for_grid = grid_remaining / charging_power_kw
-        hours_needed_with_buffer = hours_for_grid + self.night_charging_buffer_hours
-
+        
         grid_deadline_hour = min(6.0, departure_hour - pv_hours)
         hours_until_grid_deadline = self._hours_until_hour(grid_deadline_hour, ctx.now)
         effective_deadline = min(hours_until_departure, hours_until_grid_deadline)
 
-        if effective_deadline <= hours_needed_with_buffer:
+        # If we have enough time at minimum power, use it; otherwise escalate
+        if hours_for_grid <= effective_deadline:
+            return ChargingDecision(
+                self.min_power_w,
+                f"Overnight min-power: {grid_remaining:.1f}/{grid_portion_kwh:.1f} kWh "
+                f"at {self.min_power_w}W (~{hours_for_grid:.1f}h, finish ~"
+                f"{(ctx.now + timedelta(hours=hours_for_grid)).strftime('%H:%M')}) | "
+                f"PV: {pv_morning_usable:.1f} kWh morning",
+            )
+        else:
+            # Not enough time at min power — escalate
             return ChargingDecision(
                 self.eco_power_w,
-                f"Overnight grid charging: {grid_remaining:.1f}/{grid_portion_kwh:.1f} kWh "
-                f"(PV will handle {pv_morning_usable:.1f} kWh tomorrow morning) | "
-                f"charged {ctx.overnight_grid_kwh_charged:.1f} kWh so far",
+                f"Overnight (escalated {self.eco_power_w}W): "
+                f"{grid_remaining:.1f} kWh, need {hours_for_grid:.1f}h but "
+                f"only {effective_deadline:.1f}h available",
             )
-
-        wait_hours = effective_deadline - hours_needed_with_buffer
-        start_time = (ctx.now + timedelta(hours=wait_hours)).strftime("%H:%M")
-        return ChargingDecision(
-            0,
-            f"Overnight: waiting {wait_hours:.1f}h (starts ~{start_time}) | "
-            f"Plan: {grid_portion_kwh:.1f} kWh grid + "
-            f"{pv_morning_usable:.1f} kWh PV morning | "
-            f"Total needed: {energy_needed:.1f} kWh",
-        )
 
     def _dynamic_grid_fallback(self, ctx: ChargingContext) -> ChargingDecision | None:
         """Dynamic grid charging fallback — season-independent.
