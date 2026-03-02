@@ -281,8 +281,16 @@ class ChargingStrategy:
         current_hour = ctx.now.hour
         is_nighttime = current_hour >= 22 or current_hour < 5
 
-        # BUG #4: Departure passed — fall back to PV surplus / opportunistic
+        # Departure passed — but if full_by_morning is ON and car still needs
+        # charging, treat departure_time as TOMORROW's departure and use
+        # overnight charging logic. This ensures the car charges at minimum
+        # power overnight instead of waiting for PV that won't come.
         if ctx.departure_passed:
+            if ctx.full_by_morning and ctx.departure_time and ctx.energy_needed_kwh > 0:
+                # Treat as overnight charging for tomorrow's departure
+                # (hours_until will automatically wrap to tomorrow)
+                return self._nighttime_smart(ctx)
+            # No full_by_morning or target reached — PV surplus only
             pv = self._pv_surplus(ctx)
             if pv.target_power_w > 0:
                 return ChargingDecision(
