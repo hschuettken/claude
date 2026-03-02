@@ -81,17 +81,28 @@ class ChargingPlan:
         if not self.days:
             return None
         today = self.days[0]
+        tomorrow = self.days[1] if len(self.days) > 1 else None
+
+        # If today's departure has passed and tomorrow needs charging,
+        # prefer tomorrow's plan (for overnight charging setup)
+        if (
+            today.urgency in ("medium",)
+            and "Past departure" in (today.reason or "")
+            and tomorrow
+            and tomorrow.energy_to_charge_kwh > 0
+            and tomorrow.charge_mode not in ("PV Surplus", "Off")
+        ):
+            return tomorrow
+
         # If today already requires active charging, use it
         if today.charge_mode != "PV Surplus":
             return today
         # Today is PV Surplus — check if tomorrow needs overnight charging
-        if len(self.days) > 1:
-            tomorrow = self.days[1]
-            if (
-                tomorrow.energy_to_charge_kwh > 0
-                and tomorrow.charge_mode != "PV Surplus"
-            ):
-                return tomorrow
+        if tomorrow and (
+            tomorrow.energy_to_charge_kwh > 0
+            and tomorrow.charge_mode != "PV Surplus"
+        ):
+            return tomorrow
         return today
 
     @property
@@ -528,7 +539,10 @@ class ChargingPlanner:
 
         hours_until = self._hours_until_time(departure_time, now) if departure_time else 24.0
 
-        # Already past departure
+        # Already past departure — use Smart mode (not Fast) so the
+        # overnight charging logic handles it with minimum power.
+        # The smart-ev-charging strategy will detect departure_passed
+        # and use nighttime_smart for gradual overnight charging.
         if hours_until <= 0:
             return DayChargingRecommendation(
                 date=day_plan.date,
@@ -536,11 +550,11 @@ class ChargingPlanner:
                 soc_needed_pct=required_soc,
                 energy_needed_kwh=energy_needed,
                 energy_to_charge_kwh=deficit_kwh,
-                charge_mode="Fast",
+                charge_mode="Smart",
                 departure_time=departure_time,
                 charge_by=departure_time,
-                urgency="critical",
-                reason=f"Past departure — need {deficit_kwh:.1f} kWh urgently",
+                urgency="medium",
+                reason=f"Past departure — need {deficit_kwh:.1f} kWh, Smart overnight charging",
                 cumulative_deficit_kwh=cumulative_deficit,
             )
 
