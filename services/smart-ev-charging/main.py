@@ -250,7 +250,7 @@ class SmartEVChargingService(BaseService):
             house_power_w=house_power,
             battery_capacity_kwh=self.settings.battery_capacity_kwh,
             battery_target_eod_soc_pct=self.settings.battery_target_eod_soc_pct,
-            full_by_morning=full_by_morning if not departure_passed else False,  # BUG #4
+            full_by_morning=full_by_morning,  # Keep true even post-departure for overnight charging
             departure_time=departure_time,
             target_energy_kwh=target_energy,
             session_energy_kwh=wallbox.session_energy_kwh,
