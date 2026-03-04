@@ -834,10 +834,21 @@ class ChargingStrategy:
     # ------------------------------------------------------------------
 
     def _calc_pv_only_available(self, ctx: ChargingContext) -> float:
-        """Power available from PV surplus only (no battery discharge)."""
+        """Power available from PV surplus only (no battery discharge).
+
+        When the wallbox was recently charging but current power reads 0
+        (charger briefly paused between cycles), use the last target power
+        instead. Otherwise the surplus calculation drops and creates a
+        feedback loop: low surplus → low target → charger stops → even
+        lower surplus → stays stopped.
+        """
+        ev_power = ctx.wallbox.current_power_w
+        if self._was_pv_charging and ev_power < 100 and self._last_target_w > 0:
+            # Charger paused briefly — use last target as estimate
+            ev_power = self._last_target_w
         return (
             ctx.grid_power_w
-            + ctx.wallbox.current_power_w
+            + ev_power
             + ctx.battery_power_w
             - self.grid_reserve_w
         )
