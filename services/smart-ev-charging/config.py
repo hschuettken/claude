@@ -43,6 +43,8 @@ class EVChargingSettings(BaseSettings):
     battery_ev_assist_max_w: float = 3500.0
     battery_capacity_kwh: float = 7.0
     battery_target_eod_soc_pct: float = 100.0  # Target 100% battery by end of day
+    battery_hold_soc_pct: float = 70.0         # Hold battery at this SoC while EV charges
+    battery_hold_margin: float = 1.3           # Safety margin for refill forecast (1.3 = 30%)
 
     # --- PV forecast ---
     pv_forecast_remaining_entity: str = "sensor.pv_ai_forecast_today_remaining_kwh"

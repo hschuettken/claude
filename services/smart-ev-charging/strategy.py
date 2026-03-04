@@ -105,6 +105,8 @@ class ChargingStrategy:
         morning_escalation_hour: int = 11,
         min_charge_duration_s: int = 300,   # keep charging for at least 5 min
         stop_cooldown_s: int = 300,         # wait at least 5 min before restarting
+        battery_hold_soc_pct: float = 70.0, # hold battery at this SoC while EV charges
+        battery_hold_margin: float = 1.3,   # 30% safety margin for refill forecast
     ) -> None:
         self.max_power_w = max_power_w
         self.min_power_w = min_power_w
@@ -123,6 +125,8 @@ class ChargingStrategy:
         self.morning_escalation_hour = morning_escalation_hour
         self.min_charge_duration_s = min_charge_duration_s
         self.stop_cooldown_s = stop_cooldown_s
+        self.battery_hold_soc_pct = battery_hold_soc_pct
+        self.battery_hold_margin = battery_hold_margin
 
         self._was_pv_charging = False
         self._last_target_w: int = 0
@@ -242,13 +246,17 @@ class ChargingStrategy:
         assist, assist_reason = self._calc_battery_assist_detailed(ctx, pv_only)
         available = pv_only + assist
 
+        # --- Battery hold: redirect battery charging power to EV ---
+        hold_boost, hold_reason = self._calc_battery_hold_boost(ctx)
+        available += hold_boost
+
         ev_soc_low = ctx.ev_soc_pct is not None and ctx.ev_soc_pct < 50
         battery_high = ctx.battery_soc_pct >= 80
         # When battery can be refilled by sundown AND SoC is reasonable (>50%),
         # there's no risk — remove hysteresis entirely to start charging sooner.
         can_refill, _ = self._can_battery_refill(ctx)
         battery_refill_safe = can_refill and ctx.battery_soc_pct >= 50
-        if battery_high or battery_refill_safe:
+        if battery_high or battery_refill_safe or hold_boost > 0:
             hysteresis_reduction = self.start_hysteresis_w
         elif ev_soc_low:
             hysteresis_reduction = 150
@@ -263,8 +271,8 @@ class ChargingStrategy:
 
         base_fields = {
             "pv_surplus_w": round(pv_only, 1),
-            "battery_assist_w": round(assist, 1),
-            "battery_assist_reason": assist_reason,
+            "battery_assist_w": round(assist + hold_boost, 1),
+            "battery_assist_reason": hold_reason if hold_boost > 0 else assist_reason,
         }
 
         if available >= threshold:
@@ -272,6 +280,8 @@ class ChargingStrategy:
             parts = [f"PV surplus {pv_only:.0f} W"]
             if assist > 0:
                 parts.append(f"+ {assist:.0f} W battery assist")
+            if hold_boost > 0:
+                parts.append(f"+ {hold_boost:.0f} W battery hold boost")
             if ctx.battery_soc_pct > 80 and ctx.battery_power_w > 0:
                 parts.append("(prioritize EV over battery)")
             if ev_soc_low:
@@ -885,6 +895,84 @@ class ChargingStrategy:
             f"— {strategy}, {refill_reason}"
         )
         return assist, reason
+
+    def _calc_battery_hold_boost(
+        self, ctx: ChargingContext,
+    ) -> tuple[float, str]:
+        """Hold battery at ~70% SoC, redirecting charge power to EV.
+
+        When the battery is above the hold threshold and there's enough
+        PV forecast remaining to fill the battery later (from hold_soc
+        to 100%), we "over-request" from the wallbox. The inverter will
+        then reduce battery charging to compensate, effectively holding
+        the battery SoC steady while maximizing EV charging.
+
+        The boost is released when remaining PV drops below what's needed
+        to refill the battery, allowing the battery to charge normally
+        and reach 100% by sundown.
+        """
+        # Only active when EV is connected and battery is charging
+        if ctx.battery_power_w <= 0:
+            return 0.0, "Battery not charging"
+
+        if not ctx.wallbox.vehicle_connected:
+            return 0.0, "No EV connected"
+
+        # Below hold threshold — let battery charge normally
+        if ctx.battery_soc_pct < self.battery_hold_soc_pct:
+            return 0.0, (
+                f"Battery {ctx.battery_soc_pct:.0f}% < hold "
+                f"{self.battery_hold_soc_pct:.0f}%"
+            )
+
+        # Calculate: can PV still fill battery from hold_soc to 100% later?
+        energy_to_fill_from_hold = (
+            (100.0 - self.battery_hold_soc_pct) / 100.0
+            * self.battery_capacity_kwh
+        )
+        hours_remaining = max(0.5, self._estimate_daylight_hours_remaining(ctx.now))
+        household_kwh = (ctx.house_power_w / 1000.0) * hours_remaining
+        pv_available = ctx.pv_forecast_remaining_kwh - household_kwh
+
+        # Also account for max battery charge rate — can we physically fill in time?
+        max_battery_charge_kwh = (self.battery_ev_assist_max_w / 1000.0) * hours_remaining
+        energy_to_fill_from_hold = min(energy_to_fill_from_hold, max_battery_charge_kwh)
+
+        if pv_available < energy_to_fill_from_hold * self.battery_hold_margin:
+            return 0.0, (
+                f"Battery hold released: PV remaining ({pv_available:.1f} kWh) "
+                f"< {energy_to_fill_from_hold:.1f} kWh × "
+                f"{self.battery_hold_margin:.0%} margin needed to refill"
+            )
+
+        # Redirect battery charging power to EV.
+        # The pv_only calc already includes battery_power_w, but only accounts
+        # for the current state. The boost requests ADDITIONAL power beyond
+        # what pv_only calculated, forcing the inverter to reduce battery charge.
+        # We boost by the difference between battery's current charge rate and
+        # a small trickle to maintain SoC (accounting for self-discharge).
+        boost = max(0.0, ctx.battery_power_w - 100)  # keep ~100W trickle
+
+        if boost < 200:
+            return 0.0, "Battery charge rate too low for meaningful boost"
+
+        logger.info(
+            "battery_hold_active",
+            battery_soc=round(ctx.battery_soc_pct),
+            hold_soc=self.battery_hold_soc_pct,
+            battery_charge_w=round(ctx.battery_power_w),
+            boost_w=round(boost),
+            pv_available_kwh=round(pv_available, 1),
+            energy_to_fill=round(energy_to_fill_from_hold, 1),
+            hours_remaining=round(hours_remaining, 1),
+        )
+
+        return boost, (
+            f"Battery hold at {self.battery_hold_soc_pct:.0f}%: "
+            f"SoC {ctx.battery_soc_pct:.0f}%, redirecting "
+            f"{boost:.0f} W to EV "
+            f"(PV can refill: {pv_available:.1f}/{energy_to_fill_from_hold:.1f} kWh)"
+        )
 
     def _can_battery_refill(self, ctx: ChargingContext) -> tuple[bool, str]:
         """Check if remaining PV forecast can refill the battery by end of day."""

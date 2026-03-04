@@ -91,6 +91,8 @@ class SmartEVChargingService(BaseService):
             pv_forecast_good_kwh=self.settings.pv_forecast_good_kwh,
             pv_morning_fraction=self.settings.pv_morning_fraction,
             charger_efficiency=self.settings.charger_efficiency,
+            battery_hold_soc_pct=self.settings.battery_hold_soc_pct,
+            battery_hold_margin=self.settings.battery_hold_margin,
         )
 
         self.logger.info(
