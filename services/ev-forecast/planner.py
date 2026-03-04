@@ -75,18 +75,28 @@ class ChargingPlan:
     def immediate_action(self) -> DayChargingRecommendation | None:
         """The most urgent action to take now.
 
-        Returns today's recommendation unless today is just PV Surplus
-        and tomorrow needs active charging (overnight scenario).
+        Returns today's recommendation unless it's evening/night and
+        tomorrow needs active charging (overnight scenario).
+
+        IMPORTANT: Only look ahead to tomorrow's plan during evening/night
+        hours (18:00+). During daytime, stay on today's plan (typically
+        PV Surplus) so the car charges from solar instead of pulling from
+        the grid or draining the home battery.
         """
         if not self.days:
             return None
         today = self.days[0]
         tomorrow = self.days[1] if len(self.days) > 1 else None
 
+        current_hour = self.generated_at.hour
+
         # If today's departure has passed and tomorrow needs charging,
-        # prefer tomorrow's plan (for overnight charging setup)
+        # prefer tomorrow's plan — but ONLY in the evening/night (18:00-05:00)
+        # During daytime, keep PV Surplus so the car charges from solar.
+        is_evening_or_night = current_hour >= 18 or current_hour < 5
         if (
-            today.urgency in ("medium",)
+            is_evening_or_night
+            and today.urgency in ("medium",)
             and "Past departure" in (today.reason or "")
             and tomorrow
             and tomorrow.energy_to_charge_kwh > 0
@@ -97,9 +107,13 @@ class ChargingPlan:
         # If today already requires active charging, use it
         if today.charge_mode != "PV Surplus":
             return today
+
         # Today is PV Surplus — check if tomorrow needs overnight charging
-        if tomorrow and (
-            tomorrow.energy_to_charge_kwh > 0
+        # but ONLY switch during evening/night hours
+        if (
+            is_evening_or_night
+            and tomorrow
+            and tomorrow.energy_to_charge_kwh > 0
             and tomorrow.charge_mode != "PV Surplus"
         ):
             return tomorrow

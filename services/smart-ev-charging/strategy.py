@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time as _time
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from enum import Enum
@@ -102,6 +103,8 @@ class ChargingStrategy:
         pv_morning_fraction: float = 0.45,
         charger_efficiency: float = 0.90,
         morning_escalation_hour: int = 11,
+        min_charge_duration_s: int = 300,   # keep charging for at least 5 min
+        stop_cooldown_s: int = 300,         # wait at least 5 min before restarting
     ) -> None:
         self.max_power_w = max_power_w
         self.min_power_w = min_power_w
@@ -118,9 +121,13 @@ class ChargingStrategy:
         self.pv_morning_fraction = pv_morning_fraction
         self.charger_efficiency = charger_efficiency
         self.morning_escalation_hour = morning_escalation_hour
+        self.min_charge_duration_s = min_charge_duration_s
+        self.stop_cooldown_s = stop_cooldown_s
 
         self._was_pv_charging = False
         self._last_target_w: int = 0
+        self._charge_started_at: float | None = None   # monotonic timestamp
+        self._charge_stopped_at: float | None = None    # monotonic timestamp
 
     def decide(self, ctx: ChargingContext) -> ChargingDecision:
         """Calculate the target charging power for this cycle."""
@@ -206,7 +213,17 @@ class ChargingStrategy:
         # --- Ramp limiting ---
         decision = self._apply_ramp(decision)
 
+        # --- Anti-cycling: min charge duration + stop cooldown ---
+        decision = self._apply_anti_cycling(decision)
+
         # --- Update state ---
+        now_mono = _time.monotonic()
+        if decision.target_power_w > 0 and not self._was_pv_charging:
+            self._charge_started_at = now_mono
+            self._charge_stopped_at = None
+        elif decision.target_power_w == 0 and self._was_pv_charging:
+            self._charge_stopped_at = now_mono
+            self._charge_started_at = None
         self._was_pv_charging = decision.target_power_w > 0
         self._last_target_w = decision.target_power_w
 
@@ -227,7 +244,11 @@ class ChargingStrategy:
 
         ev_soc_low = ctx.ev_soc_pct is not None and ctx.ev_soc_pct < 50
         battery_high = ctx.battery_soc_pct >= 80
-        if battery_high:
+        # When battery can be refilled by sundown AND SoC is reasonable (>50%),
+        # there's no risk — remove hysteresis entirely to start charging sooner.
+        can_refill, _ = self._can_battery_refill(ctx)
+        battery_refill_safe = can_refill and ctx.battery_soc_pct >= 50
+        if battery_high or battery_refill_safe:
             hysteresis_reduction = self.start_hysteresis_w
         elif ev_soc_low:
             hysteresis_reduction = 150
@@ -287,11 +308,16 @@ class ChargingStrategy:
         # overnight charging logic. This ensures the car charges at minimum
         # power overnight instead of waiting for PV that won't come.
         if ctx.departure_passed:
-            if ctx.full_by_morning and ctx.departure_time and ctx.energy_needed_kwh > 0:
-                # Treat as overnight charging for tomorrow's departure
-                # (hours_until will automatically wrap to tomorrow)
+            if (
+                is_nighttime
+                and ctx.full_by_morning
+                and ctx.departure_time
+                and ctx.energy_needed_kwh > 0
+            ):
+                # Only use overnight grid charging logic at night (20:00-05:00).
+                # During daytime, fall through to PV surplus below.
                 return self._nighttime_smart(ctx)
-            # No full_by_morning or target reached — PV surplus only
+            # Daytime or no deadline — PV surplus only
             pv = self._pv_surplus(ctx)
             if pv.target_power_w > 0:
                 return ChargingDecision(
@@ -746,6 +772,54 @@ class ChargingStrategy:
         return decision
 
     # ------------------------------------------------------------------
+    # Anti-cycling protection
+    # ------------------------------------------------------------------
+
+    def _apply_anti_cycling(self, decision: ChargingDecision) -> ChargingDecision:
+        """Prevent rapid start/stop cycling that upsets the wallbox/car.
+
+        Rules:
+        - Once charging starts, keep going for at least min_charge_duration_s
+          (even if surplus briefly drops).
+        - After stopping, wait at least stop_cooldown_s before restarting
+          (to allow cloud transients to pass).
+        """
+        now_mono = _time.monotonic()
+
+        # Currently charging → decision says stop: enforce minimum run time
+        if self._was_pv_charging and decision.target_power_w == 0:
+            if self._charge_started_at is not None:
+                elapsed = now_mono - self._charge_started_at
+                if elapsed < self.min_charge_duration_s:
+                    remaining = self.min_charge_duration_s - elapsed
+                    return ChargingDecision(
+                        self._last_target_w,
+                        f"Anti-cycling: keeping charge at {self._last_target_w} W "
+                        f"(min duration, {remaining:.0f}s remaining)",
+                        pv_surplus_w=decision.pv_surplus_w,
+                        battery_assist_w=decision.battery_assist_w,
+                        battery_assist_reason=decision.battery_assist_reason,
+                    )
+
+        # Currently stopped → decision says start: enforce cooldown
+        if not self._was_pv_charging and decision.target_power_w > 0:
+            if self._charge_stopped_at is not None:
+                elapsed = now_mono - self._charge_stopped_at
+                if elapsed < self.stop_cooldown_s:
+                    remaining = self.stop_cooldown_s - elapsed
+                    return ChargingDecision(
+                        0,
+                        f"Anti-cycling: cooldown after stop "
+                        f"({remaining:.0f}s remaining, would charge at "
+                        f"{decision.target_power_w} W)",
+                        pv_surplus_w=decision.pv_surplus_w,
+                        battery_assist_w=decision.battery_assist_w,
+                        battery_assist_reason=decision.battery_assist_reason,
+                    )
+
+        return decision
+
+    # ------------------------------------------------------------------
     # PV surplus & battery assist
     # ------------------------------------------------------------------
 
@@ -784,6 +858,12 @@ class ChargingStrategy:
         soc_factor = min(1.0, max(0.0, soc_headroom))
 
         if can_refill:
+            # When PV forecast guarantees battery refill by sundown,
+            # use full assist power above a reasonable SoC floor (~50%).
+            # The soc_factor alone is too conservative — at 58% SoC with
+            # 35 kWh forecast remaining, there's zero risk.
+            if ctx.battery_soc_pct >= 50:
+                soc_factor = 1.0
             max_assist = self.battery_ev_assist_max_w * soc_factor
             strategy = "refill OK"
         elif ctx.battery_soc_pct > 80:
@@ -853,6 +933,8 @@ class ChargingStrategy:
     def _reset(self) -> None:
         self._was_pv_charging = False
         self._last_target_w = 0
+        self._charge_started_at = None
+        self._charge_stopped_at = None
 
     @staticmethod
     def _hours_until(target_time: time, now: datetime) -> float:
