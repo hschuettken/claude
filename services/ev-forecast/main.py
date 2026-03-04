@@ -685,7 +685,9 @@ class EVForecastService:
                     calendarId=cal_id, eventId=event_id, body=event_body,
                 ).execute(),
             )
-        except Exception:
+            logger.info("calendar_event_updated", event_id=event_id)
+        except Exception as e:
+            logger.debug("calendar_event_update_failed", event_id=event_id, error=str(e))
             try:
                 # Doesn't exist — insert
                 await loop.run_in_executor(
@@ -694,8 +696,14 @@ class EVForecastService:
                         calendarId=cal_id, body=event_body,
                     ).execute(),
                 )
-            except Exception:
-                logger.warning("calendar_event_upsert_failed", event_id=event_id)
+                logger.info("calendar_event_inserted", event_id=event_id)
+            except Exception as e2:
+                logger.error(
+                    "calendar_event_upsert_failed",
+                    event_id=event_id,
+                    error=str(e2),
+                    error_type=type(e2).__name__,
+                )
 
     async def _delete_calendar_event(self, cal_id: str, event_id: str) -> None:
         """Delete a calendar event by ID (ignore if not found)."""
