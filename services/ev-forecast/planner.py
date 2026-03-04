@@ -275,6 +275,49 @@ class ChargingPlanner:
 
         # --- Detect manual overrides ---
         # Read current HA values to detect if user/orchestrator changed them
+        manual_mode = False
+
+        # Check if user manually set charge mode to "Off" or "Manual"
+        # These modes should NEVER be overridden by the planner.
+        try:
+            current_mode_state = await self._ha.get_state(charge_mode_entity)
+            current_mode = current_mode_state.get("state", "")
+            last_mode = getattr(self, "_last_applied_mode", None)
+            if current_mode in ("Off", "Manual"):
+                # User explicitly set Off or Manual — respect it
+                manual_mode = True
+                logger.info(
+                    "manual_mode_override_detected",
+                    current_mode=current_mode,
+                    planned_mode=immediate.charge_mode,
+                    last_applied=last_mode,
+                )
+            elif (
+                current_mode
+                and current_mode not in ("unavailable", "unknown")
+                and last_mode is not None
+                and current_mode != last_mode
+                and current_mode != immediate.charge_mode
+            ):
+                # User changed mode to something else (not what we set, not what we'd set)
+                manual_mode = True
+                logger.info(
+                    "manual_mode_override_detected",
+                    current_mode=current_mode,
+                    planned_mode=immediate.charge_mode,
+                    last_applied=last_mode,
+                )
+        except Exception:
+            pass
+
+        if manual_mode:
+            logger.info(
+                "plan_apply_skipped_manual_mode",
+                current_mode=current_mode,
+                planned_mode=immediate.charge_mode,
+            )
+            return
+
         manual_departure = False
         manual_target_soc = False
 
@@ -332,6 +375,7 @@ class ChargingPlanner:
                 "entity_id": charge_mode_entity,
                 "option": immediate.charge_mode,
             })
+            self._last_applied_mode = immediate.charge_mode
         except Exception:
             logger.exception("set_charge_mode_failed")
 
