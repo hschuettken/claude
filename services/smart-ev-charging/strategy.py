@@ -89,7 +89,7 @@ class ChargingStrategy:
     def __init__(
         self,
         max_power_w: int = 11000,
-        min_power_w: int = 3600,
+        min_power_w: int = 4000,
         eco_power_w: int = 5000,
         grid_reserve_w: int = 200,
         start_hysteresis_w: int = 300,
