@@ -560,8 +560,13 @@ class EVForecastService:
             await self._upsert_status_event(cal_id, plan)
 
             logger.info("calendar_plan_written", days=len(plan.days))
-        except Exception:
-            logger.exception("calendar_plan_write_failed")
+        except Exception as e:
+            logger.error(
+                "calendar_plan_write_failed",
+                error=str(e),
+                error_type=type(e).__name__,
+            )
+            logger.exception("calendar_plan_write_traceback")
 
     async def _upsert_plan_event(
         self,
