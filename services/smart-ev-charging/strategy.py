@@ -246,17 +246,13 @@ class ChargingStrategy:
         assist, assist_reason = self._calc_battery_assist_detailed(ctx, pv_only)
         available = pv_only + assist
 
-        # --- Battery hold: redirect battery charging power to EV ---
-        hold_boost, hold_reason = self._calc_battery_hold_boost(ctx)
-        available += hold_boost
-
         ev_soc_low = ctx.ev_soc_pct is not None and ctx.ev_soc_pct < 50
         battery_high = ctx.battery_soc_pct >= 80
         # When battery can be refilled by sundown AND SoC is reasonable (>50%),
         # there's no risk — remove hysteresis entirely to start charging sooner.
         can_refill, _ = self._can_battery_refill(ctx)
         battery_refill_safe = can_refill and ctx.battery_soc_pct >= 50
-        if battery_high or battery_refill_safe or hold_boost > 0:
+        if battery_high or battery_refill_safe:
             hysteresis_reduction = self.start_hysteresis_w
         elif ev_soc_low:
             hysteresis_reduction = 150
@@ -271,8 +267,8 @@ class ChargingStrategy:
 
         base_fields = {
             "pv_surplus_w": round(pv_only, 1),
-            "battery_assist_w": round(assist + hold_boost, 1),
-            "battery_assist_reason": hold_reason if hold_boost > 0 else assist_reason,
+            "battery_assist_w": round(assist, 1),
+            "battery_assist_reason": assist_reason,
         }
 
         if available >= threshold:
@@ -280,8 +276,6 @@ class ChargingStrategy:
             parts = [f"PV surplus {pv_only:.0f} W"]
             if assist > 0:
                 parts.append(f"+ {assist:.0f} W battery assist")
-            if hold_boost > 0:
-                parts.append(f"+ {hold_boost:.0f} W battery hold boost")
             if ctx.battery_soc_pct > 80 and ctx.battery_power_w > 0:
                 parts.append("(prioritize EV over battery)")
             if ev_soc_low:
