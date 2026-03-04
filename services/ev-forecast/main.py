@@ -359,6 +359,9 @@ class EVForecastService:
                     {"clarifications": clarifications},
                 )
 
+            # Write plan to Google Calendar
+            await self._write_plan_to_calendar(plan)
+
             # Log summary
             for day in plan.days:
                 logger.info(
@@ -499,6 +502,7 @@ class EVForecastService:
 
             scopes = [
                 "https://www.googleapis.com/auth/calendar.readonly",
+                "https://www.googleapis.com/auth/calendar.events",
             ]
 
             creds_file = self.settings.google_calendar_credentials_file
@@ -522,6 +526,184 @@ class EVForecastService:
 
         except Exception:
             logger.exception("google_calendar_init_failed")
+
+    # ------------------------------------------------------------------
+    # Google Calendar — write charging plan
+    # ------------------------------------------------------------------
+
+    async def _write_plan_to_calendar(self, plan: ChargingPlan) -> None:
+        """Write/update the charging plan as calendar events.
+
+        Creates one event per day that needs charging. Events use a
+        consistent event ID (based on date) so they get updated rather
+        than duplicated on each plan cycle.
+        """
+        if not self._gcal_service:
+            return
+        cal_id = self.settings.google_calendar_ev_plan_id
+        if not cal_id:
+            return
+
+        try:
+            now = datetime.now(self.tz)
+            for day_rec in plan.days:
+                # Skip days with no charging needed
+                if day_rec.energy_to_charge_kwh <= 0 and day_rec.charge_mode == "PV Surplus":
+                    # Clean up any existing event for this day
+                    event_id = f"evplan{day_rec.date.strftime('%Y%m%d')}"
+                    await self._delete_calendar_event(cal_id, event_id)
+                    continue
+
+                await self._upsert_plan_event(cal_id, plan, day_rec)
+
+            # Also write a "current status" event for today
+            await self._upsert_status_event(cal_id, plan)
+
+            logger.info("calendar_plan_written", days=len(plan.days))
+        except Exception:
+            logger.exception("calendar_plan_write_failed")
+
+    async def _upsert_plan_event(
+        self,
+        cal_id: str,
+        plan: ChargingPlan,
+        day_rec,
+    ) -> None:
+        """Create or update a calendar event for a single day's charging plan."""
+        event_id = f"evplan{day_rec.date.strftime('%Y%m%d')}"
+        dep_str = day_rec.departure_time.strftime("%H:%M") if day_rec.departure_time else "—"
+        trips_str = ", ".join(
+            f"{t.person}: {t.destination} ({t.round_trip_km:.0f}km)"
+            for t in day_rec.trips
+        ) or "No trips"
+
+        soc_str = f"{plan.current_soc_pct:.0f}%" if plan.current_soc_pct else "?"
+
+        summary = (
+            f"🔋 EV: {day_rec.charge_mode} "
+            f"({day_rec.energy_to_charge_kwh:.1f} kWh)"
+        )
+
+        description = (
+            f"Mode: {day_rec.charge_mode} | Urgency: {day_rec.urgency}\n"
+            f"Departure: {dep_str}\n"
+            f"Energy needed: {day_rec.energy_needed_kwh:.1f} kWh\n"
+            f"Energy to charge: {day_rec.energy_to_charge_kwh:.1f} kWh\n"
+            f"Required SoC: {day_rec.soc_needed_pct:.0f}%\n"
+            f"Current SoC: {soc_str}\n"
+            f"Trips: {trips_str}\n"
+            f"Reason: {day_rec.reason}\n"
+            f"\n---\nUpdated: {datetime.now(self.tz).strftime('%H:%M')}"
+        )
+
+        # Event spans the full day
+        event_body = {
+            "id": event_id,
+            "summary": summary,
+            "description": description,
+            "start": {"date": day_rec.date.isoformat()},
+            "end": {"date": day_rec.date.isoformat()},
+            "transparency": "transparent",  # Don't block calendar
+        }
+
+        # Add color based on urgency
+        color_map = {
+            "critical": "11",  # red
+            "high": "6",       # orange
+            "medium": "5",     # yellow
+            "low": "2",        # green
+            "none": "8",       # grey
+        }
+        color_id = color_map.get(day_rec.urgency, "8")
+        event_body["colorId"] = color_id
+
+        await self._upsert_calendar_event(cal_id, event_id, event_body)
+
+    async def _upsert_status_event(
+        self,
+        cal_id: str,
+        plan: ChargingPlan,
+    ) -> None:
+        """Write a 'current status' all-day event for today."""
+        today = datetime.now(self.tz).date()
+        event_id = f"evstatus{today.strftime('%Y%m%d')}"
+
+        soc = f"{plan.current_soc_pct:.0f}%" if plan.current_soc_pct else "?"
+        plugged = "🔌 Plugged in" if plan.vehicle_plugged_in else "🚗 Unplugged"
+        immediate = plan.immediate_action
+
+        summary = f"⚡ EV {soc} {plugged}"
+        if immediate and immediate.charge_mode != "PV Surplus":
+            summary += f" → {immediate.charge_mode}"
+
+        lines = [
+            f"SoC: {soc}",
+            f"Status: {plugged}",
+            f"Total energy needed (7d): {plan.total_energy_needed_kwh:.1f} kWh",
+        ]
+        if immediate:
+            lines.append(f"Active plan: {immediate.charge_mode}")
+            lines.append(f"Reason: {immediate.reason}")
+
+        for day_rec in plan.days:
+            trips_str = ", ".join(t.destination for t in day_rec.trips) or "—"
+            lines.append(
+                f"\n{day_rec.date.strftime('%a %d.%m')}: "
+                f"{day_rec.charge_mode} | "
+                f"{day_rec.energy_to_charge_kwh:.1f} kWh | "
+                f"Trips: {trips_str}"
+            )
+
+        lines.append(f"\n---\nUpdated: {datetime.now(self.tz).strftime('%H:%M')}")
+
+        event_body = {
+            "id": event_id,
+            "summary": summary,
+            "description": "\n".join(lines),
+            "start": {"date": today.isoformat()},
+            "end": {"date": today.isoformat()},
+            "transparency": "transparent",
+            "colorId": "8",  # grey for status
+        }
+        await self._upsert_calendar_event(cal_id, event_id, event_body)
+
+    async def _upsert_calendar_event(
+        self, cal_id: str, event_id: str, event_body: dict,
+    ) -> None:
+        """Insert or update a calendar event by ID."""
+        loop = asyncio.get_event_loop()
+        try:
+            # Try update first
+            await loop.run_in_executor(
+                None,
+                lambda: self._gcal_service.events().update(
+                    calendarId=cal_id, eventId=event_id, body=event_body,
+                ).execute(),
+            )
+        except Exception:
+            try:
+                # Doesn't exist — insert
+                await loop.run_in_executor(
+                    None,
+                    lambda: self._gcal_service.events().insert(
+                        calendarId=cal_id, body=event_body,
+                    ).execute(),
+                )
+            except Exception:
+                logger.warning("calendar_event_upsert_failed", event_id=event_id)
+
+    async def _delete_calendar_event(self, cal_id: str, event_id: str) -> None:
+        """Delete a calendar event by ID (ignore if not found)."""
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda: self._gcal_service.events().delete(
+                    calendarId=cal_id, eventId=event_id,
+                ).execute(),
+            )
+        except Exception:
+            pass  # Not found or already deleted — fine
 
     # ------------------------------------------------------------------
     # MQTT HA auto-discovery

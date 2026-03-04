@@ -57,6 +57,7 @@ class EVForecastSettings(BaseSettings):
     google_calendar_credentials_file: str = ""
     google_calendar_credentials_json: str = ""
     google_calendar_family_id: str = ""
+    google_calendar_ev_plan_id: str = ""  # Calendar for writing EV charging plan events (separate from family)
 
     # --- Trip prediction ---
     # Calendar event prefixes for identifying who drives
