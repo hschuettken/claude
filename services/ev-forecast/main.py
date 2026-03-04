@@ -545,7 +545,7 @@ class EVForecastService:
             return
 
         try:
-            now = datetime.now(self.tz)
+            now = datetime.now(self._tz)
             for day_rec in plan.days:
                 # Skip days with no charging needed
                 if day_rec.energy_to_charge_kwh <= 0 and day_rec.charge_mode == "PV Surplus":
@@ -598,7 +598,7 @@ class EVForecastService:
             f"Current SoC: {soc_str}\n"
             f"Trips: {trips_str}\n"
             f"Reason: {day_rec.reason}\n"
-            f"\n---\nUpdated: {datetime.now(self.tz).strftime('%H:%M')}"
+            f"\n---\nUpdated: {datetime.now(self._tz).strftime('%H:%M')}"
         )
 
         # Event spans the full day
@@ -630,7 +630,7 @@ class EVForecastService:
         plan: ChargingPlan,
     ) -> None:
         """Write a 'current status' all-day event for today."""
-        today = datetime.now(self.tz).date()
+        today = datetime.now(self._tz).date()
         event_id = f"evstatus{today.strftime('%Y%m%d')}"
 
         soc = f"{plan.current_soc_pct:.0f}%" if plan.current_soc_pct else "?"
@@ -659,7 +659,7 @@ class EVForecastService:
                 f"Trips: {trips_str}"
             )
 
-        lines.append(f"\n---\nUpdated: {datetime.now(self.tz).strftime('%H:%M')}")
+        lines.append(f"\n---\nUpdated: {datetime.now(self._tz).strftime('%H:%M')}")
 
         event_body = {
             "id": event_id,
