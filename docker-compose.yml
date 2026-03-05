@@ -123,6 +123,25 @@ services:
       - homelab
       - traefik
 
+  ollama-router:
+    build:
+      context: ./services/ollama-router
+    container_name: claude-ollama-router-1
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./services/ollama-router/config.yaml:/app/config.yaml:ro
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - homelab
+
   # --- Template for new services ---
   # my-new-service:
   #   build:
