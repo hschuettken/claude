@@ -31,7 +31,6 @@
 |---|---|---|---|---|---|
 | 206 | omada | .64 | 2 | 84.0% | Network management |
 | 208 | influxdb | .66 | 2 | 7.5% | Time-series DB |
-| 211 | checkmk | .69 | 2 | 22.5% | Monitoring |
 | 209 | grafana | .67 | 1 | 17.5% | Dashboards |
 | 205 | node-red | .60 | 1 | 37.5% | Automation flows |
 | 222 | mongodb | — | 1 | 23.7% | Database (for n8n/flowise?) |
