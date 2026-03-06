@@ -89,11 +89,13 @@ class ChargingStrategy:
     def __init__(
         self,
         max_power_w: int = 11000,
-        min_power_w: int = 4000,
+        min_power_w: int = 4200,
         eco_power_w: int = 5000,
-        grid_reserve_w: int = 200,
+        grid_reserve_w: int = -100,
         start_hysteresis_w: int = 300,
         ramp_step_w: int = 500,
+        startup_ramp_power_w: int = 5000,
+        startup_ramp_duration_s: int = 180,
         battery_min_soc_pct: float = 20.0,
         battery_ev_assist_max_w: float = 3500.0,
         battery_capacity_kwh: float = 7.0,
@@ -114,6 +116,8 @@ class ChargingStrategy:
         self.grid_reserve_w = grid_reserve_w
         self.start_hysteresis_w = start_hysteresis_w
         self.ramp_step_w = ramp_step_w
+        self.startup_ramp_power_w = startup_ramp_power_w
+        self.startup_ramp_duration_s = startup_ramp_duration_s
         self.battery_min_soc_pct = battery_min_soc_pct
         self.battery_ev_assist_max_w = battery_ev_assist_max_w
         self.battery_capacity_kwh = battery_capacity_kwh
@@ -213,6 +217,9 @@ class ChargingStrategy:
             )
             if not is_pv_wait_window:
                 decision = self._apply_deadline_escalation(ctx, decision)
+
+        # --- Startup ramp: hold elevated power for first N seconds ---
+        decision = self._apply_startup_ramp(decision)
 
         # --- Ramp limiting ---
         decision = self._apply_ramp(decision)
@@ -752,6 +759,41 @@ class ChargingStrategy:
             energy_remaining_kwh=round(remaining_kwh, 2),
         )
         return d
+
+    # ------------------------------------------------------------------
+    # Startup ramp
+    # ------------------------------------------------------------------
+
+    def _apply_startup_ramp(self, decision: ChargingDecision) -> ChargingDecision:
+        """Hold an elevated minimum power for the first N seconds after start.
+
+        This ensures the wallbox/car handshake stabilises at a solid power
+        level before we start tracking PV surplus more tightly.
+        """
+        if decision.target_power_w <= 0 or decision.skip_control:
+            return decision
+
+        if self._charge_started_at is None:
+            return decision
+
+        elapsed = _time.monotonic() - self._charge_started_at
+        if elapsed >= self.startup_ramp_duration_s:
+            return decision
+
+        if decision.target_power_w < self.startup_ramp_power_w:
+            return ChargingDecision(
+                self.startup_ramp_power_w,
+                f"{decision.reason} (startup ramp: {elapsed:.0f}/{self.startup_ramp_duration_s}s → {self.startup_ramp_power_w} W)",
+                pv_surplus_w=decision.pv_surplus_w,
+                battery_assist_w=decision.battery_assist_w,
+                battery_assist_reason=decision.battery_assist_reason,
+                deadline_active=decision.deadline_active,
+                deadline_hours_left=decision.deadline_hours_left,
+                deadline_required_w=decision.deadline_required_w,
+                energy_remaining_kwh=decision.energy_remaining_kwh,
+            )
+
+        return decision
 
     # ------------------------------------------------------------------
     # Ramp limiting

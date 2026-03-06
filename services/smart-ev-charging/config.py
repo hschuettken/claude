@@ -62,11 +62,13 @@ class EVChargingSettings(BaseSettings):
 
     # --- Wallbox power limits ---
     wallbox_max_power_w: int = 11000
-    wallbox_min_power_w: int = 4000
+    wallbox_min_power_w: int = 4200
     eco_charge_power_w: int = 5000
+    startup_ramp_power_w: int = 5000   # initial power for first N seconds after start
+    startup_ramp_duration_s: int = 180  # hold startup power for 3 minutes
 
     # --- PV surplus control ---
-    grid_reserve_w: int = 200
+    grid_reserve_w: int = -100         # negative = prefer slight import over export
     surplus_start_hysteresis_w: int = 300
     ramp_step_w: int = 500
 

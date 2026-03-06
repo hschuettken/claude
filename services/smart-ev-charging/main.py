@@ -84,6 +84,8 @@ class SmartEVChargingService(BaseService):
             grid_reserve_w=self.settings.grid_reserve_w,
             start_hysteresis_w=self.settings.surplus_start_hysteresis_w,
             ramp_step_w=self.settings.ramp_step_w,
+            startup_ramp_power_w=self.settings.startup_ramp_power_w,
+            startup_ramp_duration_s=self.settings.startup_ramp_duration_s,
             battery_min_soc_pct=self.settings.battery_min_soc_pct,
             battery_ev_assist_max_w=self.settings.battery_ev_assist_max_w,
             battery_capacity_kwh=self.settings.battery_capacity_kwh,
