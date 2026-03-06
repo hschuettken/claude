@@ -107,6 +107,7 @@ class ChargingStrategy:
         stop_cooldown_s: int = 300,         # wait at least 5 min before restarting
         battery_hold_soc_pct: float = 70.0, # hold battery at this SoC while EV charges
         battery_hold_margin: float = 1.3,   # 30% safety margin for refill forecast
+        battery_hold_release_hour: int = 17, # hour to release hold and let battery top off
     ) -> None:
         self.max_power_w = max_power_w
         self.min_power_w = min_power_w
@@ -127,6 +128,7 @@ class ChargingStrategy:
         self.stop_cooldown_s = stop_cooldown_s
         self.battery_hold_soc_pct = battery_hold_soc_pct
         self.battery_hold_margin = battery_hold_margin
+        self.battery_hold_release_hour = battery_hold_release_hour
 
         self._was_pv_charging = False
         self._last_target_w: int = 0
@@ -244,7 +246,12 @@ class ChargingStrategy:
         """Track PV surplus — charge primarily from solar excess."""
         pv_only = self._calc_pv_only_available(ctx)
         assist, assist_reason = self._calc_battery_assist_detailed(ctx, pv_only)
-        available = pv_only + assist
+
+        # Battery hold boost: when battery SoC >= hold threshold during daytime,
+        # redirect battery charging power to EV instead.  Released in the evening
+        # so the battery can top off to 100% for overnight use.
+        hold_boost, hold_reason = self._calc_battery_hold_boost(ctx)
+        available = pv_only + assist + hold_boost
 
         ev_soc_low = ctx.ev_soc_pct is not None and ctx.ev_soc_pct < 50
         battery_high = ctx.battery_soc_pct >= 80
@@ -267,8 +274,11 @@ class ChargingStrategy:
 
         base_fields = {
             "pv_surplus_w": round(pv_only, 1),
-            "battery_assist_w": round(assist, 1),
-            "battery_assist_reason": assist_reason,
+            "battery_assist_w": round(assist + hold_boost, 1),
+            "battery_assist_reason": (
+                f"{assist_reason} | Hold: {hold_reason}" if hold_boost > 0
+                else assist_reason
+            ),
         }
 
         if available >= threshold:
@@ -276,6 +286,8 @@ class ChargingStrategy:
             parts = [f"PV surplus {pv_only:.0f} W"]
             if assist > 0:
                 parts.append(f"+ {assist:.0f} W battery assist")
+            if hold_boost > 0:
+                parts.append(f"+ {hold_boost:.0f} W battery hold boost")
             if ctx.battery_soc_pct > 80 and ctx.battery_power_w > 0:
                 parts.append("(prioritize EV over battery)")
             if ev_soc_low:
@@ -922,6 +934,15 @@ class ChargingStrategy:
 
         if not ctx.wallbox.vehicle_connected:
             return 0.0, "No EV connected"
+
+        # Evening release: after the release hour, let battery charge to 100%
+        # for overnight use. No hold boost applied.
+        current_hour = ctx.now.hour
+        if current_hour >= self.battery_hold_release_hour:
+            return 0.0, (
+                f"Evening release: {current_hour}:00 >= "
+                f"{self.battery_hold_release_hour}:00, letting battery top off"
+            )
 
         # Below hold threshold — let battery charge normally
         if ctx.battery_soc_pct < self.battery_hold_soc_pct:
