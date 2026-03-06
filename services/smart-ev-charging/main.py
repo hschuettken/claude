@@ -93,7 +93,6 @@ class SmartEVChargingService(BaseService):
             charger_efficiency=self.settings.charger_efficiency,
             battery_hold_soc_pct=self.settings.battery_hold_soc_pct,
             battery_hold_margin=self.settings.battery_hold_margin,
-            battery_hold_release_hour=self.settings.battery_hold_release_hour,
         )
 
         self.logger.info(

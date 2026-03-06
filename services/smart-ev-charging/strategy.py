@@ -107,7 +107,6 @@ class ChargingStrategy:
         stop_cooldown_s: int = 300,         # wait at least 5 min before restarting
         battery_hold_soc_pct: float = 70.0, # hold battery at this SoC while EV charges
         battery_hold_margin: float = 1.3,   # 30% safety margin for refill forecast
-        battery_hold_release_hour: int = 17, # hour to release hold and let battery top off
     ) -> None:
         self.max_power_w = max_power_w
         self.min_power_w = min_power_w
@@ -128,7 +127,6 @@ class ChargingStrategy:
         self.stop_cooldown_s = stop_cooldown_s
         self.battery_hold_soc_pct = battery_hold_soc_pct
         self.battery_hold_margin = battery_hold_margin
-        self.battery_hold_release_hour = battery_hold_release_hour
 
         self._was_pv_charging = False
         self._last_target_w: int = 0
@@ -935,14 +933,10 @@ class ChargingStrategy:
         if not ctx.wallbox.vehicle_connected:
             return 0.0, "No EV connected"
 
-        # Evening release: after the release hour, let battery charge to 100%
-        # for overnight use. No hold boost applied.
+        # Night time: no hold boost (no PV production)
         current_hour = ctx.now.hour
-        if current_hour >= self.battery_hold_release_hour:
-            return 0.0, (
-                f"Evening release: {current_hour}:00 >= "
-                f"{self.battery_hold_release_hour}:00, letting battery top off"
-            )
+        if current_hour >= 21 or current_hour < 6:
+            return 0.0, "Night time — no hold boost"
 
         # Below hold threshold — let battery charge normally
         if ctx.battery_soc_pct < self.battery_hold_soc_pct:
@@ -951,24 +945,32 @@ class ChargingStrategy:
                 f"{self.battery_hold_soc_pct:.0f}%"
             )
 
-        # Calculate: can PV still fill battery from hold_soc to 100% later?
-        energy_to_fill_from_hold = (
-            (100.0 - self.battery_hold_soc_pct) / 100.0
+        # Energy-based release: can remaining PV still fill battery to 100%
+        # while covering household consumption? If not, release the hold.
+        SAFETY_BUFFER_KWH = 1.5  # kWh safety margin
+
+        # Energy needed to fill battery from CURRENT SoC to 100%
+        energy_to_full = (
+            (100.0 - ctx.battery_soc_pct) / 100.0
             * self.battery_capacity_kwh
         )
         hours_remaining = max(0.5, self._estimate_daylight_hours_remaining(ctx.now))
         household_kwh = (ctx.house_power_w / 1000.0) * hours_remaining
-        pv_available = ctx.pv_forecast_remaining_kwh - household_kwh
 
-        # Also account for max battery charge rate — can we physically fill in time?
+        # Can we physically charge the battery fast enough?
         max_battery_charge_kwh = (self.battery_ev_assist_max_w / 1000.0) * hours_remaining
-        energy_to_fill_from_hold = min(energy_to_fill_from_hold, max_battery_charge_kwh)
+        energy_to_full = min(energy_to_full, max_battery_charge_kwh)
 
-        if pv_available < energy_to_fill_from_hold * self.battery_hold_margin:
+        # PV energy surplus available after household consumption
+        pv_surplus_kwh = ctx.pv_forecast_remaining_kwh - household_kwh
+
+        # Release if PV surplus can't cover battery top-off + safety buffer
+        if pv_surplus_kwh < energy_to_full + SAFETY_BUFFER_KWH:
             return 0.0, (
-                f"Battery hold released: PV remaining ({pv_available:.1f} kWh) "
-                f"< {energy_to_fill_from_hold:.1f} kWh × "
-                f"{self.battery_hold_margin:.0%} margin needed to refill"
+                f"Energy-based release: PV surplus ({pv_surplus_kwh:.1f} kWh) "
+                f"< battery needs ({energy_to_full:.1f} kWh) + "
+                f"buffer ({SAFETY_BUFFER_KWH} kWh). "
+                f"Releasing hold so battery can top off."
             )
 
         # Redirect battery charging power to EV.
@@ -988,8 +990,9 @@ class ChargingStrategy:
             hold_soc=self.battery_hold_soc_pct,
             battery_charge_w=round(ctx.battery_power_w),
             boost_w=round(boost),
-            pv_available_kwh=round(pv_available, 1),
-            energy_to_fill=round(energy_to_fill_from_hold, 1),
+            pv_surplus_kwh=round(pv_surplus_kwh, 1),
+            energy_to_full=round(energy_to_full, 1),
+            safety_buffer=SAFETY_BUFFER_KWH,
             hours_remaining=round(hours_remaining, 1),
         )
 
@@ -997,7 +1000,9 @@ class ChargingStrategy:
             f"Battery hold at {self.battery_hold_soc_pct:.0f}%: "
             f"SoC {ctx.battery_soc_pct:.0f}%, redirecting "
             f"{boost:.0f} W to EV "
-            f"(PV can refill: {pv_available:.1f}/{energy_to_fill_from_hold:.1f} kWh)"
+            f"(PV surplus: {pv_surplus_kwh:.1f} kWh, "
+            f"battery needs: {energy_to_full:.1f} kWh + "
+            f"{SAFETY_BUFFER_KWH} kWh buffer)"
         )
 
     def _can_battery_refill(self, ctx: ChargingContext) -> tuple[bool, str]:
