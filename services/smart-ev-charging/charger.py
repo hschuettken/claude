@@ -63,6 +63,7 @@ class WallboxController:
         self._power_entity = power_entity
         self._energy_session_entity = energy_session_entity
         self._hems_power_number = hems_power_number
+        self._hems_current_number = hems_power_number.replace("power_limit_w", "current_limit_a")
         self._last_set_power: int | None = None
         # Debounce state for vehicle detection
         self._last_connected_time: float = 0.0
@@ -123,18 +124,34 @@ class WallboxController:
 
         The number entity has step=60, so values are rounded accordingly.
         Setting 0 effectively pauses charging.
+
+        Also sets the current limit (amps) — the Amtron requires BOTH
+        power_limit_w AND current_limit_a to be non-zero for charging.
+        Current is derived from power assuming 3-phase × 230V.
         """
         power_w = max(0, round(power_w / 60) * 60)
 
         if self._last_set_power == power_w:
             return  # No change needed
 
+        # Derive current limit: P = √3 × U × I × cos(φ) ≈ 3 × 230 × I
+        # Use per-phase: I_per_phase = P / (3 × 230)
+        if power_w > 0:
+            amps = max(6, int(power_w / (3 * 230)))  # min 6A per phase
+            amps = min(amps, 16)  # max 16A for 11kW wallbox
+        else:
+            amps = 0
+
         await self._ha.call_service("number", "set_value", {
             "entity_id": self._hems_power_number,
             "value": power_w,
         })
+        await self._ha.call_service("number", "set_value", {
+            "entity_id": self._hems_current_number,
+            "value": amps,
+        })
         self._last_set_power = power_w
-        logger.info("wallbox_power_set", power_w=power_w)
+        logger.info("wallbox_power_set", power_w=power_w, amps=amps)
 
     async def pause(self) -> None:
         """Pause charging (set power limit to 0)."""
