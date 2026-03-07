@@ -302,6 +302,24 @@ class ChargingStrategy:
             )
 
         if self._was_pv_charging:
+            # Before stopping: if battery SoC is high enough, use full battery
+            # discharge to bridge the gap. Better to drain battery than to cycle
+            # the wallbox on/off (which triggers anti-cycling cooldowns).
+            if ctx.battery_soc_pct > self.battery_min_soc_pct + 10:
+                bridge_shortfall = self.min_power_w - available
+                bridge_available = min(bridge_shortfall, self.battery_ev_assist_max_w)
+                bridged = available + bridge_available
+                if bridged >= self.min_power_w:
+                    target = self._clamp(bridged)
+                    return ChargingDecision(
+                        target,
+                        f"PV dip bridged by battery ({available:.0f} W + {bridge_available:.0f} W "
+                        f"battery bridge → {target} W, bat {ctx.battery_soc_pct:.0f}%)",
+                        pv_surplus_w=round(pv_only, 1),
+                        battery_assist_w=round(assist + hold_boost + bridge_available, 1),
+                        battery_assist_reason=f"Bridge: {bridge_available:.0f} W to prevent stop",
+                    )
+
             return ChargingDecision(
                 0,
                 f"PV surplus below minimum ({available:.0f} W < {self.min_power_w} W)",
