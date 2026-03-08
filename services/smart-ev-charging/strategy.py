@@ -263,7 +263,7 @@ class ChargingStrategy:
         # When battery can be refilled by sundown AND SoC is reasonable (>50%),
         # there's no risk — remove hysteresis entirely to start charging sooner.
         can_refill, _ = self._can_battery_refill(ctx)
-        battery_refill_safe = can_refill and ctx.battery_soc_pct >= 50
+        battery_refill_safe = can_refill and ctx.battery_soc_pct >= 30
         if battery_high or battery_refill_safe:
             hysteresis_reduction = self.start_hysteresis_w
         elif ev_soc_low:
