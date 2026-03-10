@@ -84,8 +84,10 @@ class OrchestratorService(BaseService):
         self._ev_state: dict = {"plan": None, "pending_clarifications": []}
         self._ev_events: dict[str, dict[str, str]] = {}  # Track EV calendar events {date: {event_id, summary}}
         self._gcal: GoogleCalendarClient | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None  # Main event loop for cross-thread scheduling
 
     async def run(self) -> None:
+        self._loop = asyncio.get_running_loop()
         self.mqtt.connect_background()
 
         memory = Memory(
@@ -211,13 +213,13 @@ class OrchestratorService(BaseService):
     def _on_ev_plan(self, topic: str, payload: dict) -> None:
         self._ev_state["plan"] = payload
         # Update calendar events asynchronously
-        if self._gcal and self.settings.google_calendar_orchestrator_id:
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self._update_ev_calendar_events(payload))
-            except RuntimeError:
-                # No running loop - skip calendar update
-                self.logger.warning("ev_calendar_update_skipped", reason="no_event_loop")
+        # Note: MQTT callbacks run in a separate thread, so we must use
+        # call_soon_threadsafe to schedule the coroutine on the main event loop.
+        if self._gcal and self.settings.google_calendar_orchestrator_id and self._loop:
+            self._loop.call_soon_threadsafe(
+                self._loop.create_task,
+                self._update_ev_calendar_events(payload),
+            )
 
     def _on_ev_clarification(self, topic: str, payload: dict) -> None:
         self._ev_state["pending_clarifications"] = payload.get("clarifications", [])
