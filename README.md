@@ -14,7 +14,7 @@ Python microservices for home automation, integrating with **Home Assistant** an
 |---------|---------|-------------|
 | **orchestrator** | AI-powered home brain — LLM reasoning, Telegram chat, proactive suggestions | 14 |
 | **pv-forecast** | ML solar production forecast (Gradient Boosting + weather data) | 23 MQTT + 8 REST |
-| **smart-ev-charging** | PV surplus EV charging with battery assist and deadline logic | 22 |
+| **smart-ev-charging** | PV surplus EV charging with battery assist, deadline logic, and watchdog monitoring | 22 |
 | **ev-forecast** | EV driving prediction from calendar + dual Audi Connect, smart charging plans | 13 |
 
 All services expose comprehensive decision context in Home Assistant, so you can see exactly *why* each system made its decision — directly on the MQTT device page.
