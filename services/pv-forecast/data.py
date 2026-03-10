@@ -112,7 +112,10 @@ def add_solar_features(
     # Clear sky index
     ghi_clear = compute_clear_sky_ghi(elev)
     actual_ghi = df["shortwave_radiation"].fillna(0).values
-    csi = np.where(ghi_clear > 10, actual_ghi / ghi_clear, 0.0)
+    # Use safe denominator to avoid RuntimeWarning from numpy evaluating
+    # both branches of np.where before selecting (division by zero/NaN).
+    ghi_clear_safe = np.where(ghi_clear > 10, ghi_clear, 1.0)
+    csi = np.where(ghi_clear > 10, actual_ghi / ghi_clear_safe, 0.0)
     df["clear_sky_index"] = np.clip(csi, 0, 1.5)
 
     return df
