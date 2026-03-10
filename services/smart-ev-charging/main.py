@@ -15,6 +15,8 @@ Modes:
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 import time
 from datetime import datetime, time as dt_time, timedelta
 from pathlib import Path
@@ -51,6 +53,10 @@ class SmartEVChargingService(BaseService):
 
         # --- Feature #6: Plug/unplug resilience ---
         self._last_vehicle_connected: bool = False
+
+        # --- Watchdog ---
+        self._last_cycle_completed_at: float = time.monotonic()
+        self._watchdog_task: asyncio.Task | None = None
 
     async def run(self) -> None:
         self.mqtt.connect_background()
@@ -107,6 +113,9 @@ class SmartEVChargingService(BaseService):
             battery_max_assist=self.settings.battery_ev_assist_max_w,
         )
 
+        # Start watchdog
+        self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+
         # Control loop
         while not self._shutdown_event.is_set():
             try:
@@ -115,6 +124,7 @@ class SmartEVChargingService(BaseService):
                 self.logger.exception("control_cycle_error")
             finally:
                 self._touch_healthcheck()
+                self._last_cycle_completed_at = time.monotonic()
 
             try:
                 done, _ = await asyncio.wait(
@@ -132,6 +142,72 @@ class SmartEVChargingService(BaseService):
                     self.logger.info("forced_cycle_triggered")
             except asyncio.TimeoutError:
                 pass
+
+
+    # ------------------------------------------------------------------
+    # Watchdog -- monitors control loop liveness
+    # ------------------------------------------------------------------
+
+    async def _watchdog_loop(self) -> None:
+        """Background task that monitors the control loop heartbeat.
+
+        If the control loop hasn't completed a cycle within the configured
+        timeout, this publishes an MQTT alert and optionally exits the
+        process (triggering a Docker restart via the restart policy).
+        """
+        self.logger.info(
+            "watchdog_started",
+            timeout_s=self.settings.watchdog_timeout_seconds,
+            check_interval_s=self.settings.watchdog_check_interval_seconds,
+            restart_on_freeze=self.settings.watchdog_restart_on_freeze,
+        )
+        consecutive_alerts = 0
+
+        while not self._shutdown_event.is_set():
+            try:
+                await asyncio.sleep(self.settings.watchdog_check_interval_seconds)
+            except asyncio.CancelledError:
+                break
+
+            age = time.monotonic() - self._last_cycle_completed_at
+            if age > self.settings.watchdog_timeout_seconds:
+                consecutive_alerts += 1
+                self.logger.critical(
+                    "watchdog_alert",
+                    last_cycle_age_s=round(age, 1),
+                    timeout_s=self.settings.watchdog_timeout_seconds,
+                    consecutive_alerts=consecutive_alerts,
+                )
+
+                # Publish MQTT alert so HA / monitoring can pick it up
+                try:
+                    self.publish("watchdog", {
+                        "status": "frozen",
+                        "last_cycle_age_s": round(age, 1),
+                        "timeout_s": self.settings.watchdog_timeout_seconds,
+                        "consecutive_alerts": consecutive_alerts,
+                        "action": "restart" if self.settings.watchdog_restart_on_freeze else "alert_only",
+                    })
+                except Exception:
+                    self.logger.exception("watchdog_mqtt_publish_failed")
+
+                if self.settings.watchdog_restart_on_freeze:
+                    self.logger.critical(
+                        "watchdog_forcing_exit",
+                        reason="Control loop frozen, exiting to trigger Docker restart",
+                        frozen_for_s=round(age, 1),
+                    )
+                    # Give MQTT a moment to send the alert
+                    await asyncio.sleep(1)
+                    os._exit(1)  # Hard exit -- asyncio cleanup may hang too
+            else:
+                if consecutive_alerts > 0:
+                    self.logger.info(
+                        "watchdog_recovered",
+                        previous_alerts=consecutive_alerts,
+                        cycle_age_s=round(age, 1),
+                    )
+                consecutive_alerts = 0
 
     # ------------------------------------------------------------------
     # Control cycle
@@ -967,7 +1043,24 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.logger.info("ha_discovery_registered", entity_count=28)
+
+        # --- Watchdog sensor ---
+
+        self.mqtt.publish_ha_discovery(
+            "binary_sensor", "watchdog_status", node_id=node, config={
+                "name": "Watchdog Status",
+                "device": device,
+                "state_topic": f"homelab/{self.name}/watchdog",
+                "value_template": (
+                    "{{ 'ON' if value_json.status == 'frozen' else 'OFF' }}"
+                ),
+                "device_class": "problem",
+                "icon": "mdi:alert-circle-outline",
+                "expire_after": 600,
+            },
+        )
+
+        self.logger.info("ha_discovery_registered", entity_count=29)
 
     # ------------------------------------------------------------------
     # Healthcheck

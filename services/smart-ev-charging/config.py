@@ -79,3 +79,8 @@ class EVChargingSettings(BaseSettings):
 
     # --- Timing ---
     control_interval_seconds: int = 30
+
+    # --- Watchdog ---
+    watchdog_timeout_seconds: int = 300  # 5 minutes without cycle completion = alert
+    watchdog_check_interval_seconds: int = 30
+    watchdog_restart_on_freeze: bool = True  # exit process on freeze (Docker restarts)
