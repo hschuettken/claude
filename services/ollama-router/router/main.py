@@ -35,7 +35,9 @@ async def lifespan(app: FastAPI):
         "model_manager": mm,
         "balancer": bal,
     })
-    app.state._state = app_state
+    # Set state attributes individually (Starlette 0.52+ treats _state as internal)
+    for k, v in app_state.items():
+        setattr(app.state, k, v)
 
     await nm.start()
     await mm.start()

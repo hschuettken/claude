@@ -96,5 +96,5 @@ async def get_config(request: Request):
 async def update_config(request: Request):
     from .config import reload_settings
     new_settings = reload_settings()
-    request.app.state._state["settings"] = new_settings
+    request.app.state.settings = new_settings
     return {"status": "reloaded", "config": new_settings.model_dump()}
