@@ -8,6 +8,7 @@ history, and executes tool calls.
 from __future__ import annotations
 
 import json
+import asyncio
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -168,8 +169,8 @@ class Brain:
         self._memory.append_message(chat_id, "user", user_message)
         self._memory.append_message(chat_id, "assistant", final_text)
 
-        # Auto-store conversation in semantic memory (fire-and-forget)
-        await self._auto_store_conversation(user_message, final_text, user_name)
+        # Auto-store conversation in semantic memory (truly fire-and-forget)
+        asyncio.create_task(self._auto_store_conversation(user_message, final_text, user_name))
 
         return final_text
 

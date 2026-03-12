@@ -1012,7 +1012,7 @@ class ChargingStrategy:
         # Energy needed to fill battery from CURRENT SoC to 100%
         energy_to_full = (
             (100.0 - ctx.battery_soc_pct) / 100.0
-            * self.battery_capacity_kwh
+            * ctx.battery_capacity_kwh  # use runtime context, not config default
         )
         hours_remaining = max(0.5, self._estimate_daylight_hours_remaining(ctx.now))
         household_kwh = (ctx.house_power_w / 1000.0) * hours_remaining
