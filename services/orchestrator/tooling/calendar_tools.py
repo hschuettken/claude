@@ -172,7 +172,7 @@ class CalendarTools:
 
         for event in events:
             summary_lower = (event.get("summary") or "").lower()
-            if any(kw in summary_lower for kw in absence_keywords) or event.get("all_day"):
+            if any(kw in summary_lower for kw in absence_keywords):
                 absences.append(event)
             else:
                 other_events.append(event)
