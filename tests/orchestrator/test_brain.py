@@ -345,8 +345,11 @@ class TestAutoStoreIsAsync:
                            memory=memory, semantic=semantic)
 
         with patch("asyncio.create_task") as mock_create_task:
-            # create_task needs a real coroutine — stub it
-            mock_create_task.return_value = MagicMock()
+            # create_task receives a coroutine — close it to avoid RuntimeWarning
+            def _consume_coro(coro):
+                coro.close()
+                return MagicMock()
+            mock_create_task.side_effect = _consume_coro
             result = await brain.process_message("Hello", "chat_1", "Henning")
 
         assert result == "Response text"
@@ -395,7 +398,7 @@ class TestProcessMessage:
         semantic.entry_count = 0
 
         brain = make_brain(llm=llm, memory=memory, semantic=semantic)
-        with patch("asyncio.create_task"):
+        with patch("asyncio.create_task", side_effect=lambda c: (c.close(), MagicMock())[1]):
             result = await brain.process_message("Status?", "chat_42", "Henning")
 
         assert result == "All good"
@@ -411,7 +414,7 @@ class TestProcessMessage:
         semantic.entry_count = 0
 
         brain = make_brain(llm=llm, memory=memory, semantic=semantic)
-        with patch("asyncio.create_task"):
+        with patch("asyncio.create_task", side_effect=lambda c: (c.close(), MagicMock())[1]):
             await brain.process_message("Save me", "chat_99", "Henning")
 
         calls = memory.append_message.call_args_list
@@ -430,7 +433,7 @@ class TestProcessMessage:
         semantic.entry_count = 0
 
         brain = make_brain(llm=llm, memory=memory, semantic=semantic)
-        with patch("asyncio.create_task"):
+        with patch("asyncio.create_task", side_effect=lambda c: (c.close(), MagicMock())[1]):
             await brain.process_message("Hello", "chat_5", "Henning")
 
         memory.set_user_name.assert_called_once_with("chat_5", "Henning")
