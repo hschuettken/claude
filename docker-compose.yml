@@ -142,6 +142,19 @@ services:
     networks:
       - homelab
 
+  health-monitor:
+    build:
+      context: .
+      dockerfile: services/health-monitor/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PYTHONPATH: "/app:/app/shared"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - homelab
+
   # --- Template for new services ---
   # my-new-service:
   #   build:
