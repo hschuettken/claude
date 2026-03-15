@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -23,6 +24,7 @@ VEHICLE_STATE_CONNECTED = "2"       # B — Vehicle connected (not charging)
 VEHICLE_STATE_CHARGING = "3"        # C — Charging
 VEHICLE_STATE_CHARGING_VENT = "4"   # D — Charging with ventilation
 VEHICLE_STATE_ERROR = "5"           # E — Error
+HA_READ_TIMEOUT = 10
 
 
 @dataclass
@@ -161,7 +163,10 @@ class WallboxController:
 
     async def _get_state(self, entity_id: str, default: str = "unknown") -> str:
         try:
-            result = await self._ha.get_state(entity_id)
+            result = await asyncio.wait_for(
+                self._ha.get_state(entity_id),
+                timeout=HA_READ_TIMEOUT,
+            )
             state = result.get("state", default)
             if state in ("unavailable", "unknown"):
                 return default
