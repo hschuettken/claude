@@ -84,7 +84,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.homelab-orchestrator-api.rule=Host(`${TRAEFIK_ORCHESTRATOR_HOST:-api.local.schuettken.net}`)"
-      - "traefik.http.routers.homelab-orchestrator-api.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.homelab-orchestrator-api.entrypoints=${TRAEFIK_ENTRYPOINT:-https}"
       - "traefik.http.routers.homelab-orchestrator-api.tls=true"
       - "traefik.http.services.homelab-orchestrator-api.loadbalancer.server.port=8100"
     networks:
@@ -116,7 +116,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.homelab-dashboard.rule=Host(`${TRAEFIK_DASHBOARD_HOST:-cockpit.local.schuettken.net}`)"
-      - "traefik.http.routers.homelab-dashboard.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.homelab-dashboard.entrypoints=${TRAEFIK_ENTRYPOINT:-https}"
       - "traefik.http.routers.homelab-dashboard.tls=true"
       - "traefik.http.services.homelab-dashboard.loadbalancer.server.port=8085"
     networks:
