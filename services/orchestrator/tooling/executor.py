@@ -137,6 +137,10 @@ class ToolExecutor:
             "orbit_create_page",
             "orbit_get_recommendations",
             "orbit_what_now",
+            "orbit_list_lists",
+            "orbit_get_list",
+            "orbit_add_list_item",
+            "orbit_check_list_item",
         ):
             self._dispatch[name] = (self._orbit_tools, name)
 

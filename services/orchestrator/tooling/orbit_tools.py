@@ -202,6 +202,78 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "orbit_list_lists",
+            "description": (
+                "Get all Orbit shared lists (shopping, todo, checklists). "
+                "Returns list names, types, and item counts."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "orbit_get_list",
+            "description": (
+                "Get a specific Orbit list with all its items. "
+                "Use orbit_list_lists first to find the list ID."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "list_id": {"type": "string", "description": "List UUID"},
+                },
+                "required": ["list_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "orbit_add_list_item",
+            "description": (
+                "Add an item to an Orbit list. "
+                "If you know the list name (e.g., 'Shopping'), "
+                "call orbit_list_lists first to find the ID, then add the item."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "list_id": {"type": "string", "description": "List UUID"},
+                    "content": {"type": "string", "description": "Item text to add"},
+                },
+                "required": ["list_id", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "orbit_check_list_item",
+            "description": (
+                "Check (complete) an item on an Orbit list. "
+                "Use orbit_get_list to find the item ID first."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "list_id": {"type": "string", "description": "List UUID"},
+                    "item_id": {"type": "string", "description": "Item UUID"},
+                    "checked": {
+                        "type": "boolean",
+                        "description": "True to check, False to uncheck (default True)",
+                    },
+                },
+                "required": ["list_id", "item_id"],
+            },
+        },
+    },
 ]
 
 
@@ -381,4 +453,49 @@ class OrbitTools:
             _url("/what-now"), params=params, headers=_headers()
         )
         resp.raise_for_status()
+        return resp.json()
+
+    # ------------------------------------------------------------------
+    # Shared Lists
+    # ------------------------------------------------------------------
+
+    async def orbit_list_lists(self) -> dict[str, Any]:
+        """Get all shared lists."""
+        client = await self._get_client()
+        resp = await client.get(_url("/lists"), headers=_headers())
+        resp.raise_for_status()
+        return resp.json()
+
+    async def orbit_get_list(self, list_id: str) -> dict[str, Any]:
+        """Get a list with all items."""
+        client = await self._get_client()
+        resp = await client.get(_url(f"/lists/{list_id}"), headers=_headers())
+        resp.raise_for_status()
+        return resp.json()
+
+    async def orbit_add_list_item(self, list_id: str, content: str) -> dict[str, Any]:
+        """Add an item to a list."""
+        client = await self._get_client()
+        resp = await client.post(
+            _url(f"/lists/{list_id}/items"),
+            json={"content": content},
+            headers=_headers(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        logger.info("Added list item: '%s' to list %s", content, list_id)
+        return data
+
+    async def orbit_check_list_item(
+        self, list_id: str, item_id: str, checked: bool = True
+    ) -> dict[str, Any]:
+        """Check or uncheck a list item."""
+        client = await self._get_client()
+        action = "check" if checked else "uncheck"
+        resp = await client.post(
+            _url(f"/lists/{list_id}/items/{item_id}/{action}"),
+            headers=_headers(),
+        )
+        resp.raise_for_status()
+        logger.info("%s list item %s in list %s", action, item_id, list_id)
         return resp.json()
