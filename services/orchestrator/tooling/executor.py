@@ -23,6 +23,7 @@ from tooling.calendar_tools import CalendarTools
 from tooling.ev_tools import EVTools
 from tooling.memory_tools import MemoryTools
 from tooling.notification_tools import NotificationTools
+from tooling.orbit_tools import OrbitTools
 
 logger = get_logger("tooling.executor")
 
@@ -81,6 +82,7 @@ class ToolExecutor:
             memory_doc=memory_doc,
         )
         self._notification_tools = NotificationTools(send_notification_fn=send_notification_fn)
+        self._orbit_tools = OrbitTools()
 
         # Build dispatch table: tool_name → (handler_instance, method_name)
         self._dispatch: dict[str, tuple[Any, str]] = {}
@@ -125,6 +127,18 @@ class ToolExecutor:
 
         # Notification tools
         self._dispatch["send_notification"] = (self._notification_tools, "send_notification")
+
+        # Orbit tools
+        for name in (
+            "orbit_create_task",
+            "orbit_list_tasks",
+            "orbit_complete_task",
+            "orbit_list_projects",
+            "orbit_create_page",
+            "orbit_get_recommendations",
+            "orbit_what_now",
+        ):
+            self._dispatch[name] = (self._orbit_tools, name)
 
         # Weather (inline on self — uses HA directly)
         self._dispatch["get_weather_forecast"] = (self, "_impl_get_weather_forecast")
