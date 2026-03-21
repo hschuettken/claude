@@ -153,6 +153,8 @@ class ToolExecutor:
             "set_heating_mode",
             "get_hems_schedule",
             "set_room_target",
+            "activate_hems_schedule",
+            "log_thermal_training_data",
         ):
             self._dispatch[name] = (self._hems_tools, name)
 

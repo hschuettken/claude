@@ -118,6 +118,71 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "activate_hems_schedule",
+            "description": (
+                "Activate a HEMS schedule by ID and send KNX climate control command to Home Assistant. "
+                "This reads the schedule from the database and sends climate.set_temperature to the HA entity. "
+                "Phase 1: Bridge between HEMS schedules and KNX heating control."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "schedule_id": {
+                        "type": "string",
+                        "description": "UUID of the HEMS schedule to activate.",
+                    }
+                },
+                "required": ["schedule_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "log_thermal_training_data",
+            "description": (
+                "Log thermal training data (temperatures, humidity, power) to InfluxDB for HEMS model training. "
+                "This data is used to improve heating predictions and system efficiency."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "room": {
+                        "type": "string",
+                        "description": "Room name (e.g., 'wohnzimmer', 'schlafzimmer').",
+                    },
+                    "current_temp": {
+                        "type": "number",
+                        "description": "Current room temperature in Celsius.",
+                    },
+                    "target_temp": {
+                        "type": "number",
+                        "description": "Target room temperature in Celsius.",
+                    },
+                    "outdoor_temp": {
+                        "type": "number",
+                        "description": "Optional: Outdoor temperature in Celsius.",
+                    },
+                    "humidity": {
+                        "type": "number",
+                        "description": "Optional: Relative humidity in percent.",
+                    },
+                    "boiler_active": {
+                        "type": "boolean",
+                        "description": "Optional: Whether the boiler is currently active.",
+                    },
+                    "power_consumption_w": {
+                        "type": "number",
+                        "description": "Optional: Current power consumption in watts.",
+                    },
+                },
+                "required": ["room", "current_temp", "target_temp"],
+            },
+        },
+    },
 ]
 
 
@@ -239,4 +304,86 @@ class HEMSTools:
             return {"error": "HEMS service not available", "status": "offline"}
         except Exception as e:
             logger.exception("HEMS set_room_target error")
+            return {"error": str(e), "status": "error"}
+
+    async def activate_hems_schedule(self, schedule_id: str) -> dict[str, Any]:
+        """Activate a HEMS schedule and send KNX command to Home Assistant.
+        
+        Phase 1 implementation: calls NB9OS heating endpoint to activate schedule
+        and send climate control command to HA.
+        """
+        nb9os_url = "http://nb9os:8060"
+        endpoint = f"{nb9os_url}/api/v1/heating/schedules/{schedule_id}/activate"
+        
+        try:
+            payload = {"confirm": True}
+            response = requests.post(
+                endpoint,
+                json=payload,
+                timeout=HEMS_TIMEOUT,
+            )
+            response.raise_for_status()
+            result = response.json()
+            logger.info(f"HEMS schedule activated: {schedule_id}")
+            return result
+        except requests.exceptions.ConnectionError:
+            logger.error("NB9OS service connection failed")
+            return {"error": "NB9OS service not available", "status": "offline"}
+        except requests.exceptions.Timeout:
+            logger.error("NB9OS service request timeout")
+            return {"error": "NB9OS service not available", "status": "offline"}
+        except Exception as e:
+            logger.exception(f"HEMS activate_schedule error: {e}")
+            return {"error": str(e), "status": "error"}
+
+    async def log_thermal_training_data(
+        self,
+        room: str,
+        current_temp: float,
+        target_temp: float,
+        outdoor_temp: float | None = None,
+        humidity: float | None = None,
+        boiler_active: bool | None = None,
+        power_consumption_w: float | None = None,
+    ) -> dict[str, Any]:
+        """Log thermal training data to InfluxDB via NB9OS endpoint.
+        
+        Phase 1 implementation: calls NB9OS thermal-log endpoint to write
+        training data to InfluxDB for model tuning.
+        """
+        nb9os_url = "http://nb9os:8060"
+        endpoint = f"{nb9os_url}/api/v1/heating/thermal-log"
+        
+        try:
+            payload = {
+                "room": room,
+                "current_temp": current_temp,
+                "target_temp": target_temp,
+            }
+            if outdoor_temp is not None:
+                payload["outdoor_temp"] = outdoor_temp
+            if humidity is not None:
+                payload["humidity"] = humidity
+            if boiler_active is not None:
+                payload["boiler_active"] = boiler_active
+            if power_consumption_w is not None:
+                payload["power_consumption_w"] = power_consumption_w
+            
+            response = requests.post(
+                endpoint,
+                json=payload,
+                timeout=HEMS_TIMEOUT,
+            )
+            response.raise_for_status()
+            result = response.json()
+            logger.info(f"Thermal data logged: {room}")
+            return result
+        except requests.exceptions.ConnectionError:
+            logger.error("NB9OS service connection failed")
+            return {"error": "NB9OS service not available", "status": "offline"}
+        except requests.exceptions.Timeout:
+            logger.error("NB9OS service request timeout")
+            return {"error": "NB9OS service not available", "status": "offline"}
+        except Exception as e:
+            logger.exception(f"HEMS log_thermal_training_data error: {e}")
             return {"error": str(e), "status": "error"}
