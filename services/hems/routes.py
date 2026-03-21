@@ -192,7 +192,11 @@ async def set_mode(body: ModeSetRequest, request: Request) -> ModeResponse:
 @router.get("/api/v1/hems/schedule", response_model=list[ScheduleItem], tags=["hems"])
 async def list_schedules(room_id: Optional[str] = None, request: Request = None) -> list[ScheduleItem]:
     """List all schedules, optionally filtered by room."""
-    db: HEMSDatabase = request.app.state.db
+    db: Optional[HEMSDatabase] = request.app.state.db
+    if not db:
+        logger.warning("Database not available for schedule listing")
+        return []
+    
     records = await db.list_schedules(room_id=room_id)
     return [
         ScheduleItem(
@@ -214,7 +218,13 @@ async def list_schedules(room_id: Optional[str] = None, request: Request = None)
 @router.post("/api/v1/hems/schedule", status_code=status.HTTP_201_CREATED, tags=["hems"])
 async def create_schedule(body: ScheduleCreateRequest, request: Request) -> ScheduleItem:
     """Create a new climate schedule."""
-    db: HEMSDatabase = request.app.state.db
+    db: Optional[HEMSDatabase] = request.app.state.db
+    
+    if not db:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not available"
+        )
 
     # Parse times
     try:
@@ -255,7 +265,14 @@ async def create_schedule(body: ScheduleCreateRequest, request: Request) -> Sche
 @router.get("/api/v1/hems/schedule/{schedule_id}", response_model=ScheduleItem, tags=["hems"])
 async def get_schedule(schedule_id: UUID, request: Request) -> ScheduleItem:
     """Fetch a single schedule by ID."""
-    db: HEMSDatabase = request.app.state.db
+    db: Optional[HEMSDatabase] = request.app.state.db
+    
+    if not db:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not available"
+        )
+    
     record = await db.get_schedule(schedule_id)
 
     if not record:
@@ -278,7 +295,13 @@ async def get_schedule(schedule_id: UUID, request: Request) -> ScheduleItem:
 @router.patch("/api/v1/hems/schedule/{schedule_id}", response_model=ScheduleItem, tags=["hems"])
 async def update_schedule(schedule_id: UUID, body: ScheduleUpdateRequest, request: Request) -> ScheduleItem:
     """Update a schedule (target temp, mode, or active status)."""
-    db: HEMSDatabase = request.app.state.db
+    db: Optional[HEMSDatabase] = request.app.state.db
+    
+    if not db:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not available"
+        )
 
     record = await db.update_schedule(
         schedule_id=schedule_id,
@@ -307,7 +330,13 @@ async def update_schedule(schedule_id: UUID, body: ScheduleUpdateRequest, reques
 @router.get("/api/v1/hems/schedule/{room_id}/current", response_model=ScheduleCurrentResponse, tags=["hems"])
 async def get_current_schedule(room_id: str, request: Request) -> ScheduleCurrentResponse:
     """Get the current active schedule for a room (based on current day/time)."""
-    db: HEMSDatabase = request.app.state.db
+    db: Optional[HEMSDatabase] = request.app.state.db
+    
+    if not db:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not available"
+        )
 
     now = datetime.now(timezone.utc)
     dow = now.weekday()  # 0=Monday, 6=Sunday

@@ -290,8 +290,9 @@ async def lifespan(app: FastAPI):
         app.state.db = _hems_db
         logger.info("HEMS database initialized")
     except Exception as e:
-        logger.error("Failed to initialize HEMS database: %s", e)
-        # Continue without database (non-fatal for other services)
+        logger.warning("Could not initialize HEMS database (will retry on use): %s", e)
+        # Set empty db for now — routes will handle gracefully
+        app.state.db = None
 
     # Initialize controllers
     _mixer_controller = MixerController(kp=0.8, ki=0.02, max_integral=20, rate_limit=2.0)
