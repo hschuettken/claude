@@ -32,6 +32,7 @@ from pydantic import BaseModel
 
 from boiler_manager import BoilerManager, BoilerState
 from config import HEMSSettings
+from database import HEMSDatabase
 from mixer_controller import MixerController
 from routes import router
 
@@ -50,6 +51,7 @@ _mixer_controller: Optional[MixerController] = None
 _boiler_manager: Optional[BoilerManager] = None
 _influxdb_client: Optional[influxdb_client.InfluxDBClient] = None
 _influxdb_write_api = None
+_hems_db: Optional[HEMSDatabase] = None
 
 
 # ---------------------------------------------------------------------------
@@ -168,14 +170,32 @@ async def _fetch_flow_temperature() -> Optional[float]:
 async def _fetch_heating_demand() -> Optional[float]:
     """Fetch current heating demand in watts.
 
-    For now, returns a static schedule-based or zero-demand value.
-    In production, read from DB or schedule table.
+    Reads from DB schedule table to determine if we need heating now.
 
     Returns:
         Demand in watts, or None if unavailable.
     """
-    # TODO: Read from DB schedule or derive from system state
-    # For Phase 2, we'll use a simple zero/nonzero logic
+    global _hems_db
+    
+    if not _hems_db:
+        return 0.0
+    
+    # For Phase 1, we fetch the current schedule target for a primary room
+    # and derive demand from it. In Phase 2, we'll use a more sophisticated model.
+    try:
+        now = datetime.now(timezone.utc)
+        dow = now.weekday()
+        current_time = now.time()
+        
+        # Check primary room (living_room)
+        schedule = await _hems_db.get_current_schedule("living_room", dow, current_time)
+        if schedule:
+            # Simple heuristic: if we have a schedule, demand = target temp
+            # (will be refined in Phase 2)
+            return float(schedule.target_temp)
+    except Exception as e:
+        logger.warning("Error fetching demand from schedule: %s", e)
+    
     return 0.0
 
 
@@ -255,13 +275,23 @@ async def control_loop(settings: HEMSSettings) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _control_loop_task, _mixer_controller, _boiler_manager, _influxdb_client, _influxdb_write_api
+    global _control_loop_task, _mixer_controller, _boiler_manager, _influxdb_client, _influxdb_write_api, _hems_db
 
     settings: HEMSSettings = app.state.settings
     logger.info("HEMS starting up — mode=%s", settings.hems_mode)
 
     HEALTHCHECK_FILE.parent.mkdir(parents=True, exist_ok=True)
     HEALTHCHECK_FILE.touch()
+
+    # Initialize database
+    _hems_db = HEMSDatabase(settings.hems_db_url)
+    try:
+        await _hems_db.init()
+        app.state.db = _hems_db
+        logger.info("HEMS database initialized")
+    except Exception as e:
+        logger.error("Failed to initialize HEMS database: %s", e)
+        # Continue without database (non-fatal for other services)
 
     # Initialize controllers
     _mixer_controller = MixerController(kp=0.8, ki=0.02, max_integral=20, rate_limit=2.0)
@@ -270,6 +300,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize InfluxDB
     _influxdb_client, _influxdb_write_api = _init_influxdb(settings)
+    app.state.influxdb_write_api = _influxdb_write_api
 
     # Start background control loop
     _control_loop_task = asyncio.create_task(control_loop(settings))
@@ -290,6 +321,10 @@ async def lifespan(app: FastAPI):
     # Close InfluxDB client
     if _influxdb_client:
         _influxdb_client.close()
+
+    # Close database
+    if _hems_db:
+        await _hems_db.close()
 
     HEALTHCHECK_FILE.unlink(missing_ok=True)
 
