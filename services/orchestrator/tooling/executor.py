@@ -24,6 +24,7 @@ from tooling.ev_tools import EVTools
 from tooling.memory_tools import MemoryTools
 from tooling.notification_tools import NotificationTools
 from tooling.orbit_tools import OrbitTools
+from tooling.hems_tools import HEMSTools
 
 logger = get_logger("tooling.executor")
 
@@ -83,6 +84,7 @@ class ToolExecutor:
         )
         self._notification_tools = NotificationTools(send_notification_fn=send_notification_fn)
         self._orbit_tools = OrbitTools()
+        self._hems_tools = HEMSTools()
 
         # Build dispatch table: tool_name → (handler_instance, method_name)
         self._dispatch: dict[str, tuple[Any, str]] = {}
@@ -143,6 +145,16 @@ class ToolExecutor:
             "orbit_check_list_item",
         ):
             self._dispatch[name] = (self._orbit_tools, name)
+
+        # HEMS tools
+        for name in (
+            "get_heating_status",
+            "get_heating_recommendation",
+            "set_heating_mode",
+            "get_hems_schedule",
+            "set_room_target",
+        ):
+            self._dispatch[name] = (self._hems_tools, name)
 
         # Weather (inline on self — uses HA directly)
         self._dispatch["get_weather_forecast"] = (self, "_impl_get_weather_forecast")

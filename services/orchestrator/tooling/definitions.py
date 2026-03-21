@@ -14,6 +14,7 @@ from tooling.ev_tools import TOOL_DEFINITIONS as _EV
 from tooling.memory_tools import TOOL_DEFINITIONS as _MEMORY
 from tooling.notification_tools import TOOL_DEFINITIONS as _NOTIFICATION
 from tooling.orbit_tools import TOOL_DEFINITIONS as _ORBIT
+from tooling.hems_tools import TOOL_DEFINITIONS as _HEMS
 
 # Weather tool definition (uses HA but doesn't warrant its own module)
 _WEATHER: list[dict[str, Any]] = [
@@ -35,5 +36,6 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = (
     + _MEMORY
     + _NOTIFICATION
     + _ORBIT
+    + _HEMS
     + _WEATHER
 )
