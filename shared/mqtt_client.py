@@ -123,8 +123,24 @@ class MQTTClient:
 
     def connect_background(self) -> None:
         """Connect and start the network loop in a background thread."""
-        self._client.connect(self.host, self.port)
-        self._client.loop_start()
+        import time as _time
+        last_exc = None
+        for attempt in range(10):
+            try:
+                self._client.connect(self.host, self.port)
+                self._client.loop_start()
+                return
+            except OSError as exc:
+                last_exc = exc
+                logger.warning(
+                    "mqtt_connect_retry",
+                    host=self.host,
+                    port=self.port,
+                    attempt=attempt + 1,
+                    error=str(exc),
+                )
+                _time.sleep(3)
+        raise last_exc  # type: ignore[misc]
 
     def publish_ha_discovery(
         self,
