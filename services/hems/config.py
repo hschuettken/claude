@@ -23,6 +23,12 @@ class HEMSSettings(BaseSettings):
     # Redis
     redis_url: str = "redis://192.168.0.81:6379"
 
+    # InfluxDB v2
+    influxdb_url: str = "http://192.168.0.50:8086"
+    influxdb_token: str = ""
+    influxdb_org: str = "homelab"
+    influxdb_bucket: str = "hems"
+
     # API
     api_host: str = "0.0.0.0"
     api_port: int = 8210
