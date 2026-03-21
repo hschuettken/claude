@@ -1,13 +1,18 @@
-FROM homelab-base:latest
+FROM python:3.12-slim
 
-ENV PYTHONPATH="/app"
+RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONPATH="/app:/app/shared"
+
+WORKDIR /app
+
+COPY base/requirements.txt /tmp/base-requirements.txt
+RUN pip install --no-cache-dir -r /tmp/base-requirements.txt && rm /tmp/base-requirements.txt
 
 COPY services/hems/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
 
 COPY services/hems/*.py /app/
-
-# Bundle shared libs
 COPY shared/ /app/shared/
 
 EXPOSE 8210
