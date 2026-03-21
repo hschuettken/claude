@@ -46,7 +46,7 @@ class NotificationTools:
         self, chat_id: str, message: str
     ) -> dict[str, Any]:
         if self._send_notification:
-            chat_id_val = int(chat_id) if str(chat_id).lstrip(-).isdigit() else chat_id
+            chat_id_val = int(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id
             await self._send_notification(chat_id_val, message)
             return {"success": True, "chat_id": chat_id}
         return {"error": "Notification channel not available"}
