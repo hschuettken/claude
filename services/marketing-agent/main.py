@@ -7,6 +7,9 @@ from fastapi import FastAPI, status
 from fastapi.responses import JSONResponse
 
 from api import signals, topics, drafts
+from api import scout
+from app.scout.events import init_nats_publisher, close_nats_publisher
+from app.scout.scheduler import get_scheduler
 from config import settings
 from database import engine
 from models import Base
@@ -24,10 +27,32 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables initialized")
 
+    # Initialize Scout Engine
+    if settings.scout_enabled:
+        logger.info("Initializing Scout Engine...")
+
+        # Initialize NATS publisher
+        await init_nats_publisher(settings.nats_url)
+
+        # Start scheduler
+        scheduler = get_scheduler()
+        try:
+            await scheduler.start()
+            logger.info("Scout scheduler started successfully")
+        except Exception as e:
+            logger.error(f"Failed to start Scout scheduler: {e}")
+
     yield
 
     # Shutdown
     logger.info("Marketing Agent shutting down...")
+
+    # Stop Scout Engine
+    if settings.scout_enabled:
+        logger.info("Shutting down Scout Engine...")
+        scheduler = get_scheduler()
+        await scheduler.stop()
+        await close_nats_publisher()
 
 
 # Create FastAPI app
@@ -54,6 +79,7 @@ async def health_check():
 app.include_router(signals.router, prefix="/api/v1")
 app.include_router(topics.router, prefix="/api/v1")
 app.include_router(drafts.router, prefix="/api/v1")
+app.include_router(scout.router, prefix="/api/v1")
 
 
 # Error handlers

@@ -1,5 +1,7 @@
 """Configuration for marketing agent service."""
 
+from typing import Optional
+
 from pydantic_settings import BaseSettings
 
 
@@ -13,10 +15,26 @@ class MarketingSettings(BaseSettings):
     ghost_url: str = "https://layer8.schuettken.net"
     ghost_admin_api_key: str = ""
 
+    # Scout Engine
+    searxng_url: str = "http://192.168.0.84:8080"
+    nats_url: Optional[str] = None  # Optional: e.g., "nats://nats.default.svc.cluster.local:4222"
+    scout_enabled: bool = True
+
     # Service
     marketing_port: int = 8210
     debug: bool = False
     log_level: str = "INFO"
+
+    # LLM Configuration
+    llm_provider: str = "ollama"  # ollama or openai
+    llm_model: str = "llama3.1:8b"
+    ollama_url: str = "http://192.168.0.23:11434"
+    openai_api_key: str = ""
+
+    # Draft Writer Configuration
+    draft_max_words: int = 1800
+    draft_min_words: int = 1000
+    draft_generation_timeout: int = 120  # seconds
 
     class Config:
         env_file = ".env"

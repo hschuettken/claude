@@ -12,6 +12,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    Index,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
@@ -28,9 +29,17 @@ class Signal(Base):
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String(255), nullable=False, index=True)
     url = Column(String(2048), nullable=False)
-    source = Column(String(128), nullable=False)
+    url_hash = Column(String(64), nullable=True, unique=True, index=True)  # SHA256 hash for dedup
+    source = Column(String(128), nullable=False)  # Engine/source name
+    source_domain = Column(String(255), nullable=True, index=True)  # Extracted domain
+    snippet = Column(Text, nullable=True)  # Content preview
     relevance_score = Column(Float, nullable=False, default=0.0)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    pillar_id = Column(Integer, nullable=True, index=True)  # Content pillar (1-6)
+    search_profile_id = Column(String(128), nullable=True, index=True)  # Which profile found it
+    status = Column(String(32), nullable=False, default="new", index=True)  # new, read, used, archived
+    raw_json = Column(Text, nullable=True)  # Full search result JSON
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    detected_at = Column(DateTime, nullable=True, index=True)  # When it was first detected
     kg_node_id = Column(String(128), nullable=True, index=True)
 
 
