@@ -65,6 +65,7 @@ async def cluster_signals_into_topics(
     pillar_id: int = 1,
     min_similarity: float = 0.3,
     max_signals_per_topic: int = 10,
+    min_cluster_size: int = 3,
 ) -> List[TopicCluster]:
     """
     Cluster signals into candidate topics.
@@ -73,18 +74,21 @@ async def cluster_signals_into_topics(
     1. Filter signals by pillar_id (if provided)
     2. Compute similarity matrix (TF-IDF cosine)
     3. Greedy clustering: link signals with similarity > threshold
-    4. Cap each cluster at max_signals_per_topic
-    5. Return TopicCluster objects
+    4. Only keep clusters with 3+ signals (configurable)
+    5. Cap each cluster at max_signals_per_topic
+    6. Return TopicCluster objects
     
     Params:
-    - signals: list of signal dicts with id, title, summary (optional)
+    - signals: list of signal dicts with id, title, snippet, relevance_score, created_at, pillar_id
     - pillar_id: filter to specific pillar (0 = no filter)
     - min_similarity: cosine similarity threshold for grouping
     - max_signals_per_topic: max signals per cluster
+    - min_cluster_size: minimum signals to form a topic (default 3)
     
     Returns:
-    - List of TopicCluster objects
+    - List of TopicCluster objects with 3+ signals
     """
+    from datetime import datetime, timedelta
     
     # Filter by pillar if specified
     if pillar_id > 0:
@@ -93,45 +97,63 @@ async def cluster_signals_into_topics(
     if not signals:
         return []
     
+    # Filter to signals from last 7 days (topic window)
+    cutoff_date = datetime.utcnow() - timedelta(days=7)
+    signals_recent = [
+        s for s in signals
+        if s.get("created_at") is None or s.get("created_at") >= cutoff_date
+    ]
+    
+    if len(signals_recent) < min_cluster_size:
+        return []
+    
+    # Sort by relevance (highest first) for greedy clustering
+    signals_sorted = sorted(signals_recent, key=lambda s: s.get("relevance_score", 0), reverse=True)
+    
     # Compute TF-IDF similarity
-    texts = [s.get("title", "") + " " + s.get("summary", "") for s in signals]
+    texts = [s.get("title", "") + " " + s.get("snippet", "") for s in signals_sorted]
     similarity_matrix = compute_tfidf_similarity(texts)
     
-    # Greedy clustering
+    # Greedy clustering: start with highest-relevance signals
     clustered = set()
     clusters: List[TopicCluster] = []
     
-    for i in range(len(signals)):
+    for i in range(len(signals_sorted)):
         if i in clustered:
             continue
         
         # Start a new cluster with signal i
-        cluster_signal_ids = [signals[i]["id"]]
+        cluster_signal_ids = [signals_sorted[i]["id"]]
         clustered.add(i)
         
         # Add similar signals
-        for j in range(len(signals)):
-            if j in clustered or j == i:
+        for j in range(i + 1, len(signals_sorted)):
+            if j in clustered:
                 continue
             
             if similarity_matrix[i][j] > min_similarity and len(cluster_signal_ids) < max_signals_per_topic:
-                cluster_signal_ids.append(signals[j]["id"])
+                cluster_signal_ids.append(signals_sorted[j]["id"])
                 clustered.add(j)
         
-        # Create topic title from signals
-        titles = [signals[idx]["title"] for idx in [i] + [idx for idx, sig in enumerate(signals) if sig["id"] in cluster_signal_ids[1:]]]
-        topic_title = titles[0] if titles else f"Topic from signal {signals[i]['id']}"
+        # Only keep clusters with min_cluster_size or more
+        if len(cluster_signal_ids) < min_cluster_size:
+            logger.debug(f"Skipping cluster with {len(cluster_signal_ids)} signals (min: {min_cluster_size})")
+            continue
         
-        # Use first signal's summary or combine
-        topic_summary = signals[i].get("summary", "")
+        # Create topic title from highest-relevance signals
+        topic_title = signals_sorted[i].get("title", f"Topic {pillar_id}")
+        
+        # Use snippet or title for summary
+        topic_summary = signals_sorted[i].get("snippet", "")
         
         # Create cluster
         cluster = TopicCluster(
             signal_ids=cluster_signal_ids,
             title=topic_title,
             summary=topic_summary,
-            pillar_id=pillar_id or signals[i].get("pillar_id", 1),
+            pillar_id=pillar_id or signals_sorted[i].get("pillar_id", 1),
         )
         clusters.append(cluster)
+        logger.info(f"Created cluster: {topic_title} with {len(cluster_signal_ids)} signals")
     
     return clusters

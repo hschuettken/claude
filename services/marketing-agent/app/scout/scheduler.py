@@ -3,7 +3,7 @@
 import hashlib
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy.orm import Session
@@ -27,6 +27,7 @@ class ScoutScheduler:
         self.search_client_initialized = False
         self.is_running = False
         self.last_run_info = {}
+        self.dedup_window_days = 30  # Skip URLs seen in last 30 days
 
     async def start(self):
         """Start the scheduler."""
@@ -97,10 +98,16 @@ class ScoutScheduler:
                     # Compute URL hash
                     url_hash = hashlib.sha256(result.url.encode()).hexdigest()
 
-                    # Check for existing signal
-                    existing = db.query(Signal).filter(Signal.url_hash == url_hash).first()
+                    # Check for existing signal (within last 30 days)
+                    cutoff_date = datetime.utcnow() - timedelta(days=self.dedup_window_days)
+                    existing = (
+                        db.query(Signal)
+                        .filter(Signal.url_hash == url_hash)
+                        .filter(Signal.created_at >= cutoff_date)
+                        .first()
+                    )
                     if existing:
-                        logger.debug(f"Signal already exists: {result.url}")
+                        logger.debug(f"Signal already exists (recent): {result.url}")
                         signals_skipped += 1
                         continue
 
@@ -141,19 +148,20 @@ class ScoutScheduler:
 
                     signals_inserted += 1
 
-                    # Publish NATS event
-                    try:
-                        nats_pub = get_nats_publisher()
-                        await nats_pub.publish_signal_detected(
-                            signal_id=signal.id,
-                            title=signal.title,
-                            url=signal.url,
-                            pillar_id=signal.pillar_id,
-                            relevance_score=signal.relevance_score,
-                            detected_at=signal.detected_at,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to publish NATS event: {e}")
+                    # Publish NATS event for high-relevance signals (>= 0.7)
+                    if signal.relevance_score >= 0.7:
+                        try:
+                            nats_pub = get_nats_publisher()
+                            await nats_pub.publish_signal_detected(
+                                signal_id=signal.id,
+                                title=signal.title,
+                                url=signal.url,
+                                pillar_id=signal.pillar_id,
+                                relevance_score=signal.relevance_score,
+                                detected_at=signal.detected_at,
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to publish NATS event: {e}")
 
             # Record run info
             self.last_run_info[profile.id] = {

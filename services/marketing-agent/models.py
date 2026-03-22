@@ -170,6 +170,35 @@ class VoiceRule(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
+class SearchProfile(Base):
+    """Search profiles — configuration for Scout engine searches."""
+
+    __tablename__ = "search_profiles"
+    __table_args__ = {"schema": "marketing"}
+
+    id = Column(String(128), primary_key=True, index=True)
+    name = Column(String(255), nullable=False, unique=True)
+    pillar_id = Column(Integer, nullable=False, index=True)  # Content pillar (1-6)
+    
+    # Search configuration
+    queries = Column(ARRAY(String), nullable=False, default=[])
+    engines = Column(ARRAY(String), nullable=False, default=["google"])
+    
+    # Scoring weights
+    keyword_weight = Column(Float, nullable=False, default=0.35)  # SAP + pillar keyword match
+    authority_weight = Column(Float, nullable=False, default=0.25)  # Source domain authority
+    recency_weight = Column(Float, nullable=False, default=0.20)  # Date/freshness score
+    performance_weight = Column(Float, nullable=False, default=0.20)  # Historical perf factor
+    
+    # Scheduling
+    interval_hours = Column(Integer, nullable=False, default=4)
+    
+    # Status
+    enabled = Column(Integer, nullable=False, default=1)  # 1=enabled, 0=disabled
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=True, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class PerformanceSnapshot(Base):
     """Performance snapshots — post engagement tracking."""
 

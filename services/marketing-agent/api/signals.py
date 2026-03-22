@@ -51,7 +51,15 @@ class SignalResponse(BaseModel):
         from_attributes = True
 
 
-@router.get("", response_model=List[SignalResponse])
+class SignalListResponse(BaseModel):
+    """Paginated signals response."""
+    items: List[SignalResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+@router.get("", response_model=SignalListResponse)
 async def list_signals(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -60,6 +68,7 @@ async def list_signals(
     min_score: float = Query(0.0, ge=0.0, le=1.0),
     source: Optional[str] = None,
     since: Optional[datetime] = None,
+    search: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     """
@@ -73,6 +82,7 @@ async def list_signals(
     - min_score: Minimum relevance score (0.0-1.0)
     - source: Filter by source/engine
     - since: Filter by detected_at >= timestamp
+    - search: Search in title/snippet text
     """
     query = db.query(Signal)
 
@@ -90,9 +100,22 @@ async def list_signals(
 
     if since:
         query = query.filter(Signal.detected_at >= since)
+    
+    if search:
+        search_term = f"%{search}%"
+        query = query.filter(
+            (Signal.title.ilike(search_term)) | (Signal.snippet.ilike(search_term))
+        )
 
+    total = query.count()
     signals = query.order_by(Signal.detected_at.desc()).offset(offset).limit(limit).all()
-    return signals
+    
+    return SignalListResponse(
+        items=signals,
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/{signal_id}", response_model=SignalResponse)
@@ -119,16 +142,21 @@ async def update_signal(signal_id: int, update: SignalUpdate, db: Session = Depe
     return signal
 
 
-@router.post("/refresh", response_model=dict)
+@router.post("/refresh", response_model=dict, status_code=202)
 async def trigger_refresh():
     """
     Trigger an immediate scan of all search profiles.
 
     Returns job_id and number of profiles queued.
+    Status 202 (Accepted) — refresh runs in background.
     """
     scheduler = get_scheduler()
     if not scheduler.is_running:
         raise HTTPException(status_code=503, detail="Scout scheduler not running")
 
     result = await scheduler.trigger_refresh()
-    return result
+    return {
+        "status": "queued",
+        "message": "Scout refresh started in background",
+        **result
+    }

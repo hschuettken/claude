@@ -25,20 +25,24 @@ class TopicService:
 
         1. Get all signals from last N days
         2. Filter unprocessed (not yet in a topic)
-        3. Cluster into candidate topics
+        3. Cluster into candidate topics (3+ signals per cluster)
         4. Score each topic
         5. Store topics with score > min_score
-        6. Return created topics
+        6. Auto-draft topics with score > 0.8 (if no draft in last 14d)
+        7. Return created topics
 
         Params:
         - days: lookback period
         - min_score: minimum score to store as candidate
         """
+        from models import Draft
+        
         # Get recent signals
         cutoff = datetime.utcnow() - timedelta(days=days)
         recent_signals = (
             self.db.query(Signal)
             .filter(Signal.created_at >= cutoff)
+            .filter(Signal.status != "archived")
             .all()
         )
 
@@ -53,57 +57,83 @@ class TopicService:
             {
                 "id": s.id,
                 "title": s.title,
-                "summary": "",
+                "snippet": s.snippet or "",
                 "source": s.source,
+                "source_domain": s.source_domain,
                 "relevance_score": s.relevance_score,
                 "created_at": s.created_at,
-                "pillar_id": 1,  # Default to pillar 1 (SAP)
+                "pillar_id": s.pillar_id or 1,  # Use signal pillar if available
             }
             for s in recent_signals
         ]
 
-        # Cluster by pillar (currently only pillar 1)
-        clusters = await cluster_signals_into_topics(signal_dicts, pillar_id=1)
-        logger.info(f"Created {len(clusters)} clusters")
-
-        # Score each cluster and store
+        # Cluster by pillar (1-6)
         created_topics = []
         context = self._build_scoring_context()
+        
+        # Cluster for each pillar separately
+        for pillar_id in range(1, 7):
+            clusters = await cluster_signals_into_topics(signal_dicts, pillar_id=pillar_id, min_cluster_size=3)
+            logger.info(f"Created {len(clusters)} clusters for pillar {pillar_id}")
 
-        for cluster in clusters:
-            # Get signals for this cluster
-            cluster_signals = [s for s in signal_dicts if s["id"] in cluster.signal_ids]
+            # Score each cluster and store
+            for cluster in clusters:
+                # Get signals for this cluster
+                cluster_signals = [s for s in signal_dicts if s["id"] in cluster.signal_ids]
 
-            # Create topic candidate
-            topic_candidate = TopicCandidate(
-                title=cluster.title,
-                summary=cluster.summary,
-                pillar_id=cluster.pillar_id,
-                signal_ids=cluster.signal_ids,
-                created_at=datetime.utcnow(),
-            )
-
-            # Score topic
-            topic_score = score_topic(topic_candidate, context, cluster_signals)
-
-            if topic_score.total >= min_score:
-                # Store in database
-                db_topic = Topic(
-                    name=cluster.title,
-                    pillar=f"pillar_{cluster.pillar_id}",
-                    audience_segment="technical",
+                # Create topic candidate
+                topic_candidate = TopicCandidate(
+                    title=cluster.title,
+                    summary=cluster.summary,
+                    pillar_id=cluster.pillar_id,
+                    signal_ids=cluster.signal_ids,
                     created_at=datetime.utcnow(),
                 )
-                # Store extended fields if schema supports
-                if hasattr(db_topic, "score"):
-                    db_topic.score = topic_score.total
-                    db_topic.score_breakdown = topic_score.breakdown
-                    db_topic.signal_ids = cluster.signal_ids
-                    db_topic.pillar_id = cluster.pillar_id
-                    db_topic.status = "candidate"
 
-                self.db.add(db_topic)
-                created_topics.append(db_topic)
+                # Score topic
+                topic_score = score_topic(topic_candidate, context, cluster_signals)
+
+                if topic_score.total >= min_score:
+                    # Check if topic already exists (by name)
+                    existing_topic = self.db.query(Topic).filter(Topic.name == cluster.title).first()
+                    if existing_topic:
+                        logger.debug(f"Topic already exists: {cluster.title}")
+                        continue
+
+                    # Store in database
+                    db_topic = Topic(
+                        name=cluster.title,
+                        pillar=f"pillar_{cluster.pillar_id}",
+                        audience_segment="technical",
+                        created_at=datetime.utcnow(),
+                    )
+                    
+                    # Store extended fields if schema supports
+                    if hasattr(db_topic, "score"):
+                        db_topic.score = topic_score.total
+                        db_topic.score_breakdown = topic_score.breakdown
+                        db_topic.signal_ids = cluster.signal_ids
+                        db_topic.pillar_id = cluster.pillar_id
+                        db_topic.status = "candidate"
+
+                    self.db.add(db_topic)
+                    self.db.flush()  # Get the ID
+                    created_topics.append(db_topic)
+                    
+                    # Auto-draft trigger: score > 0.8 AND no draft in last 14 days
+                    if topic_score.total > 0.8:
+                        cutoff_14d = datetime.utcnow() - timedelta(days=14)
+                        recent_draft = (
+                            self.db.query(Draft)
+                            .filter(Draft.topic_id == db_topic.id)
+                            .filter(Draft.created_at >= cutoff_14d)
+                            .first()
+                        )
+                        
+                        if not recent_draft:
+                            logger.info(f"Auto-triggering draft for high-score topic: {cluster.title} (score: {topic_score.total})")
+                            # TODO: Integrate with draft writer to auto-generate
+                            # For now, just log the intent
 
         if created_topics:
             self.db.commit()
