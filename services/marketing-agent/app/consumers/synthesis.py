@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.events.nats_client import NATSClient
 from ghost_client import get_ghost_client
 from database import SessionLocal
-from models import DraftContent
+from models import Draft as DraftContent
 from config import settings
 
 logger = logging.getLogger(__name__)
