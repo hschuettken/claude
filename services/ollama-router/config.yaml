@@ -1,14 +1,14 @@
 nodes:
-  - name: hm50
+  - name: ollama-gd90
+    url: http://192.168.0.23:11434
+    tags: [strong, cpu-only, primary]
+    max_concurrent: 2
+    default_models: ["qwen2.5:32b-q4_K_M", "qwen2.5:14b-q4_K_M"]
+  - name: ollama-hm50
     url: http://192.168.0.20:11434
-    tags: [weak, embeddings]
+    tags: [weak, embeddings, secondary]
     max_concurrent: 2
     default_models: [nomic-embed-text, "qwen2.5:7b-q4_K_M"]
-  - name: intel-12900hk
-    url: http://192.168.0.23:11434
-    tags: [strong, cpu-only]
-    max_concurrent: 2
-    default_models: ["qwen2.5:32b-q4_K_M"]
   # - name: amd-8945hs
   #   url: http://192.168.0.TBD:11434  # TODO: GPU-enabled Ollama instance not yet deployed
   #   tags: [medium, igpu]
@@ -37,3 +37,9 @@ metrics:
 server:
   host: "0.0.0.0"
   port: 11434
+  metrics_port: 9090
+
+prometheus:
+  enabled: true
+  port: 9090
+  path: /metrics
