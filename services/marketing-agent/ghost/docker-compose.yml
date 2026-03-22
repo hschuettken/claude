@@ -20,7 +20,7 @@ services:
       GHOST_ADMIN_API_KEY: ${GHOST_ADMIN_API_KEY}
       NODE_ENV: production
     volumes:
-      - ghost_content:/var/lib/ghost/content
+      - /data/ghost/content:/var/lib/ghost/content
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:2368/ghost/api/admin/site/"]
       interval: 30s
@@ -29,10 +29,6 @@ services:
       start_period: 120s
     networks:
       - marketing
-
-volumes:
-  ghost_content:
-    driver: local
 
 networks:
   marketing:
