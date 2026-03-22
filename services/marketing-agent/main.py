@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, status
 from fastapi.responses import JSONResponse
 
-from api import signals, topics, drafts, knowledge_graph
+from api import signals, topics, drafts, knowledge_graph, publish
 from api import scout
 from app.scout.events import init_nats_publisher, close_nats_publisher
 from app.scout.scheduler import get_scheduler
@@ -100,6 +100,7 @@ async def health_check():
 app.include_router(signals.router, prefix="/api/v1")
 app.include_router(topics.router, prefix="/api/v1")
 app.include_router(drafts.router, prefix="/api/v1")
+app.include_router(publish.router, prefix="/api/v1")
 app.include_router(scout.router, prefix="/api/v1")
 app.include_router(knowledge_graph.router, prefix="/api/v1")
 
