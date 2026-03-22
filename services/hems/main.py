@@ -48,6 +48,7 @@ logger = logging.getLogger("hems")
 
 # Global state
 _control_loop_task: Optional[asyncio.Task] = None
+_thermal_collector_task: Optional[asyncio.Task] = None  # Phase 3: Thermal data collector
 _mixer_controller: Optional[MixerController] = None
 _boiler_manager: Optional[BoilerManager] = None
 _influxdb_client: Optional[influxdb_client.InfluxDBClient] = None
@@ -383,13 +384,85 @@ async def control_loop(settings: HEMSSettings) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 3: Thermal Training Data Collector
+# ---------------------------------------------------------------------------
+
+
+async def thermal_data_collector(settings: HEMSSettings) -> None:
+    """Background task: collect thermal training data every 15 minutes.
+
+    Captures current thermal state (flow temp, room temp, setpoint, etc.)
+    and logs to InfluxDB thermal_training measurement for ML model training.
+
+    Runs every 15 minutes (900 seconds).
+    """
+    global _influxdb_write_api, _sensor_cache
+
+    logger.info("Thermal data collector started (interval=900s / 15 min)")
+
+    while True:
+        try:
+            # Fetch current thermal state
+            measured_temp, temp_available = await _fetch_flow_temperature()
+            demand_w = await _fetch_heating_demand()
+
+            # Default setpoint from control loop
+            setpoint = 50.0
+
+            # Get room temperature from cache (updated by control loop)
+            room_temp = _sensor_cache.get("sensor.room_temperature", 20.0)
+            outside_temp = _sensor_cache.get("sensor.outside_temperature")
+
+            # Determine if heating is currently active (placeholder)
+            # In production, this would check boiler state
+            actual_heating = demand_w is not None and demand_w > 0
+
+            # Log to InfluxDB
+            if _influxdb_write_api:
+                try:
+                    point = (
+                        influxdb_client.Point("thermal_training")
+                        .tag("room_id", "primary")  # TODO: Iterate over multiple rooms
+                        .field("flow_temp", float(measured_temp or 50.0))
+                        .field("room_temp", float(room_temp))
+                        .field("setpoint", float(setpoint))
+                        .field("actual_heating", actual_heating)
+                    )
+
+                    if outside_temp is not None:
+                        point = point.field("outside_temp", float(outside_temp))
+
+                    _influxdb_write_api.write(
+                        bucket=settings.influxdb_bucket,
+                        org=settings.influxdb_org,
+                        record=point
+                    )
+
+                    logger.debug(
+                        "Thermal snapshot logged: flow=%.1f°C, room=%.1f°C, sp=%.1f°C, heating=%s",
+                        measured_temp or 50.0,
+                        room_temp,
+                        setpoint,
+                        actual_heating,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to log thermal snapshot: %s", e)
+
+        except Exception as e:
+            logger.error("Error in thermal data collector: %s", e, exc_info=True)
+
+        # Sleep 15 minutes before next collection
+        await asyncio.sleep(900)
+
+
+# ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _control_loop_task, _mixer_controller, _boiler_manager, _influxdb_client, _influxdb_write_api, _hems_db
+    global _control_loop_task, _thermal_collector_task, _mixer_controller, _boiler_manager, _influxdb_client, _influxdb_write_api, _hems_db
 
     settings: HEMSSettings = app.state.settings
     logger.info("HEMS starting up — mode=%s", settings.hems_mode)
@@ -416,10 +489,15 @@ async def lifespan(app: FastAPI):
     # Initialize InfluxDB
     _influxdb_client, _influxdb_write_api = _init_influxdb(settings)
     app.state.influxdb_write_api = _influxdb_write_api
+    app.state.influxdb_client = _influxdb_client  # For query operations (Phase 3)
 
     # Start background control loop
     _control_loop_task = asyncio.create_task(control_loop(settings))
     logger.info("Control loop task started")
+
+    # Start thermal data collector (Phase 3)
+    _thermal_collector_task = asyncio.create_task(thermal_data_collector(settings))
+    logger.info("Thermal data collector task started")
 
     yield
 
@@ -430,6 +508,14 @@ async def lifespan(app: FastAPI):
         _control_loop_task.cancel()
         try:
             await _control_loop_task
+        except asyncio.CancelledError:
+            pass
+
+    # Cancel thermal collector
+    if _thermal_collector_task:
+        _thermal_collector_task.cancel()
+        try:
+            await _thermal_collector_task
         except asyncio.CancelledError:
             pass
 
