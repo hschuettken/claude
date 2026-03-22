@@ -96,7 +96,7 @@ class DraftWriter:
             # Generate full content
             logger.info("Generating article content...")
             content = await asyncio.wait_for(
-                self._generate_content(topic, outline, signals_text),
+                self._generate_content(topic, outline, signals_text, kg_context),
                 timeout=timeout,
             )
             if not content:
@@ -373,13 +373,26 @@ class DraftWriter:
                 "cta": "Share your thoughts"
             }
 
-    async def _generate_content(self, topic: Topic, outline: Dict, signals_text: str) -> Optional[str]:
-        """Generate full article content."""
+    async def _generate_content(self, topic: Topic, outline: Dict, signals_text: str, kg_context: Optional[Dict] = None) -> Optional[str]:
+        """Generate full article content with optional KG context."""
         prompt = BLOG_CONTENT_PROMPT.format(
             outline=json.dumps(outline),
             title=topic.name,
             signals=signals_text,
         )
+        
+        # Append KG context if available
+        if kg_context:
+            sections = []
+            if kg_context.get("published_posts"):
+                posts_text = "\n".join(
+                    [f"  - {p.get('title', 'Unknown')}" for p in kg_context["published_posts"][:3]]
+                )
+                sections.append(f"These posts have been previously written on related topics:\n{posts_text}")
+            
+            if sections:
+                prompt += "\n\nContext from Knowledge Graph:\n" + "\n\n".join(sections)
+        
         response = await self.llm_client.generate(BLOG_SYSTEM_PROMPT, prompt)
         return response
 
