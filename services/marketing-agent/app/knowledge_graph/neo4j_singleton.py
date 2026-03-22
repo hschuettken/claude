@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from neo4j import AsyncDriver, AsyncSession, auth
+from neo4j import AsyncDriver, AsyncSession, basic_auth
 from typing import Union
 ManagedAsyncSession = AsyncSession  # alias for compatibility
 
@@ -35,7 +35,7 @@ class Neo4jSingleton:
                     logger.info(f"Initializing Neo4j connection to {neo4j_url}...")
                     instance._driver = AsyncDriver(
                         neo4j_url,
-                        auth=auth.basic(neo4j_user, neo4j_password),
+                        auth=basic_auth(neo4j_user, neo4j_password),
                         encrypted=False,
                     )
 
