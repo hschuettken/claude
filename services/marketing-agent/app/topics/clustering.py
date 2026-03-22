@@ -1,9 +1,12 @@
 """Signal to topic clustering engine."""
 
+import logging
 from typing import Dict, List, Set, Tuple
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class TopicCluster:

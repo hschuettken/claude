@@ -168,6 +168,20 @@ class DraftWriter:
             self.db.refresh(draft)
 
             logger.info(f"Created draft {draft.id} for topic {topic_id}")
+            
+            # Publish draft.created event
+            try:
+                from app.drafts.events import on_draft_created
+                await on_draft_created(
+                    draft_id=draft.id,
+                    title=draft.title,
+                    topic_id=topic_id,
+                    format=getattr(draft, 'format', 'blog'),
+                    word_count=getattr(draft, 'word_count', word_count),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to publish draft.created event: {e}")
+            
             return draft
 
         except asyncio.TimeoutError:
