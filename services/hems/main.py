@@ -482,7 +482,7 @@ async def lifespan(app: FastAPI):
         app.state.db = None
 
     # Initialize controllers
-    _mixer_controller = MixerController(kp=0.8, ki=0.02, max_integral=20, rate_limit=2.0)
+    _mixer_controller = MixerController(kp=3.0, ki=0.15, max_integral=20, rate_limit=2.0)
     _boiler_manager = BoilerManager(min_off_time_s=600, min_on_time_s=300)
     logger.info("Controllers initialized: mixer_controller, boiler_manager")
 
