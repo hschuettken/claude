@@ -183,6 +183,66 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_room_target_temp",
+            "description": (
+                "Set a specific room's target temperature in HEMS. "
+                "This sends the target to the heating control system with a reason for audit logging."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "room_id": {
+                        "type": "string",
+                        "description": "The room ID to adjust (e.g., 'living_room', 'bedroom_1').",
+                    },
+                    "target_temp": {
+                        "type": "number",
+                        "description": "Target temperature in Celsius (e.g., 21.5).",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Reason for the temperature change (logged for audit).",
+                    },
+                },
+                "required": ["room_id", "target_temp", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_heating_analytics",
+            "description": (
+                "Get heating system analytics and efficiency metrics for a specified time period. "
+                "Returns energy consumption, temperature trends, and system performance data."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period": {
+                        "type": "string",
+                        "enum": ["1h", "6h", "24h", "7d", "30d"],
+                        "description": "Time period for analytics (default: 24h).",
+                    }
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_thermal_model_status",
+            "description": (
+                "Get the status and diagnostics of the HEMS thermal prediction model. "
+                "Returns model accuracy, training status, and any issues."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 
@@ -386,4 +446,73 @@ class HEMSTools:
             return {"error": "NB9OS service not available", "status": "offline"}
         except Exception as e:
             logger.exception(f"HEMS log_thermal_training_data error: {e}")
+            return {"error": str(e), "status": "error"}
+
+    async def set_room_target_temp(
+        self, room_id: str, target_temp: float, reason: str
+    ) -> dict[str, Any]:
+        """Set a specific room's target temperature in HEMS."""
+        try:
+            payload = {
+                "target_temp": target_temp,
+                "reason": reason,
+            }
+            response = requests.post(
+                f"{HEMS_SERVICE_URL}/rooms/{room_id}/target",
+                json=payload,
+                timeout=HEMS_TIMEOUT,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.ConnectionError:
+            logger.error("HEMS service connection failed")
+            return {"error": "HEMS service not available", "status": "offline"}
+        except requests.exceptions.Timeout:
+            logger.error("HEMS service request timeout")
+            return {"error": "HEMS service not available", "status": "offline"}
+        except Exception as e:
+            logger.exception("HEMS set_room_target_temp error")
+            return {"error": str(e), "status": "error"}
+
+    async def get_heating_analytics(self, period: str = "24h") -> dict[str, Any]:
+        """Get heating system analytics for a specified period."""
+        # Validate period
+        valid_periods = ["1h", "6h", "24h", "7d", "30d"]
+        if period not in valid_periods:
+            period = "24h"
+        
+        try:
+            response = requests.get(
+                f"{HEMS_SERVICE_URL}/analytics/{period}",
+                timeout=HEMS_TIMEOUT,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.ConnectionError:
+            logger.error("HEMS service connection failed")
+            return {"error": "HEMS service not available", "status": "offline"}
+        except requests.exceptions.Timeout:
+            logger.error("HEMS service request timeout")
+            return {"error": "HEMS service not available", "status": "offline"}
+        except Exception as e:
+            logger.exception("HEMS get_heating_analytics error")
+            return {"error": str(e), "status": "error"}
+
+    async def get_thermal_model_status(self) -> dict[str, Any]:
+        """Get the status of the HEMS thermal prediction model."""
+        try:
+            response = requests.get(
+                f"{HEMS_SERVICE_URL}/model/status",
+                timeout=HEMS_TIMEOUT,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.ConnectionError:
+            logger.error("HEMS service connection failed")
+            return {"error": "HEMS service not available", "status": "offline"}
+        except requests.exceptions.Timeout:
+            logger.error("HEMS service request timeout")
+            return {"error": "HEMS service not available", "status": "offline"}
+        except Exception as e:
+            logger.exception("HEMS get_thermal_model_status error")
             return {"error": str(e), "status": "error"}

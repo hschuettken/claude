@@ -155,6 +155,9 @@ class ToolExecutor:
             "set_room_target",
             "activate_hems_schedule",
             "log_thermal_training_data",
+            "set_room_target_temp",
+            "get_heating_analytics",
+            "get_thermal_model_status",
         ):
             self._dispatch[name] = (self._hems_tools, name)
 
