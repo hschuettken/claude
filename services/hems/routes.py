@@ -369,6 +369,8 @@ async def log_thermal_data(body: ThermalLogRequest, request: Request) -> dict[st
 
     This endpoint accepts room temperature, target, outdoor conditions,
     and valve position for thermal model training and analysis.
+    
+    Handles None/NaN values gracefully by skipping invalid fields.
     """
     write_api = request.app.state.influxdb_write_api
     settings: HEMSSettings = request.app.state.settings
@@ -379,26 +381,48 @@ async def log_thermal_data(body: ThermalLogRequest, request: Request) -> dict[st
 
     try:
         import influxdb_client
+        import math
+
+        # Validate numeric values
+        measured_temp = body.measured_temp
+        target_temp = body.target_temp
+        valve_pos = body.valve_pos
+        outdoor_temp = body.outdoor_temp
+
+        # Skip if any critical value is invalid
+        if (measured_temp is None or math.isnan(measured_temp) or
+            target_temp is None or math.isnan(target_temp) or
+            valve_pos is None or math.isnan(valve_pos)):
+            logger.warning(
+                f"Skipping thermal log for {body.room_id}: invalid values "
+                f"(measured={measured_temp}, target={target_temp}, valve={valve_pos})"
+            )
+            return {
+                "status": "skipped",
+                "reason": "Invalid temperature or valve data",
+                "room": body.room_id
+            }
 
         point = (
             influxdb_client.Point("thermal_training")
             .tag("room_id", body.room_id)
-            .field("measured_temp", body.measured_temp)
-            .field("target_temp", body.target_temp)
-            .field("valve_position_pct", body.valve_pos)
+            .field("measured_temp", float(measured_temp))
+            .field("target_temp", float(target_temp))
+            .field("valve_position_pct", float(valve_pos))
         )
 
-        if body.outdoor_temp is not None:
-            point = point.field("outdoor_temp", body.outdoor_temp)
+        # Optional outdoor temperature
+        if outdoor_temp is not None and not math.isnan(outdoor_temp):
+            point = point.field("outdoor_temp", float(outdoor_temp))
 
         write_api.write(bucket=settings.influxdb_bucket, org=settings.influxdb_org, record=point)
 
         logger.debug(
             "Logged thermal data: room=%s, measured=%.1f°C, target=%.1f°C, valve=%.1f%%",
             body.room_id,
-            body.measured_temp,
-            body.target_temp,
-            body.valve_pos,
+            measured_temp,
+            target_temp,
+            valve_pos,
         )
 
         return {"status": "logged", "measurement": "thermal_training", "room": body.room_id}

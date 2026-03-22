@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,6 +54,11 @@ _influxdb_client: Optional[influxdb_client.InfluxDBClient] = None
 _influxdb_write_api = None
 _hems_db: Optional[HEMSDatabase] = None
 
+# Sensor state tracking for graceful degradation
+_sensor_cache: dict[str, float] = {}  # Last known values
+_sensor_availability: dict[str, bool] = {}  # Current availability status
+_sensor_last_update: dict[str, float] = {}  # Timestamp of last successful fetch
+
 
 # ---------------------------------------------------------------------------
 # Pydantic models for control tick response
@@ -68,6 +74,73 @@ class ControlDecisionResponse(BaseModel):
     measured_flow_temp_c: Optional[float] = None
     demand_w: Optional[float] = None
     error_message: Optional[str] = None
+    degraded: bool = False  # True if operating with fallback values
+    is_available: dict[str, bool] = {}  # Per-sensor availability
+
+
+class SensorHealth(BaseModel):
+    entity_id: str
+    room_id: Optional[str] = None
+    available: bool
+    last_value: Optional[float] = None
+    last_update_unix: Optional[float] = None
+    error_message: Optional[str] = None
+
+
+class HEMSHealthResponse(BaseModel):
+    status: str  # "healthy", "degraded", "critical"
+    timestamp: str
+    sensors: dict[str, SensorHealth]
+    degraded_rooms: list[str] = []  # Rooms with missing/unavailable sensors
+    control_loop_active: bool
+    database_available: bool
+
+
+# ---------------------------------------------------------------------------
+# Sensor state management
+# ---------------------------------------------------------------------------
+
+
+def _update_sensor_state(entity_id: str, value: Optional[float], available: bool = True) -> None:
+    """Update sensor cache and availability state.
+    
+    Args:
+        entity_id: HA entity ID (e.g., 'sensor.heating_flow_temperature')
+        value: Measured value, or None if unavailable
+        available: Whether sensor is online
+    """
+    _sensor_availability[entity_id] = available
+    
+    if available and value is not None:
+        _sensor_cache[entity_id] = value
+        _sensor_last_update[entity_id] = time.time()
+        logger.debug(f"Sensor {entity_id} updated: {value}")
+    else:
+        logger.warning(f"Sensor {entity_id} unavailable or returned None")
+
+
+def _get_sensor_value(entity_id: str, default: float = 0.0) -> tuple[float, bool]:
+    """Get sensor value with fallback to last known value.
+    
+    Returns:
+        (value, is_available) - value is last known or default if never seen
+    """
+    available = _sensor_availability.get(entity_id, False)
+    value = _sensor_cache.get(entity_id, default)
+    return value, available
+
+
+def _get_all_sensor_health() -> dict[str, SensorHealth]:
+    """Get health status for all known sensors."""
+    health = {}
+    for entity_id in list(_sensor_availability.keys()) + list(_sensor_cache.keys()):
+        health[entity_id] = SensorHealth(
+            entity_id=entity_id,
+            available=_sensor_availability.get(entity_id, False),
+            last_value=_sensor_cache.get(entity_id),
+            last_update_unix=_sensor_last_update.get(entity_id),
+        )
+    return health
 
 
 # ---------------------------------------------------------------------------
@@ -136,12 +209,14 @@ def _write_hems_decision_to_influx(
 # ---------------------------------------------------------------------------
 
 
-async def _fetch_flow_temperature() -> Optional[float]:
+async def _fetch_flow_temperature() -> tuple[Optional[float], bool]:
     """Fetch current flow temperature from Home Assistant via orchestrator.
 
     Returns:
-        Flow temperature in °C, or None if unavailable.
+        (temperature, is_available) - temperature in °C, or None if unavailable.
     """
+    entity_id = "sensor.heating_flow_temperature"
+    
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             # Call orchestrator /tools/execute to fetch HA entity
@@ -150,21 +225,49 @@ async def _fetch_flow_temperature() -> Optional[float]:
                 json={
                     "tool": "ha_get_state",
                     "params": {
-                        "entity_id": "sensor.heating_flow_temperature",
+                        "entity_id": entity_id,
                     },
                 },
             )
             if response.status_code == 200:
                 data = response.json()
-                temp = float(data.get("state", 0))
-                logger.debug("Fetched flow temp from HA: %.1f°C", temp)
-                return temp
+                state = data.get("state")
+                
+                # Handle None, "unavailable", "unknown", or non-numeric values
+                if state is None or state == "unavailable" or state == "unknown":
+                    _update_sensor_state(entity_id, None, available=False)
+                    logger.warning(f"HA entity {entity_id} returned: {state}")
+                    # Return cached value if available
+                    cached, _ = _get_sensor_value(entity_id, default=50.0)
+                    return cached, False
+                
+                try:
+                    temp = float(state)
+                    _update_sensor_state(entity_id, temp, available=True)
+                    logger.debug("Fetched flow temp from HA: %.1f°C", temp)
+                    return temp, True
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Failed to convert HA state to float: {state} ({e})")
+                    _update_sensor_state(entity_id, None, available=False)
+                    cached, _ = _get_sensor_value(entity_id, default=50.0)
+                    return cached, False
             else:
                 logger.warning("Orchestrator returned status %d", response.status_code)
-                return None
+                _update_sensor_state(entity_id, None, available=False)
+                # Return cached value
+                cached, _ = _get_sensor_value(entity_id, default=50.0)
+                return cached, False
+    except asyncio.TimeoutError:
+        logger.warning("Timeout fetching flow temperature from orchestrator")
+        _update_sensor_state(entity_id, None, available=False)
+        cached, _ = _get_sensor_value(entity_id, default=50.0)
+        return cached, False
     except Exception as e:
         logger.warning("Failed to fetch flow temperature: %s", e)
-        return None
+        _update_sensor_state(entity_id, None, available=False)
+        # Return cached value with sensible default
+        cached, _ = _get_sensor_value(entity_id, default=50.0)
+        return cached, False
 
 
 async def _fetch_heating_demand() -> Optional[float]:
@@ -204,6 +307,8 @@ async def control_loop(settings: HEMSSettings) -> None:
 
     Reads schedule/demand, fetches flow temp from HA, calls MixerController
     and BoilerManager, writes decisions to InfluxDB.
+    
+    Gracefully handles unavailable sensors by using cached/default values.
     """
     global _mixer_controller, _boiler_manager, _influxdb_write_api
 
@@ -214,24 +319,30 @@ async def control_loop(settings: HEMSSettings) -> None:
     logger.info("Control loop started (interval=10s)")
 
     while True:
+        degraded = False
         try:
-            # Fetch current state
-            measured_temp = await _fetch_flow_temperature()
+            # Fetch current state with graceful fallback
+            measured_temp, temp_available = await _fetch_flow_temperature()
             demand_w = await _fetch_heating_demand()
 
             # Default setpoint: 50°C
             setpoint = 50.0
 
-            # Call mixer controller
+            # Track degradation
+            if not temp_available:
+                degraded = True
+                logger.warning("Using fallback flow temperature (sensor unavailable)")
+
+            # Call mixer controller with guaranteed float value
             if measured_temp is not None:
                 valve_pos = _mixer_controller.compute(
                     setpoint_c=setpoint,
-                    measured_c=measured_temp,
+                    measured_c=float(measured_temp),
                     dt_s=10.0,
                 )
             else:
                 valve_pos = _mixer_controller.last_output
-                logger.warning("Flow temp unavailable; using last valve position")
+                logger.warning("No measured temp available; using last valve position")
 
             # Call boiler manager
             if demand_w is None:
@@ -252,13 +363,16 @@ async def control_loop(settings: HEMSSettings) -> None:
                     demand=demand_w,
                 )
 
-            logger.info(
-                "Control tick: valve=%.1f%%, boiler=%s (fire=%s), temp=%.1f°C, demand=%.0fW",
+            log_level = logging.WARNING if degraded else logging.INFO
+            logger.log(
+                log_level,
+                "Control tick: valve=%.1f%%, boiler=%s (fire=%s), temp=%.1f°C, demand=%.0fW%s",
                 valve_pos,
                 boiler_state,
                 boiler_should_fire,
-                measured_temp or -1,
-                demand_w or -1,
+                measured_temp if measured_temp is not None else -1,
+                demand_w if demand_w is not None else -1,
+                " [DEGRADED]" if degraded else "",
             )
 
         except Exception as e:
@@ -344,7 +458,10 @@ def create_app() -> FastAPI:
     # Add control tick endpoint
     @app.post("/api/v1/hems/control/tick", response_model=ControlDecisionResponse, tags=["hems"])
     async def control_tick() -> ControlDecisionResponse:
-        """Execute a single control iteration (test endpoint)."""
+        """Execute a single control iteration (test endpoint).
+        
+        Returns 200 with degraded=true if sensors are unavailable (not 503).
+        """
         global _mixer_controller, _boiler_manager
 
         if not _mixer_controller or not _boiler_manager:
@@ -353,19 +470,24 @@ def create_app() -> FastAPI:
                 detail="Controllers not yet initialized",
             )
 
+        degraded = False
         try:
-            # Fetch current state
-            measured_temp = await _fetch_flow_temperature()
+            # Fetch current state with graceful fallback
+            measured_temp, temp_available = await _fetch_flow_temperature()
             demand_w = await _fetch_heating_demand()
+
+            # Track degradation
+            if not temp_available:
+                degraded = True
 
             # Default setpoint
             setpoint = 50.0
 
-            # Compute valve position
+            # Compute valve position with guaranteed value
             if measured_temp is not None:
                 valve_pos = _mixer_controller.compute(
                     setpoint_c=setpoint,
-                    measured_c=measured_temp,
+                    measured_c=float(measured_temp),
                     dt_s=10.0,
                 )
             else:
@@ -399,6 +521,11 @@ def create_app() -> FastAPI:
                 setpoint_c=setpoint,
                 measured_flow_temp_c=measured_temp,
                 demand_w=demand_w,
+                degraded=degraded,
+                is_available={
+                    "flow_temperature": temp_available,
+                    "demand": demand_w is not None and demand_w > 0,
+                },
             )
 
         except Exception as e:
@@ -409,7 +536,45 @@ def create_app() -> FastAPI:
                 boiler_should_fire=False,
                 boiler_state="error",
                 error_message=str(e),
+                degraded=True,
+                is_available={},
             )
+    
+    # Add health check endpoint
+    @app.get("/api/v1/hems/health", response_model=HEMSHealthResponse, tags=["hems"])
+    async def hems_health() -> HEMSHealthResponse:
+        """Get HEMS service health including sensor availability.
+        
+        Returns detailed per-sensor status and identifies degraded rooms.
+        """
+        sensor_health = _get_all_sensor_health()
+        
+        # Determine overall status
+        num_sensors = len(sensor_health)
+        available_count = sum(1 for s in sensor_health.values() if s.available)
+        
+        if num_sensors == 0:
+            status = "healthy"  # No sensors known yet
+        elif available_count == num_sensors:
+            status = "healthy"
+        elif available_count > 0:
+            status = "degraded"
+        else:
+            status = "critical"
+        
+        # List degraded rooms (missing flow temp, etc.)
+        degraded_rooms = []
+        if not _sensor_availability.get("sensor.heating_flow_temperature", False):
+            degraded_rooms.append("heating_system")
+        
+        return HEMSHealthResponse(
+            status=status,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            sensors=sensor_health,
+            degraded_rooms=degraded_rooms,
+            control_loop_active=_control_loop_task is not None and not _control_loop_task.done(),
+            database_available=_hems_db is not None,
+        )
 
     return app
 
