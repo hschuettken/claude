@@ -143,6 +143,8 @@ class ToolExecutor:
             "orbit_get_list",
             "orbit_add_list_item",
             "orbit_check_list_item",
+            "orbit_create_project",
+            "orbit_decompose_project",
         ):
             self._dispatch[name] = (self._orbit_tools, name)
 

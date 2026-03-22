@@ -274,6 +274,61 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "orbit_create_project",
+            "description": (
+                "Create a new Orbit project with optional goal, milestones, and settings. "
+                "Returns the created project ID and details."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Project title"},
+                    "description": {"type": "string", "description": "Project description (optional)"},
+                    "goal": {"type": "string", "description": "Project goal or objective (optional)"},
+                    "status": {
+                        "type": "string",
+                        "enum": ["active", "paused", "completed", "archived"],
+                        "description": "Initial project status (default: active)",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Project tags (optional)",
+                    },
+                    "due_date": {
+                        "type": "string",
+                        "description": "Project due date in YYYY-MM-DD format (optional)",
+                    },
+                },
+                "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "orbit_decompose_project",
+            "description": (
+                "Break down a project into subtasks. Analyzes the project goal and generates "
+                "a list of recommended subtasks with priority and effort estimates. "
+                "Can optionally auto-create the generated tasks."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string", "description": "Project UUID to decompose"},
+                    "auto_create": {
+                        "type": "boolean",
+                        "description": "Whether to automatically create the generated subtasks (default: False)",
+                    },
+                },
+                "required": ["project_id"],
+            },
+        },
+    },
 ]
 
 
@@ -499,3 +554,62 @@ class OrbitTools:
         resp.raise_for_status()
         logger.info("%s list item %s in list %s", action, item_id, list_id)
         return resp.json()
+
+    # ------------------------------------------------------------------
+    # Project Management
+    # ------------------------------------------------------------------
+
+    async def orbit_create_project(
+        self,
+        title: str,
+        description: str = "",
+        goal: str = "",
+        status: str = "active",
+        tags: Optional[list[str]] = None,
+        due_date: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Create a new Orbit project."""
+        client = await self._get_client()
+        body: dict[str, Any] = {
+            "title": title,
+            "status": status,
+        }
+        if description:
+            body["description"] = description
+        if goal:
+            body["goal"] = goal
+        if tags:
+            body["tags"] = tags
+        if due_date:
+            body["due_date"] = due_date
+
+        resp = await client.post(_url("/projects"), json=body, headers=_headers())
+        resp.raise_for_status()
+        data = resp.json()
+        logger.info("Created Orbit project: %s (id=%s)", title, data.get("id"))
+        return data
+
+    async def orbit_decompose_project(
+        self,
+        project_id: str,
+        auto_create: bool = False,
+    ) -> dict[str, Any]:
+        """Decompose a project into subtasks with AI assistance."""
+        client = await self._get_client()
+        body: dict[str, Any] = {
+            "auto_create": auto_create,
+        }
+
+        resp = await client.post(
+            _url(f"/projects/{project_id}/decompose"),
+            json=body,
+            headers=_headers(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        logger.info(
+            "Decomposed project %s: generated %d subtasks",
+            project_id,
+            len(data.get("subtasks", [])),
+        )
+        return data
