@@ -1,13 +1,14 @@
 """Unit tests for circulation pump scheduler.
 
-Tests the state machine logic, hysteresis, runtime limits, and HA integration.
+Tests the state machine logic, hysteresis, runtime limits, time-window scheduling, and HA integration.
 """
 
 import pytest
 import time
+from datetime import time as time_type
 from unittest.mock import Mock, patch, AsyncMock
 
-from circulation_pump import CirculationPumpScheduler, PumpState
+from circulation_pump import CirculationPumpScheduler, PumpState, TimeWindow
 
 
 class TestCirculationPumpBasics:
@@ -443,6 +444,211 @@ class TestCirculationPumpStateTransitions:
         assert pump.state == PumpState.ON
         # Timer should not have reset
         assert pump.state_enter_time == start_time
+
+
+class TestTimeWindow:
+    """Test TimeWindow helper class."""
+
+    def test_time_window_init(self):
+        """Test TimeWindow initialization."""
+        window = TimeWindow(hour=6, minute=30, end_hour=8, end_minute=0)
+        assert window.start_time == time_type(6, 30)
+        assert window.end_time == time_type(8, 0)
+
+    def test_time_window_is_active_simple(self):
+        """Test TimeWindow.is_active() for normal windows."""
+        window = TimeWindow(hour=6, minute=30, end_hour=8, end_minute=0)
+        
+        # Before window
+        assert not window.is_active(time_type(6, 29))
+        # Start of window
+        assert window.is_active(time_type(6, 30))
+        # Middle of window
+        assert window.is_active(time_type(7, 0))
+        # End of window (exclusive)
+        assert not window.is_active(time_type(8, 0))
+
+    def test_time_window_wrap_midnight(self):
+        """Test TimeWindow.is_active() for windows wrapping midnight."""
+        # Window: 22:00-06:00 (wraps midnight)
+        window = TimeWindow(hour=22, minute=0, end_hour=6, end_minute=0)
+        
+        # Before midnight, inside window
+        assert window.is_active(time_type(22, 30))
+        # After midnight, inside window
+        assert window.is_active(time_type(3, 0))
+        # Before midnight, outside window
+        assert not window.is_active(time_type(9, 0))
+        # Exact start time
+        assert window.is_active(time_type(22, 0))
+
+    def test_time_window_repr(self):
+        """Test TimeWindow string representation."""
+        window = TimeWindow(hour=6, minute=30, end_hour=8, end_minute=0)
+        assert "06:30" in repr(window)
+        assert "08:00" in repr(window)
+
+
+class TestCirculationPumpScheduledWindows:
+    """Test time-window scheduling functionality."""
+
+    def test_init_default_windows(self):
+        """Test that default time windows are morning and evening peaks."""
+        pump = CirculationPumpScheduler()
+        windows = pump.get_time_windows()
+        
+        assert len(windows) == 2
+        # Morning: 06:30-08:00
+        assert windows[0].start_time == time_type(6, 30)
+        assert windows[0].end_time == time_type(8, 0)
+        # Evening: 17:00-21:00
+        assert windows[1].start_time == time_type(17, 0)
+        assert windows[1].end_time == time_type(21, 0)
+
+    def test_custom_time_windows(self):
+        """Test initialization with custom time windows."""
+        custom_windows = [
+            TimeWindow(hour=7, minute=0, end_hour=9, end_minute=0),
+            TimeWindow(hour=18, minute=0, end_hour=22, end_minute=0),
+        ]
+        pump = CirculationPumpScheduler(time_windows=custom_windows)
+        windows = pump.get_time_windows()
+        
+        assert len(windows) == 2
+        assert windows[0].start_time == time_type(7, 0)
+        assert windows[1].start_time == time_type(18, 0)
+
+    def test_set_time_windows(self):
+        """Test updating time windows dynamically."""
+        pump = CirculationPumpScheduler()
+        new_windows = [TimeWindow(hour=5, minute=0, end_hour=9, end_minute=0)]
+        
+        pump.set_time_windows(new_windows)
+        assert pump.get_time_windows() == new_windows
+
+    def test_set_time_windows_empty_raises(self):
+        """Test that setting empty time windows raises ValueError."""
+        pump = CirculationPumpScheduler()
+        
+        with pytest.raises(ValueError):
+            pump.set_time_windows([])
+
+    @patch("circulation_pump.datetime")
+    def test_pump_turns_on_in_scheduled_window(self, mock_datetime):
+        """Test that pump turns ON when entering a scheduled window."""
+        pump = CirculationPumpScheduler(
+            time_windows=[TimeWindow(hour=6, minute=30, end_hour=8, end_minute=0)]
+        )
+        
+        # Mock current time: 06:45 (inside window)
+        mock_now = Mock()
+        mock_now.time.return_value = time_type(6, 45)
+        mock_datetime.now.return_value = mock_now
+        
+        # No boiler active, no heating demand, but in scheduled window
+        result = pump.should_pump(
+            boiler_active=False,
+            room_targets={},
+            room_actuals={}
+        )
+        
+        assert result is True
+        assert pump.state == PumpState.ON
+        assert pump.in_scheduled_window is True
+
+    @patch("circulation_pump.datetime")
+    def test_pump_stays_off_outside_scheduled_window(self, mock_datetime):
+        """Test that pump stays OFF when outside scheduled windows."""
+        pump = CirculationPumpScheduler(
+            time_windows=[TimeWindow(hour=6, minute=30, end_hour=8, end_minute=0)]
+        )
+        
+        # Mock current time: 12:00 (outside window)
+        mock_now = Mock()
+        mock_now.time.return_value = time_type(12, 0)
+        mock_datetime.now.return_value = mock_now
+        
+        # No demand
+        result = pump.should_pump(
+            boiler_active=False,
+            room_targets={},
+            room_actuals={}
+        )
+        
+        assert result is False
+        assert pump.state == PumpState.OFF
+        assert pump.in_scheduled_window is False
+
+    @patch("circulation_pump.datetime")
+    def test_pump_exits_scheduled_window(self, mock_datetime):
+        """Test that pump transitions through COOLDOWN when exiting scheduled window."""
+        pump = CirculationPumpScheduler(
+            min_runtime_s=600,
+            time_windows=[TimeWindow(hour=6, minute=30, end_hour=8, end_minute=0)]
+        )
+        
+        # Start: inside window at 06:45
+        mock_now = Mock()
+        mock_now.time.return_value = time_type(6, 45)
+        mock_datetime.now.return_value = mock_now
+        
+        pump.should_pump(boiler_active=False, room_targets={}, room_actuals={})
+        assert pump.state == PumpState.ON
+        
+        # Wait past minimum runtime and move outside window (08:15)
+        # Simulate enough time passing
+        pump.state_enter_time = time.monotonic() - 700  # More than min_runtime_s
+        mock_now.time.return_value = time_type(8, 15)
+        
+        result = pump.should_pump(boiler_active=False, room_targets={}, room_actuals={})
+        # Should transition to COOLDOWN since min runtime met and not in window
+        assert pump.state == PumpState.COOLDOWN
+
+    @patch("circulation_pump.datetime")
+    def test_pump_prefers_boiler_over_schedule(self, mock_datetime):
+        """Test that boiler demand overrides scheduled windows."""
+        pump = CirculationPumpScheduler(
+            time_windows=[TimeWindow(hour=12, minute=0, end_hour=13, end_minute=0)]
+        )
+        
+        # Outside window (10:00), but boiler active
+        mock_now = Mock()
+        mock_now.time.return_value = time_type(10, 0)
+        mock_datetime.now.return_value = mock_now
+        
+        result = pump.should_pump(
+            boiler_active=True,  # Boiler is firing
+            room_targets={},
+            room_actuals={}
+        )
+        
+        assert result is True
+        assert pump.state == PumpState.ON
+        assert pump.in_scheduled_window is False  # Not in window, but boiler is on
+
+    @patch("circulation_pump.datetime")
+    def test_is_in_scheduled_window(self, mock_datetime):
+        """Test _is_in_scheduled_window() helper."""
+        pump = CirculationPumpScheduler(
+            time_windows=[
+                TimeWindow(hour=6, minute=30, end_hour=8, end_minute=0),
+                TimeWindow(hour=17, minute=0, end_hour=21, end_minute=0),
+            ]
+        )
+        
+        # Test morning window
+        mock_now = Mock()
+        mock_now.time.return_value = time_type(7, 0)
+        mock_datetime.now.return_value = mock_now
+        assert pump._is_in_scheduled_window() is True
+        
+        # Test evening window
+        mock_now.time.return_value = time_type(19, 30)
+        assert pump._is_in_scheduled_window() is True
+        
+        # Test outside windows
+        mock_now.time.return_value = time_type(12, 0)
+        assert pump._is_in_scheduled_window() is False
 
 
 if __name__ == "__main__":

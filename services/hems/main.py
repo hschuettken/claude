@@ -236,6 +236,56 @@ def _write_circulation_pump_to_influx(
         logger.warning("Failed to write circulation pump state to InfluxDB: %s", e)
 
 
+async def _publish_pump_schedule_to_ha(
+    in_scheduled_window: bool,
+    time_windows: Optional[list] = None,
+) -> bool:
+    """Publish circulation pump schedule state to Home Assistant.
+    
+    Updates switch.circulation_pump_schedule_active entity via orchestrator.
+    Also logs time windows for debugging.
+    
+    Args:
+        in_scheduled_window: Whether currently in a scheduled pump window
+        time_windows: Optional list of TimeWindow objects for logging
+        
+    Returns:
+        True if published successfully, False otherwise.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            # Call orchestrator to set HA switch state
+            response = await client.post(
+                "http://orchestrator:8100/tools/execute",
+                json={
+                    "tool": "ha_set_state",
+                    "params": {
+                        "entity_id": "switch.circulation_pump_schedule_active",
+                        "state": "on" if in_scheduled_window else "off",
+                        "attributes": {
+                            "friendly_name": "Circulation Pump Schedule Active",
+                            "icon": "mdi:pump",
+                        },
+                    },
+                },
+            )
+            if response.status_code == 200:
+                logger.debug(
+                    "Published circulation pump schedule state to HA: %s",
+                    "active" if in_scheduled_window else "inactive",
+                )
+                return True
+            else:
+                logger.warning("Orchestrator returned status %d when setting pump schedule", response.status_code)
+                return False
+    except asyncio.TimeoutError:
+        logger.warning("Timeout publishing circulation pump schedule to HA")
+        return False
+    except Exception as e:
+        logger.warning("Failed to publish circulation pump schedule to HA: %s", e)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Control logic
 # ---------------------------------------------------------------------------
@@ -409,6 +459,12 @@ async def control_loop(settings: HEMSSettings) -> None:
             )
             pump_state = _circulation_pump.get_state().value
             pump_runtime_hours = _circulation_pump.get_runtime_hours()
+
+            # Publish pump schedule state to Home Assistant
+            await _publish_pump_schedule_to_ha(
+                in_scheduled_window=_circulation_pump.in_scheduled_window,
+                time_windows=_circulation_pump.get_time_windows(),
+            )
 
             # Write to InfluxDB
             if _influxdb_write_api:
