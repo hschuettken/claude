@@ -37,6 +37,7 @@ from config import HEMSSettings
 from database import HEMSDatabase
 from mixer_controller import MixerController
 from routes import router
+from api import router as api_router
 
 HEALTHCHECK_FILE = Path(os.environ.get("HEMS_DATA_DIR", "/app/data")) / "healthcheck"
 
@@ -664,6 +665,7 @@ def create_app() -> FastAPI:
     )
     app.state.settings = settings
     app.include_router(router)
+    app.include_router(api_router)  # Phase 2 internal API endpoints
 
     # Add control tick endpoint
     @app.post("/api/v1/hems/control/tick", response_model=ControlDecisionResponse, tags=["hems"])
