@@ -1,25 +1,25 @@
 """Draft endpoints for marketing agent."""
 
+import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.drafts.writer import DraftWriter
 from database import get_db
-from models import Draft
+from models import Draft, Topic
 
-router = APIRouter(prefix="/drafts", tags=["drafts"])
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/marketing/drafts", tags=["drafts"])
 
 
 class DraftCreate(BaseModel):
     """Request model for creating a draft."""
 
-    title: str = Field(..., min_length=1, max_length=255)
-    content: str = Field(...)
-    platform: str = Field(..., min_length=1, max_length=64)
-    status: str = Field(default="draft")
-    topic_id: Optional[int] = None
+    topic_id: int = Field(..., description="Topic ID to generate draft from")
+    format: str = Field(default="blog", description="blog, linkedin_teaser, linkedin_native")
 
 
 class DraftUpdate(BaseModel):
@@ -40,7 +40,13 @@ class DraftResponse(BaseModel):
     content: str
     status: str
     platform: str
-    topic_id: Optional[int]
+    format: Optional[str] = None
+    topic_id: Optional[int] = None
+    word_count: Optional[int] = None
+    outline: Optional[dict] = None
+    seo_meta: Optional[dict] = None
+    risk_flags: Optional[List[dict]] = None
+    confidence_labels: Optional[dict] = None
     created_at: str
     updated_at: str
 
@@ -53,7 +59,7 @@ async def list_drafts(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     status: Optional[str] = None,
-    platform: Optional[str] = None,
+    format: Optional[str] = None,
     topic_id: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
@@ -63,8 +69,8 @@ async def list_drafts(
     if status:
         query = query.filter(Draft.status == status)
 
-    if platform:
-        query = query.filter(Draft.platform == platform)
+    if format and hasattr(Draft, 'format'):
+        query = query.filter(Draft.format == format)
 
     if topic_id:
         query = query.filter(Draft.topic_id == topic_id)
@@ -73,20 +79,31 @@ async def list_drafts(
     return drafts
 
 
-@router.post("", response_model=DraftResponse, status_code=201)
-async def create_draft(draft: DraftCreate, db: Session = Depends(get_db)):
-    """Create a new draft."""
-    db_draft = Draft(
-        title=draft.title,
-        content=draft.content,
-        platform=draft.platform,
-        status=draft.status,
-        topic_id=draft.topic_id,
-    )
-    db.add(db_draft)
-    db.commit()
-    db.refresh(db_draft)
-    return db_draft
+@router.post("", response_model=dict, status_code=202)
+async def create_draft(
+    draft_req: DraftCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """
+    Create a new blog draft from topic (async, background task).
+    
+    Returns immediately with status 202 (accepted).
+    """
+    # Verify topic exists
+    topic = db.query(Topic).filter(Topic.id == draft_req.topic_id).first()
+    if not topic:
+        raise HTTPException(status_code=404, detail="Topic not found")
+
+    # Start draft generation in background
+    writer = DraftWriter(db)
+    background_tasks.add_task(writer.generate_blog_draft, draft_req.topic_id)
+
+    return {
+        "status": "generating",
+        "topic_id": draft_req.topic_id,
+        "message": "Blog draft generation started in background"
+    }
 
 
 @router.get("/{draft_id}", response_model=DraftResponse)
@@ -98,9 +115,9 @@ async def get_draft(draft_id: int, db: Session = Depends(get_db)):
     return draft
 
 
-@router.put("/{draft_id}", response_model=DraftResponse)
+@router.patch("/{draft_id}", response_model=DraftResponse)
 async def update_draft(draft_id: int, draft_update: DraftUpdate, db: Session = Depends(get_db)):
-    """Update a draft."""
+    """Update a draft (status, content, title)."""
     draft = db.query(Draft).filter(Draft.id == draft_id).first()
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
@@ -122,12 +139,40 @@ async def update_draft(draft_id: int, draft_update: DraftUpdate, db: Session = D
     return draft
 
 
-@router.delete("/{draft_id}", status_code=204)
-async def delete_draft(draft_id: int, db: Session = Depends(get_db)):
-    """Delete a draft."""
+@router.post("/{draft_id}/linkedin", response_model=dict, status_code=202)
+async def generate_linkedin_variants(
+    draft_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """
+    Generate LinkedIn teaser and native posts from blog draft.
+    
+    Returns immediately with status 202 (accepted).
+    """
     draft = db.query(Draft).filter(Draft.id == draft_id).first()
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
-    db.delete(draft)
+
+    writer = DraftWriter(db)
+    background_tasks.add_task(writer.generate_linkedin_teaser, draft_id)
+    background_tasks.add_task(writer.generate_linkedin_native, draft_id)
+
+    return {
+        "status": "generating",
+        "draft_id": draft_id,
+        "message": "LinkedIn variants generation started in background"
+    }
+
+
+@router.delete("/{draft_id}", status_code=204)
+async def delete_draft(draft_id: int, db: Session = Depends(get_db)):
+    """Delete a draft (soft delete: set status to rejected)."""
+    draft = db.query(Draft).filter(Draft.id == draft_id).first()
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    
+    # Soft delete: set status to rejected
+    draft.status = "rejected"
     db.commit()
     return None

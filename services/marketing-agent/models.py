@@ -13,6 +13,9 @@ from sqlalchemy import (
     Text,
     func,
     Index,
+    ARRAY,
+    JSON,
+    Numeric,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
@@ -53,7 +56,16 @@ class Topic(Base):
     name = Column(String(255), nullable=False, unique=True, index=True)
     pillar = Column(String(255), nullable=False)  # e.g. 'Product', 'Leadership', 'Innovation'
     audience_segment = Column(String(255), nullable=False)  # e.g. 'Enterprise', 'SMB', 'Developers'
+    
+    # Topic Scoring Engine fields (Round 20)
+    score = Column(Numeric(4, 3), nullable=True, default=0, index=True)  # 0.000 to 1.000
+    score_breakdown = Column(JSON, nullable=True)  # {audience_fit, timeliness, authenticity, uniqueness, evidence, performance}
+    signal_ids = Column(ARRAY(Integer), nullable=True, default=[])  # Source signal IDs
+    pillar_id = Column(Integer, nullable=True, index=True)  # Pillar number 1-6
+    status = Column(String(32), nullable=True, default="candidate", index=True)  # candidate, selected, drafted, published, archived
+    
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=True, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
     drafts = relationship("Draft", back_populates="topic")
@@ -90,9 +102,20 @@ class Draft(Base):
         nullable=False,
         default="draft",
         index=True,
-    )  # draft, review, approved, scheduled, published
+    )  # draft, review, approved, scheduled, published, rejected
     topic_id = Column(Integer, ForeignKey("marketing.topics.id"), nullable=True)
     platform = Column(String(64), nullable=False)  # blog, linkedin, twitter, etc.
+    
+    # Draft Writer fields (Round 20)
+    format = Column(String(32), nullable=True, default="blog")  # blog, linkedin_teaser, linkedin_native
+    outline = Column(JSON, nullable=True)  # Article outline structure
+    sources = Column(JSON, nullable=True, default=[])  # Cited URLs and snippets
+    seo_meta = Column(JSON, nullable=True)  # SEO title, description, keywords
+    visual_prompt = Column(Text, nullable=True)  # Image generation prompt
+    confidence_labels = Column(JSON, nullable=True, default={})  # Section confidence levels
+    risk_flags = Column(JSON, nullable=True, default=[])  # Governance risk flags
+    word_count = Column(Integer, nullable=True, default=0)
+    
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
