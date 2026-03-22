@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from app.scout.scheduler import get_scheduler
+from app.events.nats_client import NATSClient
 
 router = APIRouter(prefix="/marketing/scout", tags=["scout"])
 
@@ -20,3 +21,19 @@ async def scout_status():
     """
     scheduler = get_scheduler()
     return scheduler.get_status()
+
+
+@router.get("/system/nats-status", response_model=dict)
+async def nats_status():
+    """
+    Get NATS JetStream status.
+    
+    Returns:
+    - connected: NATS connection status
+    - server: NATS server URL (if connected)
+    - available: Event bus availability
+    """
+    return {
+        "connected": NATSClient.is_available(),
+        "available": NATSClient.is_available(),
+    }
