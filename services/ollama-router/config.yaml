@@ -10,7 +10,7 @@ nodes:
     max_concurrent: 2
     default_models: ["qwen2.5:32b-q4_K_M"]
   # - name: amd-8945hs
-  #   url: http://192.168.0.XX:11434  # TODO: Ollama instance not yet deployed. Plan: GPU-enabled node in Phase X
+  #   url: http://192.168.0.TBD:11434  # TODO: GPU-enabled Ollama instance not yet deployed
   #   tags: [medium, igpu]
   #   max_concurrent: 3
   #   default_models: ["qwen2.5:7b-q4_K_M", "qwen2.5-coder:7b-q4_K_M"]
