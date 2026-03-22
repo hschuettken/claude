@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime, time as dt_time, timezone
+from datetime import datetime, time as dt_time, timezone, timedelta
 from typing import Any, Optional
 from uuid import UUID
 
@@ -105,6 +105,48 @@ class ThermalLogRequest(BaseModel):
     target_temp: float = Field(..., description="Target temperature in °C")
     outdoor_temp: Optional[float] = Field(None, description="Outdoor temperature in °C")
     valve_pos: float = Field(..., ge=0, le=100, description="Valve position 0-100%")
+
+
+# ============================================================================
+# Phase 3: Thermal Training Data Collection & Predictive Heating
+# ============================================================================
+
+
+class ThermalTrainingSnapshot(BaseModel):
+    """Snapshot of current thermal state for training data collection."""
+    room_id: str = Field(..., description="Room identifier")
+    outside_temp: Optional[float] = Field(None, description="Outside temperature in °C")
+    flow_temp: float = Field(..., description="Flow temperature in °C")
+    return_temp: Optional[float] = Field(None, description="Return temperature in °C")
+    room_temp: float = Field(..., description="Room temperature in °C")
+    setpoint: float = Field(..., description="Current setpoint in °C")
+    actual_heating: bool = Field(..., description="Whether heating is currently active")
+    weather_condition: Optional[str] = Field(None, description="Current weather condition")
+
+
+class SetpointPredictionRequest(BaseModel):
+    """Request for predicted setpoint based on lead time."""
+    room_id: str = Field(..., description="Room identifier")
+    target_temp: float = Field(..., ge=5, le=40, description="Desired target temperature in °C")
+    lead_time_minutes: int = Field(..., ge=1, description="Minutes ahead to predict")
+
+
+class SetpointPredictionResponse(BaseModel):
+    """Predicted setpoint for optimal heating control."""
+    predicted_setpoint: float = Field(..., description="Predicted setpoint in °C")
+    confidence: float = Field(..., ge=0, le=1, description="Confidence score 0-1")
+    method: str = Field(..., description="Prediction method: 'rule_based' or 'ml'")
+    notes: str = Field(..., description="Explanation of prediction")
+    timestamp: str = Field(..., description="Timestamp of prediction")
+
+
+class ThermalTrainingExportResponse(BaseModel):
+    """Exported thermal training data."""
+    data: list[dict] = Field(..., description="Array of training data points")
+    count: int = Field(..., description="Number of data points")
+    period_days: int = Field(..., description="Period covered in days")
+    from_timestamp: str = Field(..., description="Start timestamp")
+    to_timestamp: str = Field(..., description="End timestamp")
 
 
 # ---------------------------------------------------------------------------
@@ -430,3 +472,338 @@ async def log_thermal_data(body: ThermalLogRequest, request: Request) -> dict[st
     except Exception as e:
         logger.error("Failed to log thermal data: %s", e)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to log thermal data: {e}")
+
+
+# ============================================================================
+# Phase 3: Thermal Training Data Collection & Predictive Heating
+# ============================================================================
+
+
+@router.post("/api/v1/hems/thermal-training/snapshot", status_code=status.HTTP_200_OK, tags=["hems"])
+async def thermal_training_snapshot(body: ThermalTrainingSnapshot, request: Request) -> dict[str, str]:
+    """Manually capture a thermal training data snapshot.
+
+    Records current thermal state (room temp, flow temp, setpoint, etc.)
+    to InfluxDB thermal_training measurement for ML model training.
+    
+    Endpoint: POST /api/v1/hems/thermal-training/snapshot
+    
+    This can be called manually for immediate capture, and is also called
+    automatically by the periodic thermal data collector (every 15 min).
+    """
+    write_api = request.app.state.influxdb_write_api
+    settings: HEMSSettings = request.app.state.settings
+
+    if not write_api:
+        logger.warning("InfluxDB not available — thermal snapshot discarded")
+        return {"status": "skipped", "reason": "InfluxDB not available"}
+
+    try:
+        import influxdb_client
+
+        point = (
+            influxdb_client.Point("thermal_training")
+            .tag("room_id", body.room_id)
+            .field("flow_temp", float(body.flow_temp))
+            .field("room_temp", float(body.room_temp))
+            .field("setpoint", float(body.setpoint))
+            .field("actual_heating", body.actual_heating)
+        )
+
+        # Optional fields
+        if body.outside_temp is not None:
+            point = point.field("outside_temp", float(body.outside_temp))
+        if body.return_temp is not None:
+            point = point.field("return_temp", float(body.return_temp))
+        if body.weather_condition is not None:
+            point = point.tag("weather_condition", body.weather_condition)
+
+        write_api.write(bucket=settings.influxdb_bucket, org=settings.influxdb_org, record=point)
+
+        logger.info(
+            "Thermal training snapshot: room=%s, flow=%.1f°C, room=%.1f°C, sp=%.1f°C, heating=%s",
+            body.room_id,
+            body.flow_temp,
+            body.room_temp,
+            body.setpoint,
+            body.actual_heating,
+        )
+
+        return {
+            "status": "captured",
+            "measurement": "thermal_training",
+            "room": body.room_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+    except Exception as e:
+        logger.error("Failed to capture thermal snapshot: %s", e)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to capture snapshot: {e}")
+
+
+@router.get("/api/v1/hems/predict/setpoint", response_model=SetpointPredictionResponse, tags=["hems"])
+async def predict_setpoint(
+    room_id: str,
+    target_temp: float,
+    lead_time_minutes: int,
+    request: Request,
+) -> SetpointPredictionResponse:
+    """Predict optimal setpoint for heating based on lead time.
+
+    Endpoint: GET /api/v1/hems/predict/setpoint?room_id={id}&target_temp={t}&lead_time_minutes={n}
+    
+    For now (Phase 3): returns rule-based prediction.
+    Real ML model will replace this when >30 days of training data exists.
+    
+    Args:
+        room_id: Room identifier
+        target_temp: Desired target temperature (°C)
+        lead_time_minutes: Minutes ahead to predict
+    
+    Returns:
+        SetpointPredictionResponse with predicted setpoint and confidence
+    """
+    logger.info(
+        "Setpoint prediction: room=%s, target=%.1f°C, lead_time=%d min",
+        room_id,
+        target_temp,
+        lead_time_minutes,
+    )
+
+    # Phase 3: Simple rule-based prediction
+    # TODO: Replace with ML model when training data is sufficient
+    predicted_setpoint = target_temp
+    confidence = 0.5
+    method = "rule_based"
+    notes = "Rule-based prediction: no ML model yet"
+
+    if lead_time_minutes > 120:
+        # Very long lead time — reduce setpoint to avoid overshoot
+        predicted_setpoint = target_temp - 2.0
+        notes = f"Very long lead time ({lead_time_minutes}min) — reducing setpoint by 2°C to minimize overshoot"
+    elif lead_time_minutes > 60:
+        # Long lead time — slightly reduce setpoint
+        predicted_setpoint = target_temp - 1.0
+        notes = f"Long lead time ({lead_time_minutes}min) — reducing setpoint by 1°C"
+    else:
+        # Short lead time — use target directly
+        predicted_setpoint = target_temp
+        notes = f"Short lead time ({lead_time_minutes}min) — using target setpoint directly"
+
+    # Clamp to valid range
+    predicted_setpoint = max(5.0, min(40.0, predicted_setpoint))
+
+    return SetpointPredictionResponse(
+        predicted_setpoint=predicted_setpoint,
+        confidence=confidence,
+        method=method,
+        notes=notes,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@router.get("/api/v1/hems/thermal-training/export", response_model=ThermalTrainingExportResponse, tags=["hems"])
+async def export_thermal_training(
+    days: int = 7,
+    request: Request = None,
+) -> ThermalTrainingExportResponse:
+    """Export thermal training data from InfluxDB for ML pipeline.
+
+    Endpoint: GET /api/v1/hems/thermal-training/export?days=7
+    
+    Returns: Array of thermal training data points from the last N days.
+    
+    Args:
+        days: Number of days of data to export (default 7)
+    
+    Returns:
+        ThermalTrainingExportResponse with training data array and metadata
+    """
+    settings: HEMSSettings = request.app.state.settings
+    influxdb_client_instance = request.app.state.influxdb_client
+    
+    if not influxdb_client_instance:
+        logger.warning("InfluxDB not available — cannot export training data")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="InfluxDB not available"
+        )
+
+    try:
+        import influxdb_client
+
+        # Create query API
+        query_api = influxdb_client_instance.query_api()
+
+        # Build Flux query for last N days
+        now = datetime.now(timezone.utc)
+        from_time = now - timedelta(days=days)
+
+        flux_query = f"""
+        from(bucket: "{settings.influxdb_bucket}")
+          |> range(start: {from_time.isoformat()}, stop: {now.isoformat()})
+          |> filter(fn: (r) => r._measurement == "thermal_training")
+          |> sort(columns: ["_time"])
+        """
+
+        # Execute query
+        tables = query_api.query(flux_query, org=settings.influxdb_org)
+
+        # Parse results into data array
+        data = []
+        for table in tables:
+            for record in table.records:
+                data_point = {
+                    "timestamp": record.get_time().isoformat() if record.get_time() else None,
+                    "room_id": record.tags.get("room_id") if record.tags else None,
+                    "weather_condition": record.tags.get("weather_condition") if record.tags else None,
+                    "field": record.field,
+                    "value": record.value,
+                }
+                data.append(data_point)
+
+        logger.info("Exported %d thermal training data points (last %d days)", len(data), days)
+
+        return ThermalTrainingExportResponse(
+            data=data,
+            count=len(data),
+            period_days=days,
+            from_timestamp=from_time.isoformat(),
+            to_timestamp=now.isoformat(),
+        )
+
+    except Exception as e:
+        logger.error("Failed to export thermal training data: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to export training data: {e}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Thermal model endpoints (Phase 3)
+# ---------------------------------------------------------------------------
+
+class ThermalModelResponse(BaseModel):
+    room_id: str
+    u_eff: float = Field(..., description="Effective heat-loss coefficient W/K")
+    thermal_capacity: float = Field(..., description="Room thermal capacity Wh/K")
+    fitted_at: Optional[str] = None
+    source: str = "default"
+
+
+class ThermalModelFitResponse(BaseModel):
+    room_id: str
+    u_eff: float
+    thermal_capacity: float
+    fitted_at: str
+    training_rows: int
+    message: str
+
+
+@router.get(
+    "/api/v1/hems/rooms/{room_id}/thermal-model",
+    response_model=ThermalModelResponse,
+    tags=["hems"],
+)
+async def get_thermal_model(room_id: str, request: Request) -> ThermalModelResponse:
+    """Return current physics model parameters for a room."""
+    from thermal_model import PhysicsModel, PhysicsModelParams, DEFAULT_U_EFF, DEFAULT_CAPACITY
+
+    db: HEMSDatabase = request.app.state.db
+    config_key = f"physics_model_{room_id}"
+    raw = await db.get_config(config_key)
+
+    if raw:
+        try:
+            model = PhysicsModel.from_json(room_id, raw)
+            p = model.params
+            return ThermalModelResponse(
+                room_id=room_id,
+                u_eff=p.u_eff,
+                thermal_capacity=p.thermal_capacity,
+                fitted_at=p.fitted_at,
+                source="fitted",
+            )
+        except Exception as e:
+            logger.warning("Failed to parse thermal model for %s: %s", room_id, e)
+
+    return ThermalModelResponse(
+        room_id=room_id,
+        u_eff=DEFAULT_U_EFF,
+        thermal_capacity=DEFAULT_CAPACITY,
+        fitted_at=None,
+        source="default",
+    )
+
+
+@router.post(
+    "/api/v1/hems/rooms/{room_id}/thermal-model/fit",
+    response_model=ThermalModelFitResponse,
+    tags=["hems"],
+)
+async def fit_thermal_model(room_id: str, request: Request) -> ThermalModelFitResponse:
+    """Fit physics model parameters from stored training data and persist."""
+    from thermal_model import PhysicsModel
+
+    db: HEMSDatabase = request.app.state.db
+
+    # --- Fetch training data from InfluxDB (last 7 days) ---
+    training_rows: list[dict] = []
+    try:
+        influxdb_client_instance = request.app.state.influxdb_client
+        settings: HEMSSettings = request.app.state.settings
+
+        if influxdb_client_instance:
+            import influxdb_client as _ic  # noqa: F401
+            from datetime import timedelta
+
+            query_api = influxdb_client_instance.query_api()
+            now = datetime.now(timezone.utc)
+            from_time = now - timedelta(days=7)
+
+            flux = f"""
+            from(bucket: "{settings.influxdb_bucket}")
+              |> range(start: {from_time.isoformat()}, stop: {now.isoformat()})
+              |> filter(fn: (r) => r._measurement == "thermal_training")
+              |> filter(fn: (r) => r["room_id"] == "{room_id}")
+              |> sort(columns: ["_time"])
+            """
+            tables = query_api.query(flux, org=settings.influxdb_org)
+
+            # Pivot field values into dicts by timestamp
+            by_ts: dict[str, dict] = {}
+            for table in tables:
+                for record in table.records:
+                    ts = record.get_time().isoformat() if record.get_time() else "?"
+                    row = by_ts.setdefault(ts, {})
+                    row[record.field] = record.value
+
+            for row in by_ts.values():
+                if all(k in row for k in ("flow_temp", "outdoor_temp", "room_temp")):
+                    training_rows.append({
+                        "flow_temp": row["flow_temp"],
+                        "outdoor_temp": row["outdoor_temp"],
+                        "room_temp_before": row["room_temp"],
+                        "room_temp_after": row.get("room_temp_after", row["room_temp"]),
+                        "dt_minutes": 15.0,
+                    })
+    except Exception as exc:
+        logger.warning("Failed to load training data from InfluxDB for %s: %s", room_id, exc)
+
+    # --- Fit model ---
+    model = PhysicsModel(room_id=room_id)
+    params = model.fit_parameters(training_rows)
+
+    # --- Persist to DB ---
+    config_key = f"physics_model_{room_id}"
+    await db.set_config(config_key, model.to_json())
+
+    return ThermalModelFitResponse(
+        room_id=room_id,
+        u_eff=params.u_eff,
+        thermal_capacity=params.thermal_capacity,
+        fitted_at=params.fitted_at or datetime.now(timezone.utc).isoformat(),
+        training_rows=len(training_rows),
+        message=f"Fitted with {len(training_rows)} training rows" if training_rows else "No training data — defaults saved",
+    )
