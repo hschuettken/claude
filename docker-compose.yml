@@ -161,6 +161,25 @@ services:
     networks:
       - homelab
 
+  marketing-agent:
+    build:
+      context: .
+      dockerfile: services/marketing-agent/Dockerfile
+    container_name: claude-marketing-agent-1
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MARKETING_DB_URL: ${MARKETING_DB_URL:-postgresql://homelab:homelab@192.168.0.80:5432/homelab}
+      GHOST_URL: ${GHOST_URL:-https://layer8.schuettken.net}
+      GHOST_ADMIN_API_KEY: ${GHOST_ADMIN_API_KEY:-}
+      MARKETING_PORT: ${MARKETING_PORT:-8211}
+    ports:
+      - "${MARKETING_PORT:-8211}:8000"
+    volumes:
+      - marketing_agent_data:/app/data
+    networks:
+      - homelab
+
   # --- Template for new services ---
   # my-new-service:
   #   build:
@@ -180,6 +199,7 @@ services:
 
 volumes:
   hems_data:
+  marketing_agent_data:
   pv_forecast_data:
   smart_ev_charging_data:
   ev_forecast_data:
