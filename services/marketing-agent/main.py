@@ -7,7 +7,7 @@ from fastapi import FastAPI, status
 from fastapi.responses import JSONResponse
 
 from api import signals, topics, drafts, knowledge_graph, publish
-from api import scout
+from api import scout, synthesis
 from app.scout.events import init_nats_publisher, close_nats_publisher
 from app.scout.scheduler import get_scheduler
 from app.knowledge_graph import Neo4jSingleton, MarketingKGSchema
@@ -59,6 +59,16 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to start Scout scheduler: {e}")
 
+    # Initialize SynthesisOS consumer
+    if settings.nats_url:
+        logger.info("Initializing SynthesisOS NATS consumer...")
+        try:
+            from app.consumers.synthesis import init_synthesis_consumer
+            await init_synthesis_consumer()
+            logger.info("SynthesisOS consumer started successfully")
+        except Exception as e:
+            logger.warning(f"Failed to start SynthesisOS consumer: {e}")
+
     yield
 
     # Shutdown
@@ -74,6 +84,14 @@ async def lifespan(app: FastAPI):
         scheduler = get_scheduler()
         await scheduler.stop()
         await close_nats_publisher()
+
+    # Stop SynthesisOS consumer
+    try:
+        from app.consumers.synthesis import close_synthesis_consumer
+        await close_synthesis_consumer()
+        logger.info("SynthesisOS consumer stopped")
+    except Exception as e:
+        logger.warning(f"Error stopping SynthesisOS consumer: {e}")
 
 
 # Create FastAPI app
@@ -102,6 +120,7 @@ app.include_router(topics.router, prefix="/api/v1")
 app.include_router(drafts.router, prefix="/api/v1")
 app.include_router(publish.router, prefix="/api/v1")
 app.include_router(scout.router, prefix="/api/v1")
+app.include_router(synthesis.router, prefix="/api/v1")
 app.include_router(knowledge_graph.router, prefix="/api/v1")
 
 

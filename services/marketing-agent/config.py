@@ -41,6 +41,9 @@ class MarketingSettings(BaseSettings):
     draft_min_words: int = 1000
     draft_generation_timeout: int = 120  # seconds
 
+    # SynthesisOS Configuration
+    synthesis_auto_publish: bool = False  # If True, publish directly; if False, create drafts only
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
