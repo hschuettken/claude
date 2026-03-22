@@ -32,6 +32,7 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 from pydantic import BaseModel
 
 from boiler_manager import BoilerManager, BoilerState
+from circulation_pump import CirculationPumpScheduler, PumpState
 from config import HEMSSettings
 from database import HEMSDatabase
 from mixer_controller import MixerController
@@ -51,6 +52,7 @@ _control_loop_task: Optional[asyncio.Task] = None
 _thermal_collector_task: Optional[asyncio.Task] = None  # Phase 3: Thermal data collector
 _mixer_controller: Optional[MixerController] = None
 _boiler_manager: Optional[BoilerManager] = None
+_circulation_pump: Optional[CirculationPumpScheduler] = None
 _influxdb_client: Optional[influxdb_client.InfluxDBClient] = None
 _influxdb_write_api = None
 _hems_db: Optional[HEMSDatabase] = None
@@ -71,6 +73,9 @@ class ControlDecisionResponse(BaseModel):
     valve_position_pct: float
     boiler_should_fire: bool
     boiler_state: str
+    circulation_pump_on: bool
+    circulation_pump_state: str
+    circulation_pump_runtime_hours: float
     setpoint_c: Optional[float] = None
     measured_flow_temp_c: Optional[float] = None
     demand_w: Optional[float] = None
@@ -205,6 +210,32 @@ def _write_hems_decision_to_influx(
         logger.warning("Failed to write hems_decisions to InfluxDB: %s", e)
 
 
+def _write_circulation_pump_to_influx(
+    write_api: Optional[object],
+    settings: HEMSSettings,
+    pump_should_run: bool,
+    pump_state: str,
+    runtime_hours: float,
+) -> None:
+    """Write circulation pump state to InfluxDB."""
+    if not write_api:
+        return
+
+    try:
+        point = (
+            influxdb_client.Point("hems_circulation_pump")
+            .tag("service", "hems")
+            .field("pump_on", pump_should_run)
+            .field("pump_state", pump_state)
+            .field("runtime_hours", runtime_hours)
+        )
+
+        write_api.write(bucket=settings.influxdb_bucket, org=settings.influxdb_org, record=point)
+        logger.debug("Wrote circulation pump state to InfluxDB")
+    except Exception as e:
+        logger.warning("Failed to write circulation pump state to InfluxDB: %s", e)
+
+
 # ---------------------------------------------------------------------------
 # Control logic
 # ---------------------------------------------------------------------------
@@ -306,15 +337,15 @@ async def _fetch_heating_demand() -> Optional[float]:
 async def control_loop(settings: HEMSSettings) -> None:
     """Background control loop — runs every 10 seconds.
 
-    Reads schedule/demand, fetches flow temp from HA, calls MixerController
-    and BoilerManager, writes decisions to InfluxDB.
+    Reads schedule/demand, fetches flow temp from HA, calls MixerController,
+    BoilerManager, and CirculationPumpScheduler, writes decisions to InfluxDB.
     
     Gracefully handles unavailable sensors by using cached/default values.
     """
-    global _mixer_controller, _boiler_manager, _influxdb_write_api
+    global _mixer_controller, _boiler_manager, _circulation_pump, _influxdb_write_api
 
-    if not _mixer_controller or not _boiler_manager:
-        logger.error("Control loop: mixer_controller or boiler_manager not initialized")
+    if not _mixer_controller or not _boiler_manager or not _circulation_pump:
+        logger.error("Control loop: mixer_controller, boiler_manager, or circulation_pump not initialized")
         return
 
     logger.info("Control loop started (interval=10s)")
@@ -351,6 +382,34 @@ async def control_loop(settings: HEMSSettings) -> None:
             boiler_should_fire = _boiler_manager.should_fire(demand_w=demand_w)
             boiler_state = _boiler_manager.get_state().value
 
+            # Call circulation pump scheduler
+            # For Phase 1, we use simple heuristic: any room with active schedule needs circulation
+            # TODO: Fetch actual room temperatures from HA climate entities
+            room_targets = {}
+            room_actuals = {}
+            try:
+                # Attempt to get primary room schedule
+                if _hems_db:
+                    now = datetime.now(timezone.utc)
+                    dow = now.weekday()
+                    current_time = now.time()
+                    schedule = await _hems_db.get_current_schedule("living_room", dow, current_time)
+                    if schedule:
+                        room_targets["living_room"] = schedule.target_temp
+                        # Use cached room temperature if available
+                        room_actuals["living_room"] = _sensor_cache.get("sensor.room_temperature", 20.0)
+            except Exception as e:
+                logger.warning("Could not fetch room schedule for circulation pump: %s", e)
+            
+            # Determine if pump should run
+            pump_should_run = _circulation_pump.should_pump(
+                boiler_active=boiler_should_fire,
+                room_targets=room_targets,
+                room_actuals=room_actuals,
+            )
+            pump_state = _circulation_pump.get_state().value
+            pump_runtime_hours = _circulation_pump.get_runtime_hours()
+
             # Write to InfluxDB
             if _influxdb_write_api:
                 _write_hems_decision_to_influx(
@@ -363,14 +422,22 @@ async def control_loop(settings: HEMSSettings) -> None:
                     measured=measured_temp,
                     demand=demand_w,
                 )
+                _write_circulation_pump_to_influx(
+                    _influxdb_write_api,
+                    settings,
+                    pump_should_run=pump_should_run,
+                    pump_state=pump_state,
+                    runtime_hours=pump_runtime_hours,
+                )
 
             log_level = logging.WARNING if degraded else logging.INFO
             logger.log(
                 log_level,
-                "Control tick: valve=%.1f%%, boiler=%s (fire=%s), temp=%.1f°C, demand=%.0fW%s",
+                "Control tick: valve=%.1f%%, boiler=%s (fire=%s), pump=%s, temp=%.1f°C, demand=%.0fW%s",
                 valve_pos,
                 boiler_state,
                 boiler_should_fire,
+                pump_state,
                 measured_temp if measured_temp is not None else -1,
                 demand_w if demand_w is not None else -1,
                 " [DEGRADED]" if degraded else "",
@@ -462,7 +529,7 @@ async def thermal_data_collector(settings: HEMSSettings) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _control_loop_task, _thermal_collector_task, _mixer_controller, _boiler_manager, _influxdb_client, _influxdb_write_api, _hems_db
+    global _control_loop_task, _thermal_collector_task, _mixer_controller, _boiler_manager, _circulation_pump, _influxdb_client, _influxdb_write_api, _hems_db
 
     settings: HEMSSettings = app.state.settings
     logger.info("HEMS starting up — mode=%s", settings.hems_mode)
@@ -484,7 +551,8 @@ async def lifespan(app: FastAPI):
     # Initialize controllers
     _mixer_controller = MixerController(kp=3.0, ki=0.15, max_integral=20, rate_limit=2.0)
     _boiler_manager = BoilerManager(min_off_time_s=600, min_on_time_s=300)
-    logger.info("Controllers initialized: mixer_controller, boiler_manager")
+    _circulation_pump = CirculationPumpScheduler(min_runtime_s=600, max_runtime_s=3600, temp_hysteresis_c=0.5)
+    logger.info("Controllers initialized: mixer_controller, boiler_manager, circulation_pump")
 
     # Initialize InfluxDB
     _influxdb_client, _influxdb_write_api = _init_influxdb(settings)
@@ -548,9 +616,9 @@ def create_app() -> FastAPI:
         
         Returns 200 with degraded=true if sensors are unavailable (not 503).
         """
-        global _mixer_controller, _boiler_manager
+        global _mixer_controller, _boiler_manager, _circulation_pump
 
-        if not _mixer_controller or not _boiler_manager:
+        if not _mixer_controller or not _boiler_manager or not _circulation_pump:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Controllers not yet initialized",
@@ -586,6 +654,29 @@ def create_app() -> FastAPI:
             boiler_should_fire = _boiler_manager.should_fire(demand_w=demand_w)
             boiler_state = _boiler_manager.get_state().value
 
+            # Compute circulation pump decision
+            room_targets = {}
+            room_actuals = {}
+            try:
+                if _hems_db:
+                    now = datetime.now(timezone.utc)
+                    dow = now.weekday()
+                    current_time = now.time()
+                    schedule = await _hems_db.get_current_schedule("living_room", dow, current_time)
+                    if schedule:
+                        room_targets["living_room"] = schedule.target_temp
+                        room_actuals["living_room"] = _sensor_cache.get("sensor.room_temperature", 20.0)
+            except Exception as e:
+                logger.debug("Could not fetch room schedule for pump in control_tick: %s", e)
+            
+            pump_should_run = _circulation_pump.should_pump(
+                boiler_active=boiler_should_fire,
+                room_targets=room_targets,
+                room_actuals=room_actuals,
+            )
+            pump_state = _circulation_pump.get_state().value
+            pump_runtime_hours = _circulation_pump.get_runtime_hours()
+
             # Write to InfluxDB
             if _influxdb_write_api:
                 _write_hems_decision_to_influx(
@@ -598,12 +689,22 @@ def create_app() -> FastAPI:
                     measured=measured_temp,
                     demand=demand_w,
                 )
+                _write_circulation_pump_to_influx(
+                    _influxdb_write_api,
+                    settings,
+                    pump_should_run=pump_should_run,
+                    pump_state=pump_state,
+                    runtime_hours=pump_runtime_hours,
+                )
 
             return ControlDecisionResponse(
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 valve_position_pct=valve_pos,
                 boiler_should_fire=boiler_should_fire,
                 boiler_state=boiler_state,
+                circulation_pump_on=pump_should_run,
+                circulation_pump_state=pump_state,
+                circulation_pump_runtime_hours=pump_runtime_hours,
                 setpoint_c=setpoint,
                 measured_flow_temp_c=measured_temp,
                 demand_w=demand_w,
@@ -611,6 +712,7 @@ def create_app() -> FastAPI:
                 is_available={
                     "flow_temperature": temp_available,
                     "demand": demand_w is not None and demand_w > 0,
+                    "pump": pump_state is not None,
                 },
             )
 
@@ -621,6 +723,9 @@ def create_app() -> FastAPI:
                 valve_position_pct=0.0,
                 boiler_should_fire=False,
                 boiler_state="error",
+                circulation_pump_on=False,
+                circulation_pump_state="error",
+                circulation_pump_runtime_hours=0.0,
                 error_message=str(e),
                 degraded=True,
                 is_available={},
