@@ -262,13 +262,98 @@ class DraftWriter:
             lines.append(f"- {s.title} ({s.source})")
         return "\n".join(lines)
 
-    async def _generate_outline(self, topic: Topic, signals_text: str) -> Optional[Dict]:
-        """Generate blog outline."""
+    async def _build_kg_context(self, topic: Topic) -> Dict:
+        """
+        Build Knowledge Graph enrichment context.
+
+        Queries the KG for:
+        - Published posts on similar topics
+        - Active Orbit tasks related to the topic
+        - Content pillar statistics
+
+        Returns empty dict if KG unavailable.
+        """
+        if not self.kg_query or not self.kg_query.is_available():
+            logger.debug("KG unavailable; skipping enrichment context")
+            return {}
+
+        try:
+            # Extract keywords from topic title and summary
+            keywords = topic.name.split()[:5]  # First 5 words as keywords
+            if not keywords:
+                keywords = ["content"]
+
+            logger.info(f"Querying KG for context with keywords: {keywords}")
+
+            # Get published posts on similar topics
+            published_posts = await self.kg_query.get_published_posts_on_topic(keywords)
+
+            # Get active projects
+            active_projects = await self.kg_query.get_related_orbit_tasks(keywords)
+
+            # Get pillar statistics
+            pillar_stats = {}
+            if topic.pillar_id:
+                pillar_stats = await self.kg_query.get_pillar_statistics(topic.pillar_id)
+
+            context = {
+                "published_posts": published_posts,
+                "active_projects": active_projects,
+                "pillar_stats": pillar_stats,
+            }
+
+            logger.info(
+                f"✓ KG context: {len(published_posts)} published posts, "
+                f"{len(active_projects)} active projects"
+            )
+            return context
+
+        except Exception as e:
+            logger.error(f"Error building KG context: {e}", exc_info=True)
+            return {}
+
+    async def _generate_outline(self, topic: Topic, signals_text: str, kg_context: Optional[Dict] = None) -> Optional[Dict]:
+        """Generate blog outline with optional KG context enrichment."""
+        # Build KG context block if provided
+        kg_context_block = ""
+        if kg_context:
+            sections = []
+            
+            if kg_context.get("published_posts"):
+                posts_text = "\n".join(
+                    [f"  - {p.get('title', 'Unknown')} ({p.get('format', 'blog')})" 
+                     for p in kg_context["published_posts"][:3]]
+                )
+                sections.append(f"## Previously Published Posts\n{posts_text}")
+            
+            if kg_context.get("active_projects"):
+                projects_text = "\n".join(
+                    [f"  - {p.get('title', 'Unknown')} ({p.get('status', 'active')})"
+                     for p in kg_context["active_projects"][:2]]
+                )
+                sections.append(f"## Related Active Projects\n{projects_text}")
+            
+            if kg_context.get("pillar_stats"):
+                stats = kg_context["pillar_stats"]
+                sections.append(
+                    f"## Content Coverage for This Pillar\n"
+                    f"  - Total posts: {stats.get('post_count', 0)}\n"
+                    f"  - Published: {stats.get('published_count', 0)}\n"
+                    f"  - Last published: {stats.get('last_published', 'N/A')}"
+                )
+            
+            if sections:
+                kg_context_block = "\n\n" + "## Knowledge Graph Context\n" + "\n\n".join(sections)
+
+        # Build prompt with optional KG context
         prompt = BLOG_OUTLINE_PROMPT.format(
             title=topic.name,
             summary=topic.name,  # TODO: use actual summary
             signals=signals_text,
         )
+        
+        if kg_context_block:
+            prompt += kg_context_block
         response = await self.llm_client.generate(BLOG_SYSTEM_PROMPT, prompt)
         if not response:
             return None
