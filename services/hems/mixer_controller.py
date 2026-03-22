@@ -4,7 +4,7 @@ Implements a proportional-integral (PI) controller with anti-windup and rate lim
 to control the mixing valve position based on setpoint vs measured flow temperature.
 
 Typical use:
-  controller = MixerController(kp=0.8, ki=0.02, max_integral=20, rate_limit=2.0)
+  controller = MixerController(kp=3.0, ki=0.15, max_integral=20, rate_limit=2.0)
   valve_pos = controller.compute(setpoint_c=50, measured_c=48, dt_s=10)
   # valve_pos is 0–100 (%)
 """
@@ -22,14 +22,14 @@ class MixerController:
     """PI controller for mixing valve position.
 
     Attributes:
-        kp: Proportional gain (default 0.8)
-        ki: Integral gain (default 0.02)
+        kp: Proportional gain (default 3.0)
+        ki: Integral gain (default 0.15)
         max_integral: Max integral term clamping (default 20)
         rate_limit: Max % valve position change per call (default 2.0)
     """
 
-    kp: float = 0.8
-    ki: float = 0.02
+    kp: float = 3.0
+    ki: float = 0.15
     max_integral: float = 20.0
     rate_limit: float = 2.0
 
