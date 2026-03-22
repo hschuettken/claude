@@ -6,6 +6,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.
 # Copy service code
 COPY services/marketing-agent/*.py /app/
 COPY services/marketing-agent/api/ /app/api/
+COPY services/marketing-agent/app/ /app/app/
 
 # Keep shared libs in image as fallback
 COPY shared/ /app/shared/
