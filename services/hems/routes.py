@@ -807,3 +807,211 @@ async def fit_thermal_model(room_id: str, request: Request) -> ThermalModelFitRe
         training_rows=len(training_rows),
         message=f"Fitted with {len(training_rows)} training rows" if training_rows else "No training data — defaults saved",
     )
+
+
+# ============================================================================
+# Phase 4: Adaptive Heating Schedules
+# ============================================================================
+
+class AdaptiveScheduleSlot(BaseModel):
+    """Single 15-min schedule slot."""
+    time: str = Field(..., description="ISO-8601 datetime")
+    room_id: str = Field(..., description="Room identifier")
+    target_temp: float = Field(..., description="Target temperature (°C)")
+    mode: str = Field(..., description="Mode: comfort, eco, off")
+
+
+class AdaptiveScheduleGenerateRequest(BaseModel):
+    """Request to generate adaptive schedule."""
+    room_id: str = Field(..., description="Room identifier")
+    comfort_temp: float = Field(default=21.0, ge=5, le=40, description="Comfort setpoint (°C)")
+    setback_temp: float = Field(default=16.0, ge=5, le=40, description="Away setpoint (°C)")
+    occupancy_hints: Optional[list[dict]] = Field(
+        default=None,
+        description="List of {start_time, end_time} occupancy windows (HH:MM:SS format)"
+    )
+    weather_forecast: Optional[dict] = Field(
+        default=None,
+        description="Weather forecast: {temp: float, condition: str}"
+    )
+
+
+class AdaptiveScheduleGenerateResponse(BaseModel):
+    """Response from adaptive schedule generation."""
+    room_id: str
+    schedule: list[AdaptiveScheduleSlot]
+    count: int = Field(..., description="Number of intervals")
+    start_time: str = Field(..., description="Start of 24h period")
+    end_time: str = Field(..., description="End of 24h period")
+    message: str
+
+
+class AdaptiveScheduleResponse(BaseModel):
+    """Today's adaptive schedule."""
+    room_id: str
+    schedule: list[AdaptiveScheduleSlot]
+    count: int
+    date: str
+
+
+@router.post("/api/v1/hems/schedule/adaptive", response_model=AdaptiveScheduleGenerateResponse, tags=["hems-phase4"])
+async def generate_adaptive_schedule(
+    body: AdaptiveScheduleGenerateRequest,
+    request: Request,
+) -> AdaptiveScheduleGenerateResponse:
+    """Generate adaptive 24h heating schedule.
+
+    Endpoint: POST /api/v1/hems/schedule/adaptive
+    
+    Inputs:
+      - room_id: Room identifier
+      - comfort_temp: Target temp when occupied (°C)
+      - setback_temp: Target temp when away (°C)
+      - occupancy_hints: List of occupied time windows (optional)
+      - weather_forecast: Current weather (optional)
+    
+    Algorithm:
+      1. For each 15-min slot in next 24h:
+         - Check if occupied (via occupancy_hints or defaults)
+         - If occupied: use comfort_temp
+         - If away: use setback_temp
+         - Apply weather boost if cold
+      2. Store schedule in DB
+      3. Return slots for frontend display
+    """
+    db: Optional[HEMSDatabase] = request.app.state.db
+    if not db:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not available"
+        )
+
+    try:
+        from adaptive_schedule import AdaptiveScheduleGenerator, AdaptiveScheduleRequest
+
+        # Build request for generator
+        occupancy = None
+        if body.occupancy_hints:
+            # Convert {start_time, end_time} strings to time objects
+            occupancy = []
+            for hint in body.occupancy_hints:
+                start_str = hint.get("start_time", "07:00:00")
+                end_str = hint.get("end_time", "23:00:00")
+                try:
+                    start = dt_time.fromisoformat(start_str)
+                    end = dt_time.fromisoformat(end_str)
+                    occupancy.append((start, end))
+                except ValueError:
+                    logger.warning("Invalid occupancy time: %s-%s", start_str, end_str)
+
+        req = AdaptiveScheduleRequest(
+            room_id=body.room_id,
+            comfort_temp=body.comfort_temp,
+            setback_temp=body.setback_temp,
+            weather_forecast=body.weather_forecast,
+            occupancy_hints=occupancy,
+        )
+
+        # Generate schedule
+        generator = AdaptiveScheduleGenerator()
+        intervals = generator.generate(req)
+
+        # Store to DB
+        interval_dicts = [i.to_dict() for i in intervals]
+        success = await db.store_adaptive_schedule(body.room_id, interval_dicts)
+
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to store adaptive schedule"
+            )
+
+        # Return response
+        slots = [
+            AdaptiveScheduleSlot(
+                time=i.time.isoformat(),
+                room_id=i.room_id,
+                target_temp=i.target_temp,
+                mode=i.mode,
+            )
+            for i in intervals
+        ]
+
+        start_time = intervals[0].time if intervals else datetime.now(timezone.utc)
+        end_time = intervals[-1].time if intervals else datetime.now(timezone.utc)
+
+        logger.info(
+            "Generated adaptive schedule: room=%s, %d intervals, stored to DB",
+            body.room_id,
+            len(intervals),
+        )
+
+        return AdaptiveScheduleGenerateResponse(
+            room_id=body.room_id,
+            schedule=slots,
+            count=len(slots),
+            start_time=start_time.isoformat(),
+            end_time=end_time.isoformat(),
+            message=f"Generated {len(slots)} 15-min schedule slots for next 24h",
+        )
+
+    except Exception as e:
+        logger.error("Failed to generate adaptive schedule: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate schedule: {e}"
+        )
+
+
+@router.get("/api/v1/hems/schedule/today", response_model=AdaptiveScheduleResponse, tags=["hems-phase4"])
+async def get_today_adaptive_schedule(
+    room_id: str,
+    request: Request,
+) -> AdaptiveScheduleResponse:
+    """Fetch today's adaptive schedule for a room.
+
+    Endpoint: GET /api/v1/hems/schedule/today?room_id={room_id}
+    
+    Returns: List of schedule slots for today (UTC date).
+    """
+    db: Optional[HEMSDatabase] = request.app.state.db
+    if not db:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not available"
+        )
+
+    try:
+        schedule_dicts = await db.get_today_adaptive_schedule(room_id)
+
+        slots = [
+            AdaptiveScheduleSlot(
+                time=s["time_slot"],
+                room_id=s["room_id"],
+                target_temp=s["target_temp"],
+                mode=s["mode"],
+            )
+            for s in schedule_dicts
+        ]
+
+        today = datetime.now(timezone.utc).date().isoformat()
+
+        logger.info(
+            "Fetched today's adaptive schedule: room=%s, %d slots",
+            room_id,
+            len(slots),
+        )
+
+        return AdaptiveScheduleResponse(
+            room_id=room_id,
+            schedule=slots,
+            count=len(slots),
+            date=today,
+        )
+
+    except Exception as e:
+        logger.error("Failed to fetch adaptive schedule: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch schedule: {e}"
+        )

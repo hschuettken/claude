@@ -441,3 +441,142 @@ class HEMSDatabase:
             source,
             details,
         )
+
+    # ===================================================================
+    # Phase 4: Adaptive Schedule Storage & Retrieval
+    # ===================================================================
+
+    async def store_adaptive_schedule(
+        self,
+        room_id: str,
+        schedule_intervals: list[dict],
+    ) -> bool:
+        """Store adaptive schedule intervals to DB (hems.adaptive_schedules).
+        
+        Args:
+            room_id: Room identifier
+            schedule_intervals: List of {time, target_temp, mode} dicts
+            
+        Returns:
+            True if stored successfully
+        """
+        if not self.pool:
+            logger.warning("Database pool not initialized")
+            return False
+
+        try:
+            async with self.pool.acquire() as conn:
+                # Clear existing schedule for this room (today)
+                now = datetime.now(timezone.utc)
+                await conn.execute(
+                    """
+                    DELETE FROM public.hems_adaptive_schedules
+                    WHERE room_id = $1 AND DATE(time_slot) = DATE($2)
+                    """,
+                    room_id,
+                    now,
+                )
+
+                # Insert new intervals
+                for interval in schedule_intervals:
+                    await conn.execute(
+                        """
+                        INSERT INTO public.hems_adaptive_schedules
+                        (room_id, time_slot, target_temp, mode)
+                        VALUES ($1, $2, $3, $4)
+                        """,
+                        room_id,
+                        interval["time"],  # datetime ISO string or obj
+                        interval["target_temp"],
+                        interval["mode"],
+                    )
+
+                logger.info(
+                    "Stored adaptive schedule: room=%s, %d intervals",
+                    room_id,
+                    len(schedule_intervals),
+                )
+                return True
+
+        except Exception as e:
+            logger.error("Error storing adaptive schedule: %s", e)
+            return False
+
+    async def get_today_adaptive_schedule(self, room_id: str) -> list[dict]:
+        """Fetch today's adaptive schedule for a room.
+        
+        Args:
+            room_id: Room identifier
+            
+        Returns:
+            List of {time_slot, target_temp, mode, room_id} dicts
+        """
+        if not self.pool:
+            logger.warning("Database pool not initialized")
+            return []
+
+        try:
+            async with self.pool.acquire() as conn:
+                records = await conn.fetch(
+                    """
+                    SELECT room_id, time_slot, target_temp, mode
+                    FROM public.hems_adaptive_schedules
+                    WHERE room_id = $1
+                      AND DATE(time_slot) = DATE(NOW() AT TIME ZONE 'UTC')
+                    ORDER BY time_slot ASC
+                    """,
+                    room_id,
+                )
+
+                return [
+                    {
+                        "room_id": r["room_id"],
+                        "time_slot": r["time_slot"].isoformat(),
+                        "target_temp": float(r["target_temp"]),
+                        "mode": r["mode"],
+                    }
+                    for r in records
+                ]
+
+        except Exception as e:
+            logger.error("Error fetching adaptive schedule for %s: %s", room_id, e)
+            return []
+
+    async def get_current_adaptive_slot(self, room_id: str) -> Optional[dict]:
+        """Get the current active adaptive schedule slot.
+        
+        Args:
+            room_id: Room identifier
+            
+        Returns:
+            Dict {time_slot, target_temp, mode} if found, None otherwise
+        """
+        if not self.pool:
+            return None
+
+        try:
+            async with self.pool.acquire() as conn:
+                record = await conn.fetchrow(
+                    """
+                    SELECT room_id, time_slot, target_temp, mode
+                    FROM public.hems_adaptive_schedules
+                    WHERE room_id = $1
+                      AND time_slot <= NOW() AT TIME ZONE 'UTC'
+                      AND time_slot + INTERVAL '15 minutes' > NOW() AT TIME ZONE 'UTC'
+                    LIMIT 1
+                    """,
+                    room_id,
+                )
+
+                if record:
+                    return {
+                        "room_id": record["room_id"],
+                        "time_slot": record["time_slot"].isoformat(),
+                        "target_temp": float(record["target_temp"]),
+                        "mode": record["mode"],
+                    }
+                return None
+
+        except Exception as e:
+            logger.error("Error fetching current adaptive slot for %s: %s", room_id, e)
+            return None
