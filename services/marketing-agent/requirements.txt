@@ -13,3 +13,4 @@ numpy>=1.24.0
 apscheduler>=3.10.0,<4.0
 nats-py>=2.0.0,<3.0
 neo4j>=5.0.0,<6.0
+paho-mqtt>=1.6.0,<2.0

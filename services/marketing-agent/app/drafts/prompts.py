@@ -179,3 +179,16 @@ Return JSON with key "visual_prompt" containing the prompt string. Example:
 
 Only return valid JSON.
 """
+
+KG_CONTEXT_BLOCK = """## Knowledge Graph Context
+
+This post builds on existing content and active work in the Layer 8 ecosystem:
+
+{content}
+
+Use this context to:
+- Avoid redundant content (link to existing posts instead of repeating)
+- Build on previous insights and implementation patterns
+- Align with active projects and initiatives
+- Provide fresh perspective on related topics
+"""

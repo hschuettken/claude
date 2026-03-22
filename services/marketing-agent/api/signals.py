@@ -1,5 +1,7 @@
 """Signal endpoints for marketing agent."""
 
+import asyncio
+import logging
 from datetime import datetime
 from typing import List, Optional
 
@@ -7,9 +9,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.knowledge_graph.hooks import KGHooks
 from app.scout.scheduler import get_scheduler
 from database import get_db
 from models import Signal
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/marketing/signals", tags=["signals"])
 

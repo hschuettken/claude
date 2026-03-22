@@ -18,6 +18,7 @@ from app.drafts.prompts import (
     LINKEDIN_NATIVE_PROMPT,
     SEO_META_PROMPT,
     VISUAL_PROMPT_PROMPT,
+    KG_CONTEXT_BLOCK,
 )
 from app.knowledge_graph import Neo4jSingleton, MarketingKGQuery
 from config import settings
