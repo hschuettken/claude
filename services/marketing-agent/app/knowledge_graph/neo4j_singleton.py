@@ -4,7 +4,9 @@ import asyncio
 import logging
 from typing import Optional
 
-from neo4j import AsyncDriver, AsyncSession, ManagedAsyncSession, auth
+from neo4j import AsyncDriver, AsyncSession, auth
+from typing import Union
+ManagedAsyncSession = AsyncSession  # alias for compatibility
 
 logger = logging.getLogger(__name__)
 
