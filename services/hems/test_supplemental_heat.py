@@ -69,8 +69,11 @@ class TestSupplementalHeatController:
 
     @pytest.fixture
     def controller(self, config):
-        """Provide controller instance."""
+        """Provide controller instance with orchestrator mocks."""
         controller = SupplementalHeatController(config=config)
+        # Mock orchestrator methods to avoid actual network calls
+        controller._turn_on_via_orchestrator = AsyncMock(return_value=True)
+        controller._turn_off_via_orchestrator = AsyncMock(return_value=True)
         return controller
 
     @pytest.mark.asyncio
