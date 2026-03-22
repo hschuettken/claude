@@ -6,6 +6,7 @@ Provides proxy tools for querying and controlling the HEMS heating system:
 - Set heating mode (auto, manual, eco, boost, off)
 - Get heating schedules for rooms
 - Override room target temperature
+- Get energy status (consumption breakdown, PV usage, self-consumption ratio)
 """
 
 from __future__ import annotations
@@ -241,6 +242,27 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "Returns model accuracy, training status, and any issues."
             ),
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_energy_status",
+            "description": (
+                "Get current HEMS energy status: total consumption, PV usage, boiler/pump energy "
+                "breakdown, and PV self-consumption ratio. Use for energy monitoring and optimization."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period": {
+                        "type": "string",
+                        "enum": ["1h", "6h", "24h", "7d", "30d"],
+                        "description": "Time period for energy data (default: 24h).",
+                    }
+                },
+                "required": [],
+            },
         },
     },
 ]
@@ -515,4 +537,35 @@ class HEMSTools:
             return {"error": "HEMS service not available", "status": "offline"}
         except Exception as e:
             logger.exception("HEMS get_thermal_model_status error")
+            return {"error": str(e), "status": "error"}
+
+    async def get_energy_status(self, period: str = "24h") -> dict[str, Any]:
+        """Get current HEMS energy status and consumption breakdown.
+
+        Proxies to GET http://hems:8210/api/energy?period=... — returns total
+        consumption, PV usage, boiler/pump/supplemental breakdown, and
+        PV self-consumption ratio.
+        """
+        valid_periods = ["1h", "6h", "24h", "7d", "30d"]
+        if period not in valid_periods:
+            period = "24h"
+
+        # HEMS energy endpoint lives at /api/energy (not /api/v1/hems/...)
+        hems_base = HEMS_SERVICE_URL.replace("/api/v1/hems", "")
+        try:
+            response = requests.get(
+                f"{hems_base}/api/energy",
+                params={"period": period},
+                timeout=HEMS_TIMEOUT,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.ConnectionError:
+            logger.error("HEMS service connection failed")
+            return {"error": "HEMS service not available", "status": "offline"}
+        except requests.exceptions.Timeout:
+            logger.error("HEMS service request timeout")
+            return {"error": "HEMS service not available", "status": "offline"}
+        except Exception as e:
+            logger.exception("HEMS get_energy_status error")
             return {"error": str(e), "status": "error"}
