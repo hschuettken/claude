@@ -19,6 +19,7 @@ from app.drafts.prompts import (
     SEO_META_PROMPT,
     VISUAL_PROMPT_PROMPT,
 )
+from app.knowledge_graph import Neo4jSingleton, MarketingKGQuery
 from config import settings
 from models import Topic, Draft, Signal
 
@@ -31,7 +32,9 @@ class DraftWriter:
     def __init__(self, db: Session):
         self.db = db
         self.llm_client = None
+        self.kg_query = None
         self._init_llm_client()
+        self._init_kg_query()
 
     def _init_llm_client(self):
         """Initialize LLM client based on config."""
@@ -39,6 +42,11 @@ class DraftWriter:
             self.llm_client = OllamaClient(settings.ollama_url, settings.llm_model)
         else:
             self.llm_client = OpenAIClient(settings.openai_api_key)
+
+    def _init_kg_query(self):
+        """Initialize Knowledge Graph query service."""
+        neo4j = Neo4jSingleton()
+        self.kg_query = MarketingKGQuery(neo4j) if neo4j.connected else None
 
     async def generate_blog_draft(self, topic_id: int, timeout: Optional[int] = None) -> Optional[Draft]:
         """
@@ -72,10 +80,13 @@ class DraftWriter:
             signals = self.db.query(Signal).filter(Signal.id.in_(signal_ids)).all() if signal_ids else []
             signals_text = self._format_signals(signals)
 
+            # Build KG enrichment context
+            kg_context = await self._build_kg_context(topic)
+
             # Generate outline
             logger.info("Generating outline...")
             outline = await asyncio.wait_for(
-                self._generate_outline(topic, signals_text),
+                self._generate_outline(topic, signals_text, kg_context),
                 timeout=timeout,
             )
             if not outline:
