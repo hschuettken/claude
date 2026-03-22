@@ -270,7 +270,6 @@ async def query_postgres(
 )
 async def get_energy(
     period: str = "day",
-    query_api: Optional["QueryApi"] = None,
 ) -> EnergyResponse:
     """Get energy consumption with breakdown.
     
@@ -340,7 +339,6 @@ async def get_energy(
 )
 async def get_analytics(
     period: str,
-    query_api: Optional["QueryApi"] = None,
 ) -> AnalyticsResponse:
     """Get thermal system analytics for a period.
     
@@ -505,7 +503,6 @@ async def retrain_model(
     description="Fetch boiler status, power, flow/return temps, runtime"
 )
 async def get_boiler_state(
-    query_api: Optional["QueryApi"] = None,
 ) -> BoilerResponse:
     """Get current boiler operational state.
     
