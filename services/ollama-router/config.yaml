@@ -1,19 +1,19 @@
 nodes:
   - name: hm50
-    url: http://192.168.0.XX:11434
+    url: http://192.168.0.20:11434
     tags: [weak, embeddings]
     max_concurrent: 2
     default_models: [nomic-embed-text, "qwen2.5:7b-q4_K_M"]
   - name: intel-12900hk
-    url: http://192.168.0.YY:11434
+    url: http://192.168.0.23:11434
     tags: [strong, cpu-only]
     max_concurrent: 2
     default_models: ["qwen2.5:32b-q4_K_M"]
-  - name: amd-8945hs
-    url: http://192.168.0.ZZ:11434
-    tags: [medium, igpu]
-    max_concurrent: 3
-    default_models: ["qwen2.5:7b-q4_K_M", "qwen2.5-coder:7b-q4_K_M"]
+  # - name: amd-8945hs
+  #   url: http://192.168.0.XX:11434  # TODO: Ollama instance not yet deployed. Plan: GPU-enabled node in Phase X
+  #   tags: [medium, igpu]
+  #   max_concurrent: 3
+  #   default_models: ["qwen2.5:7b-q4_K_M", "qwen2.5-coder:7b-q4_K_M"]
 
 routing:
   default_strategy: model_affinity
