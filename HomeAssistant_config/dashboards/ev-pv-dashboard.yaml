@@ -85,6 +85,17 @@ views:
                 name: "Battery Capacity"
                 icon: mdi:car-battery
 
+          # --- Manual Override (Manual Until mode) ---
+          - type: entities
+            title: "Manual Override (Manual Until)"
+            entities:
+              - entity: input_number.ev_manual_target_kwh
+                name: "Manual Target kWh"
+                icon: mdi:lightning-bolt-circle
+              - entity: input_number.ev_manual_target_soc
+                name: "Manual Target SoC"
+                icon: mdi:battery-charging-80
+
           # --- Smart Charging Status ---
           - type: entities
             title: "Smart Charging"
@@ -98,6 +109,20 @@ views:
               - entity: sensor.smart_ev_charging_energy_needed
                 name: "Energy Needed"
                 icon: mdi:battery-charging-outline
+              - entity: sensor.smart_ev_charging_ev_kwh_to_charge_left
+                name: "kWh to Charge Left"
+                icon: mdi:battery-alert-variant-outline
+
+          # --- Forecast Sensors (from EV Forecast planner) ---
+          - type: entities
+            title: "EV Forecast"
+            entities:
+              - entity: sensor.smart_ev_charging_ev_forecast_needed_kwh
+                name: "Forecast Needed kWh"
+                icon: mdi:battery-charging-outline
+              - entity: sensor.smart_ev_charging_ev_forecast_needed_soc
+                name: "Forecast Needed SoC"
+                icon: mdi:battery-charging
               - entity: binary_sensor.smart_ev_charging_departure_passed
                 name: "Departure Passed"
                 icon: mdi:car-clock

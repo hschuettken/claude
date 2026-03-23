@@ -60,6 +60,10 @@ class EVChargingSettings(BaseSettings):
     target_soc_entity: str = "input_number.ev_target_soc_pct"
     target_energy_entity: str = "input_number.ev_target_energy_kwh"
 
+    # --- Manual override helpers (writable by user, synced from forecast in Smart mode) ---
+    manual_target_kwh_entity: str = "input_number.ev_manual_target_kwh"
+    manual_target_soc_entity: str = "input_number.ev_manual_target_soc"
+
     # --- Wallbox power limits ---
     wallbox_max_power_w: int = 11000
     wallbox_min_power_w: int = 4200

@@ -55,6 +55,13 @@ class SmartEVChargingService(BaseService):
         # --- Feature #6: Plug/unplug resilience ---
         self._last_vehicle_connected: bool = False
 
+        # --- R3: Smart mode sync state ---
+        self._last_sync_vehicle_state: bool = False   # True = was connected last cycle
+
+        # --- Forecast plan cache (from ev-forecast MQTT) ---
+        self._forecast_needed_kwh: float = 0.0
+        self._forecast_needed_soc: float = 0.0
+
         # --- Watchdog ---
         self._last_cycle_completed_at: float = time.monotonic()
         self._watchdog_task: asyncio.Task | None = None
@@ -262,6 +269,14 @@ class SmartEVChargingService(BaseService):
             self.settings.target_soc_entity, default=80.0,
         )
 
+        # --- Read manual override targets (R2) ---
+        manual_target_kwh = await self._read_float(
+            self.settings.manual_target_kwh_entity, default=0.0,
+        )
+        manual_target_soc = await self._read_float(
+            self.settings.manual_target_soc_entity, default=0.0,
+        )
+
         now = datetime.now(self.tz)
 
         # --- Feature #6: Plug/unplug resilience ---
@@ -277,7 +292,37 @@ class SmartEVChargingService(BaseService):
                 full_by_morning=full_by_morning,
                 session_energy_kwh=round(wallbox.session_energy_kwh, 2),
             )
-            # Force immediate re-evaluation (already in a cycle, so just log)
+            # --- R3: Smart mode sync on plug-in ---
+            # When mode=Smart AND car just connected: write forecast values to HA input_numbers
+            if mode.value == "Smart" and not self._last_sync_vehicle_state:
+                if self._forecast_needed_kwh > 0:
+                    try:
+                        await self.ha.call_service("input_number", "set_value", {
+                            "entity_id": self.settings.manual_target_kwh_entity,
+                            "value": round(self._forecast_needed_kwh, 1),
+                        })
+                        await self.ha.call_service("input_number", "set_value", {
+                            "entity_id": self.settings.manual_target_soc_entity,
+                            "value": round(self._forecast_needed_soc, 0),
+                        })
+                        self._last_sync_vehicle_state = True
+                        self.logger.info(
+                            "smart_sync_forecast_to_manual",
+                            forecast_kwh=round(self._forecast_needed_kwh, 1),
+                            forecast_soc=round(self._forecast_needed_soc, 0),
+                        )
+                        # Update local vars so ctx gets the synced values this cycle
+                        manual_target_kwh = round(self._forecast_needed_kwh, 1)
+                        manual_target_soc = round(self._forecast_needed_soc, 0)
+                    except Exception:
+                        self.logger.exception("smart_sync_failed")
+                else:
+                    self.logger.info("smart_sync_skipped", reason="no forecast data available")
+
+        # Reset sync flag when vehicle disconnects
+        if not wallbox.vehicle_connected:
+            self._last_sync_vehicle_state = False
+
         self._last_vehicle_connected = wallbox.vehicle_connected
 
         # --- BUG #2 FIX: Cumulative grid kWh tracker ---
@@ -327,6 +372,9 @@ class SmartEVChargingService(BaseService):
             )
             departure_passed = dep_dt <= now
 
+        # Compute kwh_tocharge_left for this cycle (R4)
+        kwh_tocharge_left_val = max(0.0, manual_target_kwh - wallbox.session_energy_kwh)
+
         ctx = ChargingContext(
             mode=mode,
             wallbox=wallbox,
@@ -349,6 +397,10 @@ class SmartEVChargingService(BaseService):
             overnight_grid_kwh_charged=overnight_grid_kwh,
             now=now,
             departure_passed=departure_passed,
+            manual_target_kwh=manual_target_kwh,
+            manual_target_soc=manual_target_soc,
+            forecast_needed_kwh=self._forecast_needed_kwh,
+            forecast_needed_soc=self._forecast_needed_soc,
         )
 
         # 2) Decide target power
@@ -378,12 +430,12 @@ class SmartEVChargingService(BaseService):
             else:
                 await charger.set_power_limit(decision.target_power_w)
 
-        # --- BUG #3: Car target SOC drift check ---
+        # --- BUG #3 + R7: Car target SOC drift check (mode-based) ---
         if (
             self._cycle_count % self.settings.car_target_soc_check_interval == 0
             and wallbox.vehicle_connected
         ):
-            await self._check_car_target_soc(ev_target_soc, now)
+            await self._check_car_target_soc(ctx, ev_target_soc, now)
 
         # --- Feature #5: Calculate and publish kWh remaining + ETA ---
         kwh_remaining = ctx.energy_needed_kwh
@@ -396,8 +448,18 @@ class SmartEVChargingService(BaseService):
                 completion_dt = now + timedelta(hours=hours_to_complete)
                 estimated_completion = completion_dt.strftime("%H:%M")
 
+        # --- R4: kwh_tocharge_left ---
+        kwh_tocharge_left_val = ctx.kwh_tocharge_left
+
+        # Publish forecast sensors via MQTT
+        self.publish("forecast", {
+            "ev_forecast_needed_kwh": round(self._forecast_needed_kwh, 1),
+            "ev_forecast_needed_soc": round(self._forecast_needed_soc, 1),
+            "ev_kwh_to_charge_left": round(kwh_tocharge_left_val, 2),
+        })
+
         # 4) Publish status
-        self._publish_status(ctx, decision, house_power, kwh_remaining, estimated_completion)
+        self._publish_status(ctx, decision, house_power, kwh_remaining, estimated_completion, kwh_tocharge_left_val)
         self._touch_healthcheck()
 
         self.logger.info(
@@ -424,8 +486,29 @@ class SmartEVChargingService(BaseService):
     # BUG #3: Car target SOC drift correction
     # ------------------------------------------------------------------
 
-    async def _check_car_target_soc(self, desired_soc: float, now: datetime) -> None:
-        """Check if the car's target SOC matches our desired SOC, correct if not."""
+    async def _check_car_target_soc(self, ctx, desired_soc: float, now: datetime) -> None:
+        """Check if the car's target SOC matches our desired SOC, correct if not.
+
+        R7: Mode-based target SoC logic:
+        - Fast / PV Surplus → target 100%
+        - Manual Until → target manual_target_soc
+        - Smart → target ev_target_soc_pct (from ev-forecast, unchanged)
+        - Manual → do NOT update
+        """
+        # Manual mode: do not update car target SoC at all
+        if ctx.mode == ChargeMode.MANUAL:
+            return
+
+        # Determine desired SoC based on mode (R7)
+        if ctx.mode in (ChargeMode.FAST, ChargeMode.PV_SURPLUS):
+            desired_soc = 100.0
+        elif ctx.mode == ChargeMode.MANUAL_UNTIL:
+            if ctx.manual_target_soc > 0:
+                desired_soc = ctx.manual_target_soc
+            else:
+                desired_soc = 100.0  # fallback if no target set
+        # For Smart, Eco: use the passed desired_soc (from ev-forecast / target_soc_entity)
+
         # Cooldown check
         elapsed = time.monotonic() - self._last_soc_push_time
         if elapsed < self.settings.car_target_soc_cooldown_seconds:
@@ -442,6 +525,7 @@ class SmartEVChargingService(BaseService):
                 "car_target_soc_corrected",
                 car=round(car_target_soc),
                 desired=round(desired_soc),
+                mode=ctx.mode.value,
             )
             try:
                 await self.ha.call_service("script", "turn_on", {
@@ -530,6 +614,7 @@ class SmartEVChargingService(BaseService):
         house_power: float = 0.0,
         kwh_remaining: float = 0.0,
         estimated_completion: str | None = None,
+        kwh_tocharge_left: float = 0.0,
     ) -> None:
         pv_available = max(
             0,
@@ -564,6 +649,14 @@ class SmartEVChargingService(BaseService):
             # --- Feature #5: kWh remaining + ETA ---
             "kwh_remaining": round(kwh_remaining, 2),
             "estimated_completion_time": estimated_completion,
+            # --- R4: kwh_tocharge_left (Manual Until mode) ---
+            "kwh_tocharge_left": round(kwh_tocharge_left, 2),
+            # --- R1: Forecast sensors ---
+            "ev_forecast_needed_kwh": round(ctx.forecast_needed_kwh, 1),
+            "ev_forecast_needed_soc": round(ctx.forecast_needed_soc, 1),
+            # --- R2: Manual targets ---
+            "manual_target_kwh": round(ctx.manual_target_kwh, 1),
+            "manual_target_soc": round(ctx.manual_target_soc, 0),
             # --- Enhanced decision context ---
             "pv_surplus_w": round(decision.pv_surplus_w),
             "battery_assist_w": round(decision.battery_assist_w),
@@ -674,6 +767,23 @@ class SmartEVChargingService(BaseService):
         if trace_id:
             self._current_trace_id = trace_id
             self.logger.info("ev_forecast_trace_id_received", trace_id=trace_id)
+
+        # Cache forecast energy need from ev-forecast plan
+        days = payload.get("days", [])
+        if days:
+            day0 = days[0]
+            self._forecast_needed_kwh = float(day0.get("energy_needed_kwh", 0.0))
+            # Compute forecast_needed_soc: current_soc + (forecast_kwh / battery_capacity * 100)
+            current_soc = float(payload.get("current_soc_pct") or 0.0)
+            battery_capacity = self.settings.battery_capacity_kwh if hasattr(self.settings, 'battery_capacity_kwh') else 77.0
+            # Use ev_battery_capacity from settings (EV battery, not home battery)
+            ev_capacity = 77.0  # default
+            self._forecast_needed_soc = min(100.0, current_soc + (self._forecast_needed_kwh / ev_capacity * 100.0))
+            self.logger.info(
+                "ev_forecast_plan_cached",
+                forecast_needed_kwh=round(self._forecast_needed_kwh, 1),
+                forecast_needed_soc=round(self._forecast_needed_soc, 1),
+            )
 
     # ------------------------------------------------------------------
     # MQTT auto-discovery
@@ -1086,7 +1196,47 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.logger.info("ha_discovery_registered", entity_count=29)
+        # --- R1: Forecast sensors (read-only, from ev-forecast planner) ---
+        forecast_topic = f"homelab/{self.name}/forecast"
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "ev_forecast_needed_kwh", node_id=node, config={
+                "name": "EV Forecast Needed kWh",
+                "device": device,
+                "state_topic": forecast_topic,
+                "value_template": "{{ value_json.ev_forecast_needed_kwh }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:battery-charging-outline",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor", "ev_forecast_needed_soc", node_id=node, config={
+                "name": "EV Forecast Needed SoC",
+                "device": device,
+                "state_topic": forecast_topic,
+                "value_template": "{{ value_json.ev_forecast_needed_soc }}",
+                "unit_of_measurement": "%",
+                "device_class": "battery",
+                "icon": "mdi:battery-charging",
+            },
+        )
+
+        # --- R4: kWh to charge left sensor ---
+        self.mqtt.publish_ha_discovery(
+            "sensor", "ev_kwh_to_charge_left", node_id=node, config={
+                "name": "EV kWh to Charge Left",
+                "device": device,
+                "state_topic": forecast_topic,
+                "value_template": "{{ value_json.ev_kwh_to_charge_left }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:battery-alert-variant-outline",
+            },
+        )
+
+        self.logger.info("ha_discovery_registered", entity_count=32)
 
     # ------------------------------------------------------------------
     # Healthcheck

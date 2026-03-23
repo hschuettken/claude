@@ -21,6 +21,7 @@ class ChargeMode(str, Enum):
     ECO = "Eco"
     FAST = "Fast"
     MANUAL = "Manual"
+    MANUAL_UNTIL = "Manual Until"
 
 
 @dataclass
@@ -48,6 +49,12 @@ class ChargingContext:
     overnight_grid_kwh_charged: float  # kWh already charged from grid this overnight session
     now: datetime
     departure_passed: bool = False     # True when departure time is in the past
+    # Manual Until mode targets
+    manual_target_kwh: float = 0.0    # manual target kWh to charge (Manual Until mode)
+    manual_target_soc: float = 0.0    # manual target SoC % (Manual Until mode)
+    # Forecast-based sensors (from ev-forecast service)
+    forecast_needed_kwh: float = 0.0  # kWh needed to reach forecast target SoC
+    forecast_needed_soc: float = 0.0  # SoC% needed according to forecast
 
     @property
     def energy_needed_kwh(self) -> float:
@@ -58,11 +65,26 @@ class ChargingContext:
         return max(0.0, self.target_energy_kwh - self.session_energy_kwh)
 
     @property
+    def kwh_tocharge_left(self) -> float:
+        """kWh still to charge for Manual Until mode = max(0, manual_target_kwh - session_energy_kwh)."""
+        return max(0.0, self.manual_target_kwh - self.session_energy_kwh)
+
+    @property
     def target_reached(self) -> bool:
         """Whether the charging target has been reached."""
         if self.ev_soc_pct is not None:
             return self.ev_soc_pct >= self.ev_target_soc_pct
         return self.session_energy_kwh >= self.target_energy_kwh
+
+    @property
+    def manual_until_target_reached(self) -> bool:
+        """Whether Manual Until stop conditions are met."""
+        if self.manual_target_soc > 0 and self.ev_soc_pct is not None:
+            if self.ev_soc_pct >= self.manual_target_soc:
+                return True
+        if self.kwh_tocharge_left <= 0 and self.manual_target_kwh > 0:
+            return True
+        return False
 
 
 @dataclass
@@ -81,6 +103,7 @@ class ChargingDecision:
     deadline_hours_left: float = -1.0
     deadline_required_w: float = 0.0
     energy_remaining_kwh: float = 0.0
+    kwh_tocharge_left: float = 0.0
 
 
 class ChargingStrategy:
@@ -189,6 +212,10 @@ class ChargingStrategy:
                 f"/{ctx.target_energy_kwh:.0f} kWh)",
             )
 
+        # --- R6: Universal PV surplus rule (apply before mode-specific logic for MANUAL_UNTIL/SMART/PV_SURPLUS) ---
+        # If car is plugged in AND pv_surplus_w > min_power_w → always use it
+        # This is checked per-mode to allow each mode's logic to apply it appropriately.
+
         # --- Mode-specific strategy ---
         if ctx.mode == ChargeMode.FAST:
             decision = self._fixed(self.max_power_w, "Fast")
@@ -198,6 +225,8 @@ class ChargingStrategy:
             decision = self._pv_surplus(ctx)
         elif ctx.mode == ChargeMode.SMART:
             decision = self._smart(ctx)
+        elif ctx.mode == ChargeMode.MANUAL_UNTIL:
+            decision = self._manual_until(ctx)
         else:
             decision = ChargingDecision(0, f"Unknown mode: {ctx.mode}")
 
@@ -246,6 +275,65 @@ class ChargingStrategy:
 
     def _fixed(self, power_w: int, label: str) -> ChargingDecision:
         return ChargingDecision(power_w, f"{label} charging at {power_w} W")
+
+    def _manual_until(self, ctx: ChargingContext) -> ChargingDecision:
+        """Manual Until SoC or kWh mode — charges until target is reached.
+
+        R5: Target is whichever hits first — manual_target_soc OR manual_target_kwh.
+        R6: Universal PV surplus rule — if PV surplus > min_power, always use it.
+        Nighttime/no-surplus: charge at deadline-required rate or min_power.
+        """
+        kwh_left = ctx.kwh_tocharge_left
+
+        # Stop condition
+        if ctx.manual_until_target_reached:
+            reason_parts = []
+            if ctx.manual_target_soc > 0 and ctx.ev_soc_pct is not None and ctx.ev_soc_pct >= ctx.manual_target_soc:
+                reason_parts.append(f"SoC target reached ({ctx.ev_soc_pct:.0f}% >= {ctx.manual_target_soc:.0f}%)")
+            if ctx.kwh_tocharge_left <= 0 and ctx.manual_target_kwh > 0:
+                reason_parts.append(f"kWh target reached ({ctx.session_energy_kwh:.1f} kWh charged)")
+            self._reset()
+            return ChargingDecision(0, f"Manual Until: {' | '.join(reason_parts) or 'target reached'}")
+
+        # R6: Universal PV surplus rule — always use solar if available
+        pv_only = self._calc_pv_only_available(ctx)
+        if pv_only > self.min_power_w:
+            pv_decision = self._pv_surplus(ctx)
+            if pv_decision.target_power_w > 0:
+                return ChargingDecision(
+                    pv_decision.target_power_w,
+                    f"Manual Until: PV surplus {pv_only:.0f} W → {pv_decision.target_power_w} W (kWh left: {kwh_left:.1f})",
+                    pv_surplus_w=pv_decision.pv_surplus_w,
+                    battery_assist_w=pv_decision.battery_assist_w,
+                    battery_assist_reason=pv_decision.battery_assist_reason,
+                    kwh_tocharge_left=kwh_left,
+                )
+
+        # No PV surplus — compute deadline-based minimum power
+        hours_to_departure = None
+        if ctx.departure_time:
+            hours_to_departure = self._hours_until_departure(ctx.departure_time, ctx.now)
+
+        if hours_to_departure is not None and hours_to_departure > 0 and kwh_left > 0:
+            required_w = (kwh_left / hours_to_departure) * 1000
+            required_w = max(self.min_power_w, min(self.max_power_w, required_w))
+            return ChargingDecision(
+                int(required_w),
+                f"Manual Until: deadline-based {required_w:.0f} W "
+                f"({kwh_left:.1f} kWh in {hours_to_departure:.1f}h)",
+                kwh_tocharge_left=kwh_left,
+                deadline_active=True,
+                deadline_hours_left=round(hours_to_departure, 2),
+                deadline_required_w=round(required_w, 1),
+                energy_remaining_kwh=round(kwh_left, 2),
+            )
+
+        # No departure time set → charge at min_power continuously
+        return ChargingDecision(
+            self.min_power_w,
+            f"Manual Until: min power {self.min_power_w} W (no departure time, {kwh_left:.1f} kWh left)",
+            kwh_tocharge_left=kwh_left,
+        )
 
     def _pv_surplus(self, ctx: ChargingContext) -> ChargingDecision:
         """Track PV surplus — charge primarily from solar excess."""
