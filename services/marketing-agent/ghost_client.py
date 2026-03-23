@@ -233,3 +233,97 @@ def get_ghost_client() -> GhostAdminClient:
         ghost_url=settings.ghost_url,
         admin_api_key=settings.ghost_admin_api_key,
     )
+
+
+class GhostAdminAPIClient:
+    """
+    Ghost CMS Admin API client — spec-required interface.
+
+    Reads GHOST_ADMIN_API_KEY and GHOST_API_URL from environment variables.
+    Can also be used as an async context manager.
+
+    Usage:
+        async with GhostAdminAPIClient() as client:
+            post = await client.create_post("Title", "<p>Content</p>", tags=["blog"])
+            await client.publish_post(post["id"])
+    """
+
+    def __init__(self) -> None:
+        import os
+        self.admin_api_key = os.getenv("GHOST_ADMIN_API_KEY", "")
+        self.api_url = os.getenv("GHOST_API_URL", "http://192.168.0.50:2368").rstrip("/")
+
+        if not self.admin_api_key:
+            raise ValueError(
+                "GHOST_ADMIN_API_KEY env var not set. Expected format: {id}:{secret}"
+            )
+
+        parts = self.admin_api_key.split(":")
+        if len(parts) != 2:
+            raise ValueError("GHOST_ADMIN_API_KEY must be in format 'id:secret'")
+        self.key_id, self.key_secret = parts
+        self.client = httpx.AsyncClient(base_url=self.api_url, timeout=30)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        await self.client.aclose()
+
+    def _generate_jwt(self) -> str:
+        iat = int(time.time())
+        payload = {"iat": iat, "exp": iat + 600, "aud": "/admin/"}
+        secret_bytes = bytes.fromhex(self.key_secret)
+        return jwt.encode(
+            payload,
+            secret_bytes,
+            algorithm="HS256",
+            headers={"kid": self.key_id},
+        )
+
+    def _headers(self) -> Dict[str, str]:
+        return {
+            "Authorization": f"Ghost {self._generate_jwt()}",
+            "Content-Type": "application/json",
+        }
+
+    async def create_post(
+        self,
+        title: str,
+        html: str,
+        tags: Optional[List[str]] = None,
+        status: str = "draft",
+    ) -> Dict[str, Any]:
+        """Create a new Ghost post. Returns post dict with 'id', 'url', etc."""
+        body: Dict[str, Any] = {"posts": [{"title": title, "html": html, "status": status}]}
+        if tags:
+            body["posts"][0]["tags"] = [{"name": t} for t in tags]
+
+        resp = await self.client.post("/ghost/api/admin/posts/", json=body, headers=self._headers())
+        resp.raise_for_status()
+        result = resp.json()
+        return result["posts"][0] if result.get("posts") else result
+
+    async def publish_post(self, ghost_id: str) -> Dict[str, Any]:
+        """Set a Ghost post status to published. Returns updated post dict."""
+        # Ghost requires the updated_at field for optimistic locking — fetch first
+        resp = await self.client.get(
+            f"/ghost/api/admin/posts/{ghost_id}/", headers=self._headers()
+        )
+        resp.raise_for_status()
+        current = resp.json()["posts"][0]
+
+        body = {
+            "posts": [{
+                "status": "published",
+                "updated_at": current["updated_at"],
+            }]
+        }
+        resp2 = await self.client.put(
+            f"/ghost/api/admin/posts/{ghost_id}/",
+            json=body,
+            headers=self._headers(),
+        )
+        resp2.raise_for_status()
+        result = resp2.json()
+        return result["posts"][0] if result.get("posts") else result
