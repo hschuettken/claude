@@ -173,6 +173,9 @@ services:
       GHOST_URL: ${GHOST_URL:-https://layer8.schuettken.net}
       GHOST_ADMIN_API_KEY: ${GHOST_ADMIN_API_KEY:-}
       MARKETING_PORT: ${MARKETING_PORT:-8211}
+      NATS_URL: ${NATS_URL:-nats://192.168.0.50:4222}
+      SEARXNG_URL: ${SEARXNG_URL:-http://192.168.0.84:8888}
+      NEO4J_URL: ${NEO4J_URL:-bolt://192.168.0.88:7687}
     ports:
       - "${MARKETING_PORT:-8211}:8000"
     volumes:
