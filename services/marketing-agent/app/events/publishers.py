@@ -76,6 +76,36 @@ async def publish_draft_created(
     return success
 
 
+async def publish_performance_updated(
+    post_id: str,
+    platform: str,
+    views: int,
+    engagement_rate: float,
+    recorded_at: datetime,
+    snapshot_id: Optional[str] = None
+) -> bool:
+    """
+    Publish when post performance data is updated.
+    
+    Subject: marketing.posts.performance
+    """
+    payload = {
+        "post_id": post_id,
+        "platform": platform,
+        "views": views,
+        "engagement_rate": engagement_rate,
+        "snapshot_id": snapshot_id,
+        "recorded_at": recorded_at.isoformat() if hasattr(recorded_at, 'isoformat') else str(recorded_at),
+        "event_type": "performance.updated",
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    
+    success = await NATSClient.publish("marketing.posts.performance", payload)
+    if success:
+        logger.info(f"✅ Performance updated published: post={post_id} views={views} engagement={engagement_rate}")
+    return success
+
+
 async def publish_post_published(
     post_id: str,
     title: str,

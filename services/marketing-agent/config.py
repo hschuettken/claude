@@ -17,7 +17,9 @@ class MarketingSettings(BaseSettings):
 
     # Scout Engine
     searxng_url: str = "http://192.168.0.84:8080"
-    nats_url: Optional[str] = None  # Optional: e.g., "nats://nats.default.svc.cluster.local:4222"
+    nats_url: Optional[str] = None  # Optional: e.g., "nats://192.168.0.50:4222"
+    nats_user: str = "nb9os"
+    nats_password: str = "nb9os_nats_secure_password_2026"
     scout_enabled: bool = True
 
     # Knowledge Graph (Neo4j)

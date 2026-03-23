@@ -112,13 +112,13 @@ class NATSPublisher:
         self._nats_available = False
         self._mqtt_publisher = MQTTPublisher()
 
-    async def initialize(self, nats_url: Optional[str]):
+    async def initialize(self, nats_url: Optional[str], nats_user: str = "", nats_password: str = ""):
         """Initialize NATS and MQTT connections."""
         if not nats_url:
             logger.info("NATS_URL not configured — NATS event publishing disabled")
             self._nats_available = False
         else:
-            connected = await NATSClient.connect(nats_url, user="", password="")
+            connected = await NATSClient.connect(nats_url, user=nats_user, password=nats_password)
             self._nats_available = connected
         
         # Always initialize MQTT as fallback/bridge
@@ -186,11 +186,11 @@ class NATSPublisher:
 _publisher: Optional[NATSPublisher] = None
 
 
-async def init_nats_publisher(nats_url: Optional[str]):
+async def init_nats_publisher(nats_url: Optional[str], nats_user: str = "", nats_password: str = ""):
     """Initialize global NATS publisher."""
     global _publisher
     _publisher = NATSPublisher()
-    await _publisher.initialize(nats_url)
+    await _publisher.initialize(nats_url, nats_user=nats_user, nats_password=nats_password)
 
 
 def get_nats_publisher() -> NATSPublisher:

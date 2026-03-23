@@ -1,7 +1,7 @@
 """
 NATS Status Endpoint for marketing-agent
 
-Exposes /api/v1/system/nats-status endpoint showing event bus connectivity.
+Exposes NATS event bus connectivity status.
 """
 
 from datetime import datetime
@@ -16,13 +16,11 @@ async def get_nats_status() -> dict:
         {
             "connected": bool,
             "available": bool,
-            "server": str,
             "last_check": str (ISO timestamp)
         }
     """
     return {
         "connected": NATSClient.is_available(),
         "available": NATSClient.is_available(),
-        "server": "nats://192.168.0.90:4222",
         "last_check": datetime.utcnow().isoformat()
     }

@@ -44,12 +44,17 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("Knowledge Graph unavailable — continuing with graceful degradation")
 
+    # Initialize NATS publisher (always, regardless of scout — needed for all event publishers)
+    logger.info("Initializing NATS event publisher...")
+    await init_nats_publisher(
+        settings.nats_url,
+        nats_user=settings.nats_user,
+        nats_password=settings.nats_password,
+    )
+
     # Initialize Scout Engine
     if settings.scout_enabled:
         logger.info("Initializing Scout Engine...")
-
-        # Initialize NATS publisher
-        await init_nats_publisher(settings.nats_url)
 
         # Start scheduler
         scheduler = get_scheduler()
@@ -83,7 +88,9 @@ async def lifespan(app: FastAPI):
         logger.info("Shutting down Scout Engine...")
         scheduler = get_scheduler()
         await scheduler.stop()
-        await close_nats_publisher()
+    
+    # Close NATS publisher (always)
+    await close_nats_publisher()
 
     # Stop SynthesisOS consumer
     try:
