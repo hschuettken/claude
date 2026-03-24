@@ -113,18 +113,21 @@ async def _trigger_auto_draft_and_notify(signal_id: int, signal_payload: dict):
             
             cutoff_14d = datetime.utcnow() - timedelta(days=14)
             
-            # Check if signal already has a draft
-            existing_drafts = (
-                db.query(Draft)
-                .join(Topic, Draft.topic_id == Topic.id)
-                .filter(Topic.signal_ids.contains(f"[{signal_id}"))  # Basic check
-                .filter(Draft.created_at >= cutoff_14d)
-                .all()
-            )
+            # Check if signal already has a draft (simplified: check by topic name)
+            topic_name = f"Signal: {db_signal.title}"
+            existing_topic = db.query(Topic).filter(Topic.name == topic_name).first()
             
-            if existing_drafts:
-                logger.info(f"Draft already exists for signal {signal_id} within 14 days")
-                return
+            if existing_topic:
+                existing_drafts = (
+                    db.query(Draft)
+                    .filter(Draft.topic_id == existing_topic.id)
+                    .filter(Draft.created_at >= cutoff_14d)
+                    .all()
+                )
+                
+                if existing_drafts:
+                    logger.info(f"Draft already exists for signal {signal_id} within 14 days, skipping")
+                    return
             
             # Create a topic from the signal if needed
             topic = _ensure_topic_from_signal(db, db_signal)
@@ -139,20 +142,22 @@ async def _trigger_auto_draft_and_notify(signal_id: int, signal_payload: dict):
             draft = await draft_writer.generate_blog_draft(topic.id)
             
             if draft:
-                logger.info(f"[DRAFT] Auto-generated draft {draft.id} for topic {topic.id}")
+                logger.info(f"[DRAFT] Auto-generated draft {draft.id} for topic {topic.id} ({draft.title})")
                 
                 # Publish draft_created event for notification (Task 338: notify cycle)
-                word_count = len((draft.content or "").split())
-                await publish_draft_created(
-                    draft_id=draft.id,
-                    title=draft.title,
-                    format="blog",
-                    word_count=word_count,
-                    generated_at=datetime.utcnow(),
-                    pillar_id=topic.pillar_id if hasattr(topic, 'pillar_id') else None,
-                )
-                
-                logger.info(f"[NOTIFY] Published draft created event for draft {draft.id} (Task 338)")
+                try:
+                    word_count = len((draft.content or "").split())
+                    await publish_draft_created(
+                        draft_id=draft.id,
+                        title=draft.title,
+                        format="blog",
+                        word_count=word_count,
+                        generated_at=datetime.utcnow(),
+                        pillar_id=getattr(topic, 'pillar_id', None),
+                    )
+                    logger.info(f"[NOTIFY] Published draft.created event for draft {draft.id} (Task 338)")
+                except Exception as pub_err:
+                    logger.warning(f"Failed to publish draft.created event: {pub_err}")
             else:
                 logger.error(f"Failed to generate draft for topic {topic.id}")
         
