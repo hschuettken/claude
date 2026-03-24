@@ -35,7 +35,7 @@ from fastapi import FastAPI, Depends, status
 from fastapi.responses import JSONResponse
 
 from models import Base
-from api import signals_router, topics_router, drafts_router, approval_router, kg_router, kg_status_router
+from api import signals_router, topics_router, drafts_router, approval_router, kg_router, kg_status_router, publish_router
 from kg_query import get_kg_query
 from kg_ingest import get_kg_ingest
 from events import MarketingNATSClient
@@ -297,6 +297,7 @@ app.include_router(signals_router, prefix="/api/v1", dependencies=[Depends(get_d
 app.include_router(topics_router, prefix="/api/v1", dependencies=[Depends(get_db)])
 app.include_router(drafts_router, prefix="/api/v1", dependencies=[Depends(get_db)])
 app.include_router(approval_router, prefix="/api/v1/marketing", dependencies=[Depends(get_db)])
+app.include_router(publish_router, prefix="/api/v1", dependencies=[Depends(get_db)])
 app.include_router(kg_router, prefix="/api/v1")
 app.include_router(kg_status_router, prefix="/api/v1")
 
