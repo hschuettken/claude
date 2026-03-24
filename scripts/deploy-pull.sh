@@ -81,3 +81,18 @@ echo ""
 echo "Done. All services are starting."
 echo "Use 'docker compose logs -f' to follow logs."
 echo "Use 'docker ps' to check health status."
+echo ""
+
+# --- Step 5: Post-deploy Home Assistant config sync (optional) ---
+if [ -f "$REPO_ROOT/scripts/post-deploy-sync-ha.sh" ]; then
+    echo "==> Running post-deployment Home Assistant config sync ..."
+    if ./scripts/post-deploy-sync-ha.sh; then
+        echo ""
+    else
+        # Non-blocking failure — deployment is still successful
+        echo ""
+        echo "WARNING: Post-deploy HA config sync failed (non-blocking)."
+        echo "You may need to manually update HA config via File Editor or re-run:"
+        echo "  ./scripts/sync-ha-config.sh"
+    fi
+fi

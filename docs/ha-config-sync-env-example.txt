@@ -1,0 +1,136 @@
+# Home Assistant Config Auto-Sync — Environment Variables
+# 
+# Add these to your .env file to enable automatic config sync after deploy.
+# 
+# CRITICAL:
+#   - Never commit .env to git (it's in .gitignore)
+#   - For version control, use: ./scripts/secrets-encrypt.sh
+#   - This creates an encrypted .env.enc that can be safely committed
+#
+
+# === Home Assistant Connection (Required) ===
+
+# URL to your Home Assistant instance
+HA_URL=http://homeassistant.local:8123
+
+# Long-lived access token (generate in HA: Settings → Automation → Create Token)
+# IMPORTANT: This token can be revoked anytime in HA settings
+HA_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+
+# === Samba Sync (Preferred Method) ===
+# 
+# Sync HomeAssistant_config/ via SMB network share.
+# Requires: Samba addon installed on HAOS (usually built-in)
+# 
+
+# Samba hostname (usually homeassistant.local) or IP
+SAMBA_HOST=homeassistant.local
+
+# Samba user (usually 'homeassistant')
+SAMBA_USER=homeassistant
+
+# Samba user password (must be set if using Samba sync)
+SAMBA_PASSWORD=your_samba_password_here
+
+# === SSH Addon Sync (Fallback) ===
+#
+# Sync HomeAssistant_config/ via SSH addon.
+# Requires: SSH Server addon installed on HAOS
+# Falls back to this if Samba is unavailable.
+#
+
+# SSH addon port (usually 22222)
+SSH_ADDON_PORT=22222
+
+# SSH addon user (usually 'root')
+SSH_ADDON_USER=root
+
+# SSH addon password (must be set if using SSH addon sync)
+SSH_ADDON_PASSWORD=your_ssh_password_here
+
+# === Optional: Sync Method Control ===
+
+# Override auto-detection: 'samba' or 'ssh' (leave empty for auto)
+# HA_CONFIG_SYNC_METHOD=auto
+
+# === How to Use ===
+
+# 1. Copy this file to your working directory:
+#    cp docs/ha-config-sync-env-example.txt ~/.env
+#
+# 2. Edit .env and add your actual values:
+#    HA_TOKEN=<your token>
+#    SAMBA_PASSWORD=<your password>
+#
+# 3. Encrypt for version control:
+#    ./scripts/secrets-encrypt.sh
+#
+# 4. Verify setup:
+#    ./scripts/test-ha-sync.sh
+#
+# 5. Now deploy will automatically sync HA config:
+#    git push → ops-bridge → deploy-pull.sh → auto-sync
+#
+# 6. Or manually sync anytime:
+#    ./scripts/sync-ha-config.sh
+
+# === Getting Values ===
+
+# HA_TOKEN:
+#   1. Open Home Assistant UI
+#   2. Go to Settings → Devices & Services
+#   3. Click "⋮" (three dots, top-right) → Automation & Scenes
+#   4. In "Your automations and scenes" panel, find "Create Token"
+#   5. Copy the token and paste here
+#
+# SAMBA_PASSWORD:
+#   The same password you use to access Samba shares from other devices
+#   (usually the default HA admin password)
+#
+# SSH_ADDON_PASSWORD:
+#   Set in HA Settings → Add-ons → SSH Server → Configuration → Password
+
+# === Security Notes ===
+
+# This file (.env) is in .gitignore and should NEVER be committed.
+# Sensitive data:
+#   - HA_TOKEN: Treat like a password (can be revoked in HA)
+#   - SAMBA_PASSWORD: Treat like a password (use different password if possible)
+#   - SSH_ADDON_PASSWORD: Treat like a password (more critical in production)
+#
+# For version control, use SOPS encryption:
+#   ./scripts/secrets-encrypt.sh → creates .env.enc
+#   .env.enc can be safely committed (encrypted)
+#   On deploy, age key decrypts .env automatically
+
+# ===  Troubleshooting ===
+
+# "Cannot reach homeassistant.local"
+#   - Check HAOS is running
+#   - Try IP instead: SAMBA_HOST=192.168.0.40
+#   - Check network connectivity from deploy host
+#
+# "smbclient not installed"
+#   - apt-get install smbclient (Ubuntu/Debian)
+#   - Or use SSH addon sync instead
+#
+# "sshpass not installed"
+#   - apt-get install sshpass (Ubuntu/Debian)
+#   - Or use Samba sync instead
+#
+# Sync succeeds but HA doesn't see changes
+#   - Wait 5-10 seconds for HA to process
+#   - Check HA logs: Settings → System → Logs
+#   - Try manual reload: Dev Tools → YAML → Check Configuration
+#   - Restart HA if needed: Settings → System → Restart
+
+# === Testing ===
+
+# After setting up .env, test the connection:
+#   ./scripts/test-ha-sync.sh
+
+# Manually sync to verify before relying on auto-sync:
+#   ./scripts/sync-ha-config.sh
+
+# Monitor HA logs during sync:
+#   HA UI → Settings → System → Logs (filter "yaml")
