@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  nats:
+    image: nats:2.10-alpine
+    container_name: nats-jetstream
+    command: 
+      - "-js"
+      - "-m"
+      - "8222"
+      - "--user"
+      - "nb9os"
+      - "--pass"
+      - "${NATS_PASSWORD}"
+    ports:
+      - "4222:4222"    # Client connections
+      - "8222:8222"    # Web UI & HTTP monitoring
+    volumes:
+      - nats-data:/data/jetstream
+    environment:
+      - NATS_PASSWORD=${NATS_PASSWORD}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "4222"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  nats-data:
+    driver: local

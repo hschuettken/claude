@@ -84,7 +84,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.homelab-orchestrator-api.rule=Host(`${TRAEFIK_ORCHESTRATOR_HOST:-api.local.schuettken.net}`)"
-      - "traefik.http.routers.homelab-orchestrator-api.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.homelab-orchestrator-api.entrypoints=${TRAEFIK_ENTRYPOINT:-https}"
       - "traefik.http.routers.homelab-orchestrator-api.tls=true"
       - "traefik.http.services.homelab-orchestrator-api.loadbalancer.server.port=8100"
     networks:
@@ -116,7 +116,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.homelab-dashboard.rule=Host(`${TRAEFIK_DASHBOARD_HOST:-cockpit.local.schuettken.net}`)"
-      - "traefik.http.routers.homelab-dashboard.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.homelab-dashboard.entrypoints=${TRAEFIK_ENTRYPOINT:-https}"
       - "traefik.http.routers.homelab-dashboard.tls=true"
       - "traefik.http.services.homelab-dashboard.loadbalancer.server.port=8085"
     networks:
@@ -142,6 +142,47 @@ services:
     networks:
       - homelab
 
+  hems:
+    build:
+      context: .
+      dockerfile: services/hems/Dockerfile
+    container_name: claude-hems-1
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HEMS_MODE: ${HEMS_MODE:-auto}
+      HEMS_DB_URL: ${HEMS_DB_URL:-postgresql://homelab:homelab@192.168.0.80:5432/homelab}
+      HEMS_ORCHESTRATOR_URL: ${HEMS_ORCHESTRATOR_URL:-http://orchestrator:8000}
+      HEMS_HA_TOKEN: ${HEMS_HA_TOKEN:-}
+    ports:
+      - "8210:8210"
+    volumes:
+      - hems_data:/app/data
+    networks:
+      - homelab
+
+  marketing-agent:
+    build:
+      context: .
+      dockerfile: services/marketing-agent/Dockerfile
+    container_name: claude-marketing-agent-1
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MARKETING_DB_URL: ${MARKETING_DB_URL:-postgresql://homelab:homelab@192.168.0.80:5432/homelab}
+      GHOST_URL: ${GHOST_URL:-https://layer8.schuettken.net}
+      GHOST_ADMIN_API_KEY: ${GHOST_ADMIN_API_KEY:-}
+      MARKETING_PORT: ${MARKETING_PORT:-8211}
+      NATS_URL: ${NATS_URL:-nats://192.168.0.50:4222}
+      SEARXNG_URL: ${SEARXNG_URL:-http://192.168.0.84:8888}
+      NEO4J_URL: ${NEO4J_URL:-bolt://192.168.0.88:7687}
+    ports:
+      - "${MARKETING_PORT:-8211}:8000"
+    volumes:
+      - marketing_agent_data:/app/data
+    networks:
+      - homelab
+
   # --- Template for new services ---
   # my-new-service:
   #   build:
@@ -160,6 +201,8 @@ services:
 # =============================================================
 
 volumes:
+  hems_data:
+  marketing_agent_data:
   pv_forecast_data:
   smart_ev_charging_data:
   ev_forecast_data:

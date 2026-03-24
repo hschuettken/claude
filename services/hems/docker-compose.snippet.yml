@@ -1,0 +1,25 @@
+# docker-compose snippet for HEMS service
+# Add this block to /home/hesch/.openclaw/workspace-nb9os/claude/docker-compose.yml
+# under the `services:` key.
+
+  hems:
+    build:
+      context: .
+      dockerfile: services/hems/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HEMS_MODE: ${HEMS_MODE:-auto}
+      HEMS_DB_URL: ${HEMS_DB_URL:-postgresql://homelab:homelab@192.168.0.80:5432/homelab}
+      HEMS_ORCHESTRATOR_URL: ${HEMS_ORCHESTRATOR_URL:-http://orchestrator:8000}
+      HEMS_HA_TOKEN: ${HEMS_HA_TOKEN:-}
+    ports:
+      - "8210:8210"
+    volumes:
+      - hems_data:/app/data
+    networks:
+      - homelab
+    depends_on: []   # add orchestrator if strict startup order needed
+
+# Also add to `volumes:` at the bottom of docker-compose.yml:
+#   hems_data:

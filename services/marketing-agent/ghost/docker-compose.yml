@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  ghost:
+    image: ghost:6-alpine
+    container_name: marketing-ghost
+    restart: unless-stopped
+    ports:
+      - "2368:2368"
+    environment:
+      # Ghost configuration
+      url: https://layer8.schuettken.net
+      database__client: mysql
+      database__connection__host: 192.168.0.75
+      database__connection__port: 3306
+      database__connection__user: ghost
+      database__connection__password: ${GHOST_DB_PASSWORD:-ghost}
+      database__connection__database: ghost_layer8
+      mail__transport: Direct
+      GHOST_ADMIN_API_KEY: ${GHOST_ADMIN_API_KEY}
+      NODE_ENV: production
+    volumes:
+      - /data/ghost/content:/var/lib/ghost/content
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2368/ghost/api/admin/site/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    networks:
+      - marketing
+
+networks:
+  marketing:
+    driver: bridge

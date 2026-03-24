@@ -33,6 +33,7 @@ HEALTHCHECK_FILE = Path("/app/data/healthcheck")
 
 class SmartEVChargingService(BaseService):
     name = "smart-ev-charging"
+    HA_READ_TIMEOUT = 10
 
     def __init__(self) -> None:
         super().__init__(settings=EVChargingSettings())
@@ -119,7 +120,15 @@ class SmartEVChargingService(BaseService):
         # Control loop
         while not self._shutdown_event.is_set():
             try:
-                await self._control_cycle(charger, strategy)
+                await asyncio.wait_for(
+                    self._control_cycle(charger, strategy),
+                    timeout=self.settings.control_interval_seconds * 3,
+                )
+            except asyncio.TimeoutError:
+                self.logger.error(
+                    "control_cycle_timeout",
+                    timeout_s=self.settings.control_interval_seconds * 3,
+                )
             except Exception:
                 self.logger.exception("control_cycle_error")
             finally:
@@ -448,14 +457,22 @@ class SmartEVChargingService(BaseService):
 
     async def _read_charge_mode(self) -> ChargeMode:
         try:
-            state = await self.ha.get_state(self.settings.charge_mode_entity)
+            state = await asyncio.wait_for(
+                self.ha.get_state(self.settings.charge_mode_entity),
+                timeout=self.HA_READ_TIMEOUT,
+            )
             return ChargeMode(state.get("state", "Off"))
         except (ValueError, KeyError):
+            return ChargeMode.OFF
+        except Exception:
             return ChargeMode.OFF
 
     async def _read_float(self, entity_id: str, default: float = 0.0) -> float:
         try:
-            state = await self.ha.get_state(entity_id)
+            state = await asyncio.wait_for(
+                self.ha.get_state(entity_id),
+                timeout=self.HA_READ_TIMEOUT,
+            )
             val = state.get("state", str(default))
             if val in ("unavailable", "unknown"):
                 return default
@@ -466,7 +483,10 @@ class SmartEVChargingService(BaseService):
 
     async def _read_float_optional(self, entity_id: str) -> float | None:
         try:
-            state = await self.ha.get_state(entity_id)
+            state = await asyncio.wait_for(
+                self.ha.get_state(entity_id),
+                timeout=self.HA_READ_TIMEOUT,
+            )
             val = state.get("state", "")
             if val in ("unavailable", "unknown", ""):
                 return None
@@ -477,14 +497,20 @@ class SmartEVChargingService(BaseService):
 
     async def _read_bool(self, entity_id: str) -> bool:
         try:
-            state = await self.ha.get_state(entity_id)
+            state = await asyncio.wait_for(
+                self.ha.get_state(entity_id),
+                timeout=self.HA_READ_TIMEOUT,
+            )
             return state.get("state", "off") == "on"
         except Exception:
             return False
 
     async def _read_time(self, entity_id: str) -> dt_time | None:
         try:
-            state = await self.ha.get_state(entity_id)
+            state = await asyncio.wait_for(
+                self.ha.get_state(entity_id),
+                timeout=self.HA_READ_TIMEOUT,
+            )
             val = state.get("state", "")
             if not val or val in ("unavailable", "unknown"):
                 return dt_time(7, 0)
