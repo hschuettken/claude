@@ -7,6 +7,7 @@ from sqlalchemy import select
 from pydantic import BaseModel
 
 from ..models import Topic
+from ..kg_ingest import get_kg_ingest
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/topics", tags=["topics"])
@@ -43,7 +44,10 @@ async def create_topic(
     topic: TopicCreate,
     db: AsyncSession,
 ) -> TopicResponse:
-    """Create a new content topic."""
+    """Create a new content topic.
+    
+    Automatically ingests to Knowledge Graph if available.
+    """
     new_topic = Topic(
         name=topic.name,
         pillar=topic.pillar,
@@ -52,6 +56,17 @@ async def create_topic(
     
     db.add(new_topic)
     await db.flush()
+    
+    # Ingest to Knowledge Graph
+    kg_ingest = get_kg_ingest()
+    await kg_ingest.ingest_topic(
+        topic_id=new_topic.id,
+        title=new_topic.name,
+        summary=None,
+        pillar_id=None,  # Can be mapped from topic.pillar if needed
+        score=0.5,  # Default score
+        signal_ids=[],  # Can be populated later
+    )
     
     logger.info(f"Topic created: {new_topic.id} ({topic.name})")
     return TopicResponse.model_validate(new_topic)

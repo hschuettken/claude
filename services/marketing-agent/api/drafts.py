@@ -2,13 +2,16 @@
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
 
 from ..models import Draft, DraftStatus, Platform, BlogPost
 from ..ghost_client import GhostAdminAPIClient
+from ..kg_query import get_kg_query
+from ..kg_ingest import get_kg_ingest
+from ..events import publish_draft_created, publish_post_published, publish_performance_updated
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/drafts", tags=["drafts"])
@@ -60,12 +63,30 @@ class DraftResponse(BaseModel):
         from_attributes = True
 
 
-@router.post("", response_model=DraftResponse)
+class KGContext(BaseModel):
+    """Knowledge Graph context for draft generation."""
+    published_posts: List[Dict[str, Any]] = []
+    active_projects: List[Dict[str, Any]] = []
+    pillar_stats: Dict[str, Any] = {}
+
+
+class DraftWithKGContext(DraftResponse):
+    """Draft response with Knowledge Graph context."""
+    kg_context: Optional[KGContext] = None
+
+
+@router.post("", response_model=DraftWithKGContext)
 async def create_draft(
     draft: DraftCreate,
     db: AsyncSession,
-) -> DraftResponse:
-    """Create a new marketing draft."""
+) -> DraftWithKGContext:
+    """Create a new marketing draft with KG context enrichment.
+    
+    If Knowledge Graph is available, injects context about:
+    - Previously published posts on related topics
+    - Active projects/tasks related to the topic
+    - Content statistics for this pillar
+    """
     new_draft = Draft(
         title=draft.title,
         content=draft.content,
@@ -82,8 +103,55 @@ async def create_draft(
     db.add(new_draft)
     await db.flush()
     
+    # Ingest draft to KG
+    kg_ingest = get_kg_ingest()
+    pillar_id = 1  # Default to first pillar if not specified
+    await kg_ingest.ingest_draft_as_post(
+        draft_id=new_draft.id,
+        title=new_draft.title,
+        format=new_draft.platform.value,
+        topic_id=new_draft.topic_id,
+        pillar_id=pillar_id,
+        word_count=len(new_draft.content.split()),
+        status=new_draft.status.value,
+    )
+    
+    # Publish NATS event: draft.created
+    await publish_draft_created(
+        draft_id=new_draft.id,
+        title=new_draft.title,
+        tags=new_draft.tags,
+        source_signal=str(new_draft.signal_id) if new_draft.signal_id else None,
+    )
+    
+    # Enrich with KG context if available
+    kg_context = None
+    kg_query = get_kg_query()
+    if kg_query.is_available():
+        # Extract keywords from title and tags
+        keywords = draft.tags + [draft.title]
+        
+        # Query KG for related context
+        published_posts = await kg_query.get_published_posts_on_topic(keywords)
+        active_projects = await kg_query.get_active_projects(keywords)
+        pillar_stats = await kg_query.get_pillar_statistics(pillar_id)
+        
+        kg_context = KGContext(
+            published_posts=published_posts,
+            active_projects=active_projects,
+            pillar_stats=pillar_stats,
+        )
+        
+        logger.info(
+            f"Draft {new_draft.id} enriched with KG context: "
+            f"{len(published_posts)} posts, {len(active_projects)} projects"
+        )
+    
+    response = DraftWithKGContext.model_validate(new_draft)
+    response.kg_context = kg_context
+    
     logger.info(f"Draft created: {new_draft.id} ({draft.title})")
-    return DraftResponse.model_validate(new_draft)
+    return response
 
 
 @router.get("", response_model=List[DraftResponse])
@@ -108,12 +176,17 @@ async def list_drafts(
     return [DraftResponse.model_validate(d) for d in drafts]
 
 
-@router.get("/{draft_id}", response_model=DraftResponse)
+@router.get("/{draft_id}", response_model=DraftWithKGContext)
 async def get_draft(
     draft_id: int,
     db: AsyncSession,
-) -> DraftResponse:
-    """Get a single draft by ID."""
+    include_kg: bool = True,
+) -> DraftWithKGContext:
+    """Get a single draft by ID.
+    
+    Query params:
+      - include_kg: Include Knowledge Graph context (default: true)
+    """
     query = select(Draft).where(Draft.id == draft_id)
     result = await db.execute(query)
     draft = result.scalar_one_or_none()
@@ -121,7 +194,27 @@ async def get_draft(
     if not draft:
         raise HTTPException(status_code=404, detail=f"Draft {draft_id} not found")
     
-    return DraftResponse.model_validate(draft)
+    # Enrich with KG context if requested
+    kg_context = None
+    if include_kg:
+        kg_query = get_kg_query()
+        if kg_query.is_available():
+            keywords = draft.tags + [draft.title]
+            pillar_id = 1  # Default
+            
+            published_posts = await kg_query.get_published_posts_on_topic(keywords)
+            active_projects = await kg_query.get_active_projects(keywords)
+            pillar_stats = await kg_query.get_pillar_statistics(pillar_id)
+            
+            kg_context = KGContext(
+                published_posts=published_posts,
+                active_projects=active_projects,
+                pillar_stats=pillar_stats,
+            )
+    
+    response = DraftWithKGContext.model_validate(draft)
+    response.kg_context = kg_context
+    return response
 
 
 @router.put("/{draft_id}", response_model=DraftResponse)
@@ -166,6 +259,66 @@ async def delete_draft(
     logger.info(f"Draft deleted: {draft_id}")
     
     return {"status": "ok", "deleted_id": draft_id}
+
+
+@router.get("/kg/status")
+async def kg_status() -> Dict[str, Any]:
+    """Check Knowledge Graph connection status and node counts."""
+    kg_query = get_kg_query()
+    kg_ingest = get_kg_ingest()
+    
+    status = {
+        "query_available": kg_query.is_available(),
+        "ingest_available": kg_ingest.is_available(),
+        "neo4j_url": kg_query.neo4j_url if kg_query.is_available() else None,
+    }
+    
+    # Query node counts if available
+    if kg_query.is_available():
+        try:
+            with kg_query._driver.session() as session:
+                counts = {}
+                for label in ["Signal", "Topic", "Post", "ContentPillar"]:
+                    result = session.run(f"MATCH (n:{label}) RETURN count(n) as count")
+                    record = result.single()
+                    counts[label] = record["count"] if record else 0
+                status["node_counts"] = counts
+        except Exception as e:
+            logger.warning(f"Failed to get node counts: {e}")
+            status["node_counts"] = {}
+    
+    return status
+
+
+@router.get("/kg/pillars")
+async def kg_pillars() -> Dict[str, Any]:
+    """Get content pillar statistics from Knowledge Graph."""
+    kg_query = get_kg_query()
+    
+    if not kg_query.is_available():
+        return {"error": "Knowledge Graph unavailable"}
+    
+    pillars = {}
+    for pillar_id in range(1, 7):  # 6 pillars
+        stats = await kg_query.get_pillar_statistics(pillar_id)
+        pillars[f"pillar_{pillar_id}"] = stats
+    
+    return pillars
+
+
+@router.get("/kg/cluster/{topic_id}")
+async def kg_cluster(topic_id: str) -> Dict[str, Any]:
+    """Get a topic's full Knowledge Graph cluster.
+    
+    Returns the topic node plus related signals and generated posts.
+    """
+    kg_query = get_kg_query()
+    
+    if not kg_query.is_available():
+        return {"error": "Knowledge Graph unavailable"}
+    
+    cluster = await kg_query.get_topic_cluster(topic_id)
+    return cluster
 
 
 @router.post("/{draft_id}/publish", response_model=Dict[str, Any])
@@ -227,6 +380,29 @@ async def publish_draft(
             db.add(blog_post)
             
             await db.flush()
+            
+            # Update KG with published status and URL
+            kg_ingest = get_kg_ingest()
+            if kg_ingest.is_available():
+                pillar_id = 1  # Default
+                await kg_ingest.ingest_draft_as_post(
+                    draft_id=draft.id,
+                    title=draft.title,
+                    format=draft.platform.value,
+                    topic_id=draft.topic_id,
+                    pillar_id=pillar_id,
+                    word_count=len(draft.content.split()),
+                    status="published",
+                )
+                logger.info(f"Updated KG with published post: {draft.id}")
+            
+            # Publish NATS event: post.published
+            await publish_post_published(
+                draft_id=draft.id,
+                ghost_id=ghost_post_id,
+                ghost_url=ghost_url,
+                title=draft.title,
+            )
             
             logger.info(f"Draft published successfully: {ghost_url}")
             

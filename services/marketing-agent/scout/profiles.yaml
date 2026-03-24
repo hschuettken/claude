@@ -1,0 +1,54 @@
+profiles:
+  - id: sap_datasphere
+    name: "SAP Datasphere News"
+    queries:
+      - "SAP Datasphere new features"
+      - "SAP Datasphere roadmap 2025"
+      - "SAP Business Data Cloud"
+    engines:
+      - "google"
+      - "bing"
+      - "duckduckgo"
+    pillar: 1
+    interval_hours: 4
+
+  - id: sap_community
+    name: "SAP Community Activity"
+    queries:
+      - "SAP Analytics Cloud site:community.sap.com"
+      - "SAP Datasphere modeling site:community.sap.com"
+    engines:
+      - "google"
+    pillar: 1
+    interval_hours: 8
+
+  - id: sap_release
+    name: "SAP Release Notes"
+    queries:
+      - "SAP Datasphere release notes 2025"
+      - "SAP BTP release notes Q2 2025"
+    engines:
+      - "google"
+    pillar: 2
+    interval_hours: 24
+
+  - id: ai_enterprise
+    name: "AI in Enterprise"
+    queries:
+      - "enterprise AI data architecture 2025"
+      - "LLM enterprise integration SAP"
+    engines:
+      - "google"
+      - "bing"
+    pillar: 4
+    interval_hours: 12
+
+  - id: linkedin_signals
+    name: "LinkedIn Thought Leader Signals"
+    queries:
+      - "SAP data architect linkedin thought leadership"
+      - "datasphere analytics linkedin 2025"
+    engines:
+      - "google"
+    pillar: 3
+    interval_hours: 12

@@ -1,4 +1,4 @@
-"""Scout Engine — SearXNG signal detection and scheduling."""
+"""Scout Engine — Scout configuration and initialization."""
 
 from .searxng_client import SearXNGClient, SearchResult
 from .scorer import score_signal

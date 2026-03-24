@@ -7,12 +7,19 @@ Provides:
 - Ghost CMS publishing pipeline
 - Content pillar and voice rule management
 - Analytics integration (future)
+- NATS JetStream event publishing
+- Scout Engine (SearXNG-based signal detection)
 
 Environment variables:
   - MARKETING_DB_URL: PostgreSQL connection string
   - GHOST_ADMIN_API_KEY: Ghost API key (format: id:secret_hex)
   - GHOST_URL: Ghost base URL (default: https://layer8.schuettken.net)
   - MARKETING_PORT: API port (default: 8210)
+  - NATS_URL: NATS JetStream URL (optional, e.g. nats://localhost:4222)
+  - NATS_USER: NATS username (optional)
+  - NATS_PASSWORD: NATS password (optional)
+  - SEARXNG_URL: SearXNG base URL (default: http://192.168.0.84:8080)
+  - SCOUT_ENABLED: Enable Scout scheduler (default: true)
 """
 import os
 import logging
@@ -24,10 +31,85 @@ from fastapi import FastAPI, Depends, status
 from fastapi.responses import JSONResponse
 
 from models import Base
-from api import signals_router, topics_router, drafts_router
+from api import signals_router, topics_router, drafts_router, approval_router
+from kg_query import get_kg_query
+from kg_ingest import get_kg_ingest
+from events import MarketingNATSClient
+from scout import ScoutScheduler
+from nats_consumer import MarketingNATSConsumer
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+
+def _initialize_kg_schema():
+    """Initialize Knowledge Graph schema and seed ContentPillar nodes (one-time)."""
+    neo4j_password = os.getenv("NEO4J_PASSWORD", "")
+    if not neo4j_password:
+        logger.debug("NEO4J_PASSWORD not set, skipping KG schema initialization")
+        return
+    
+    try:
+        from neo4j import GraphDatabase
+    except ImportError:
+        logger.warning("neo4j driver not installed, skipping KG schema init")
+        return
+    
+    neo4j_url = os.getenv("NEO4J_URL", "bolt://192.168.0.340:7687")
+    neo4j_user = os.getenv("NEO4J_USER", "neo4j")
+    
+    try:
+        driver = GraphDatabase.driver(
+            neo4j_url,
+            auth=(neo4j_user, neo4j_password),
+            connection_timeout=5,
+        )
+        
+        with driver.session() as session:
+            # Create constraints for node labels
+            constraints = [
+                ("Signal", "signal_id_unique", "s:Signal", "s.id"),
+                ("Topic", "topic_id_unique", "t:Topic", "t.id"),
+                ("Post", "post_id_unique", "p:Post", "p.id"),
+                ("ContentPillar", "pillar_id_unique", "cp:ContentPillar", "cp.id"),
+            ]
+            
+            for label, name, var, prop in constraints:
+                try:
+                    session.run(f"CREATE CONSTRAINT {name} IF NOT EXISTS FOR ({var}) REQUIRE {prop} IS UNIQUE")
+                    logger.debug(f"✓ {label} constraint ready")
+                except Exception as e:
+                    logger.debug(f"{label} constraint: {e}")
+            
+            # Seed ContentPillar nodes (6 pillars)
+            pillars = [
+                (1, "SAP deep technical", 0.45),
+                (2, "SAP roadmap & features", 0.20),
+                (3, "Architecture & decisions", 0.15),
+                (4, "AI in the enterprise", 0.10),
+                (5, "Builder / lab / infrastructure", 0.07),
+                (6, "Personal builder lifestyle", 0.03),
+            ]
+            
+            for pillar_id, name, weight in pillars:
+                session.run("""
+                    MERGE (cp:ContentPillar {id: $id})
+                    SET cp.name = $name,
+                        cp.weight = $weight,
+                        cp.created_at = datetime(),
+                        cp.updated_at = datetime()
+                """, id=pillar_id, name=name, weight=weight)
+            
+            result = session.run("MATCH (cp:ContentPillar) RETURN count(cp) as count")
+            record = result.single()
+            count = record["count"] if record else 0
+            logger.info(f"✓ Knowledge Graph schema initialized ({count} pillars)")
+    
+    except Exception as e:
+        logger.warning(f"Failed to initialize KG schema: {e}")
+    
+    finally:
+        driver.close()
 
 
 # Database configuration
@@ -35,6 +117,10 @@ DATABASE_URL = os.getenv(
     "MARKETING_DB_URL",
     "postgresql+asyncpg://homelab:homelab@192.168.0.80:5432/homelab",
 )
+
+# Scout configuration
+SEARXNG_URL = os.getenv("SEARXNG_URL", "http://192.168.0.84:8080")
+SCOUT_ENABLED = os.getenv("SCOUT_ENABLED", "true").lower() == "true"
 
 # Create async engine and session factory
 engine = create_async_engine(
@@ -55,9 +141,16 @@ async def get_db() -> AsyncSession:
         yield session
 
 
+# Global service instances
+scout_scheduler: ScoutScheduler = None
+nats_consumer: MarketingNATSConsumer = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan context manager for startup/shutdown."""
+    global scout_scheduler, nats_consumer
+    
     logger.info("Starting Marketing Agent service...")
     
     # Startup: Create tables
@@ -71,32 +164,99 @@ async def lifespan(app: FastAPI):
     
     logger.info("Database tables created/verified")
     
-    # Initialize Task 338: High-relevance signal consumer (NATS automation)
-    if os.getenv("NATS_URL") or os.getenv("nats_url"):
-        logger.info("Initializing Task 338: NATS high-relevance signal consumer...")
-        try:
-            from app.consumers import start_consumers
-            await start_consumers()
-            logger.info("✅ Task 338: High-relevance signal consumer started successfully")
-        except ImportError:
-            logger.warning("Task 338: Consumer module not found, NATS automation disabled")
-        except Exception as e:
-            logger.warning(f"Task 338: Failed to start high-relevance signal consumer: {e}")
+    # Initialize Knowledge Graph connections
+    logger.info("Initializing Knowledge Graph...")
+    
+    # Initialize KG schema and seed ContentPillar data (one-time setup)
+    _initialize_kg_schema()
+    
+    kg_query = get_kg_query()
+    kg_ingest = get_kg_ingest()
+    
+    if kg_query.is_available():
+        logger.info("Knowledge Graph query layer ready")
     else:
-        logger.info("NATS_URL not configured, Task 338 NATS automation disabled")
+        logger.warning("Knowledge Graph query layer unavailable (optional)")
+    
+    if kg_ingest.is_available():
+        logger.info("Knowledge Graph ingestion layer ready")
+    else:
+        logger.warning("Knowledge Graph ingestion layer unavailable (optional)")
+    
+    # Initialize NATS JetStream connection for publishing
+    nats_url = os.getenv("NATS_URL")
+    if nats_url:
+        connected = await MarketingNATSClient.connect(nats_url)
+        if connected:
+            logger.info("NATS JetStream initialized — event publishing enabled")
+        else:
+            logger.warning("NATS JetStream unavailable — event publishing disabled (optional)")
+    else:
+        logger.info("NATS_URL not configured — event publishing disabled (optional)")
+    
+    # Initialize NATS JetStream consumer for signal auto-drafting
+    if nats_url:
+        try:
+            nats_user = os.getenv("NATS_USER")
+            nats_password = os.getenv("NATS_PASSWORD")
+            relevance_threshold = float(os.getenv("SIGNAL_RELEVANCE_THRESHOLD", "0.7"))
+            
+            nats_consumer = MarketingNATSConsumer(
+                db_url=DATABASE_URL,
+                nats_url=nats_url,
+                nats_user=nats_user,
+                nats_password=nats_password,
+                relevance_threshold=relevance_threshold,
+            )
+            
+            if await nats_consumer.connect():
+                await nats_consumer.start()
+                logger.info(
+                    f"✅ NATS consumer started (relevance threshold: {relevance_threshold})"
+                )
+            else:
+                logger.warning("⚠️  NATS consumer failed to start (optional)")
+                nats_consumer = None
+        except Exception as e:
+            logger.error(f"⚠️  NATS consumer initialization failed: {e}")
+            nats_consumer = None
+    else:
+        logger.info("NATS_URL not configured — consumer disabled (optional)")
+    
+    # Initialize Scout Engine scheduler
+    if SCOUT_ENABLED:
+        try:
+            scout_scheduler = ScoutScheduler(
+                db_url=DATABASE_URL,
+                searxng_url=SEARXNG_URL,
+            )
+            await scout_scheduler.start()
+            logger.info("✅ Scout Engine scheduler initialized and started")
+        except Exception as e:
+            logger.error(f"⚠️  Scout Engine initialization failed: {e}")
+            scout_scheduler = None
+    else:
+        logger.info("Scout Engine disabled (SCOUT_ENABLED=false)")
     
     yield
     
-    # Shutdown: Close consumers
-    logger.info("Shutting down Task 338 consumers...")
-    try:
-        from app.consumers import close_consumers
-        await close_consumers()
-        logger.info("Task 338 consumers stopped")
-    except Exception as e:
-        logger.warning(f"Error stopping Task 338 consumers: {e}")
+    # Shutdown: Stop NATS consumer
+    if nats_consumer:
+        await nats_consumer.stop()
+        logger.info("NATS consumer stopped")
     
-    # Shutdown: Close engine
+    # Shutdown: Stop Scout scheduler
+    if scout_scheduler:
+        await scout_scheduler.stop()
+    
+    # Shutdown: Close NATS publisher connection
+    await MarketingNATSClient.close()
+    
+    # Shutdown: Close KG connections
+    kg_query.close()
+    kg_ingest.close()
+    
+    # Shutdown: Close database engine
     await engine.dispose()
     logger.info("Marketing Agent service stopped")
 
@@ -104,20 +264,26 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app
 app = FastAPI(
     title="Marketing Agent",
-    description="Content drafting and Ghost CMS publishing pipeline",
+    description="Content drafting, Ghost CMS publishing, and Scout Engine signal detection",
     version="0.1.0",
     lifespan=lifespan,
 )
+
+# Store scout scheduler in app state for endpoint access
+app.scout_scheduler = None
 
 
 # Health check
 @app.get("/health", tags=["health"])
 async def health_check():
     """Health check endpoint."""
+    consumer_status = "running" if nats_consumer and nats_consumer.is_running() else "stopped"
+    
     return {
         "status": "ok",
         "service": "marketing-agent",
         "version": "0.1.0",
+        "nats_consumer": consumer_status,
     }
 
 
@@ -125,6 +291,7 @@ async def health_check():
 app.include_router(signals_router, prefix="/api/v1", dependencies=[Depends(get_db)])
 app.include_router(topics_router, prefix="/api/v1", dependencies=[Depends(get_db)])
 app.include_router(drafts_router, prefix="/api/v1", dependencies=[Depends(get_db)])
+app.include_router(approval_router, prefix="/api/v1/marketing", dependencies=[Depends(get_db)])
 
 
 @app.exception_handler(ValueError)

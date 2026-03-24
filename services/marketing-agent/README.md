@@ -288,15 +288,94 @@ tail -f /var/log/marketing-agent.log
 docker logs -f marketing-agent
 ```
 
-## Future Enhancements (Phase 1+)
+## Newsletter Integration (Task 148 ✅)
 
+**Status**: Ghost built-in newsletter configured for free tier.
+
+### Newsletter Features
+
+The marketing-agent now includes full newsletter support via extended Ghost Admin API client:
+
+#### Newsletter Management
+```python
+# Get all newsletters
+newsletters = await ghost.get_newsletters()
+
+# Create a new newsletter
+newsletter = await ghost.create_newsletter(
+    name="Layer 8 Weekly",
+    description="Industry insights and tech deep dives",
+    sender_name="Layer 8",
+    sender_email="newsletter@layer8.schuettken.net"
+)
+
+# Update newsletter settings
+await ghost.update_newsletter(
+    newsletter_id="abc123",
+    status="active"
+)
+```
+
+#### Publishing with Newsletter
+```python
+# Publish post and send to subscribers
+post = await ghost.create_post(title, html, tags, status="draft")
+published = await ghost.publish_post(post['id'])
+
+# Send newsletter email to free subscribers
+email = await ghost.send_newsletter(
+    newsletter_id="default_newsletter",
+    post_id=published['id']
+)
+# Returns: {"id": "...", "status": "pending|sent", "opened_count": 0, ...}
+```
+
+#### Subscriber Management
+```python
+# Get all free subscribers
+members = await ghost.get_members(limit=100, status="free")
+
+# Get subscriber statistics
+stats = await ghost.get_members_count()
+# Returns: {"free": 150, "paid": 0, "comped": 0}
+```
+
+### Setup Instructions
+
+See: [`/GHOST_NEWSLETTER_SETUP.md`](/GHOST_NEWSLETTER_SETUP.md) for detailed:
+- Ghost Admin configuration (memberships, newsletters)
+- Subscribe CTA integration (post.hbs theme)
+- Email delivery setup (Mailgun, SendGrid, SMTP)
+- API testing and troubleshooting
+- Phase 2+ roadmap (automation, personalization, analytics)
+
+### Quick Start
+
+1. **Enable in Ghost Admin**:
+   - Settings → Membership → Toggle Members **ON**
+   - Settings → Newsletter → Toggle Newsletter **ON**
+   - Configure sender name/email
+
+2. **Test on Post**:
+   - Create and publish a post
+   - View post on site — newsletter CTA should appear
+   - Try subscribing with test email
+
+3. **Use in Marketing Agent**:
+   - Extend `/api/v1/drafts/{id}/publish` to also call `send_newsletter()`
+   - Track subscribers via `/api/v1/newsletter/stats`
+
+## Future Enhancements (Phase 2+)
+
+- [ ] Automated newsletter sending on post publish
 - [ ] Scout integration — auto-detect signals
 - [ ] Draft generation — LLM-powered content creation
 - [ ] LinkedIn API integration — auto-post to LinkedIn
 - [ ] Plausible analytics integration — track performance
-- [ ] Email newsletter integration
 - [ ] Content approval workflow
 - [ ] Webhook notifications (NATS events)
+- [ ] Email personalization & segmentation
+- [ ] Newsletter template customization
 
 ## References
 

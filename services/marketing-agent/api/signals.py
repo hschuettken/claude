@@ -1,12 +1,13 @@
 """Marketing signals API — detect and register marketing opportunities."""
 import logging
 from typing import List, Dict, Any, Optional
+from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
+from sqlalchemy import select, desc, func
 from pydantic import BaseModel
 
-from ..models import Signal
+from ..models import Signal, SignalStatus
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/signals", tags=["signals"])
@@ -21,12 +22,9 @@ class SignalCreate(BaseModel):
     kg_node_id: Optional[str] = None
 
 
-class SignalUpdate(BaseModel):
-    """Update signal request."""
-    title: Optional[str] = None
-    url: Optional[str] = None
-    relevance_score: Optional[float] = None
-    kg_node_id: Optional[str] = None
+class SignalStatusUpdate(BaseModel):
+    """Update signal status."""
+    status: str  # new, read, used, archived
 
 
 class SignalResponse(BaseModel):
@@ -34,9 +32,16 @@ class SignalResponse(BaseModel):
     id: int
     title: str
     url: Optional[str]
+    snippet: Optional[str]
     source: str
+    source_domain: Optional[str]
     relevance_score: float
+    pillar_id: Optional[int]
+    status: str
     kg_node_id: Optional[str]
+    url_hash: Optional[str]
+    search_profile_id: Optional[str]
+    detected_at: str
     created_at: str
     
     class Config:
@@ -59,6 +64,7 @@ async def create_signal(
         source=signal.source,
         relevance_score=signal.relevance_score,
         kg_node_id=signal.kg_node_id,
+        status=SignalStatus.new,
     )
     
     db.add(new_signal)
@@ -72,28 +78,38 @@ async def create_signal(
 async def list_signals(
     db: AsyncSession,
     source: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    pillar_id: Optional[int] = Query(None),
     min_relevance: Optional[float] = Query(None),
     limit: int = Query(50, le=100),
-    skip: int = Query(0),
+    offset: int = Query(0),
 ) -> List[SignalResponse]:
     """
     List marketing signals with optional filtering.
     
     Query params:
       - source: Filter by source (scout, manual, etc.)
+      - status: Filter by status (new, read, used, archived)
+      - pillar_id: Filter by pillar (1-6)
       - min_relevance: Filter by min relevance score (0.0-1.0)
       - limit: Max results (default 50, max 100)
-      - skip: Pagination offset
+      - offset: Pagination offset (default 0)
     """
-    query = select(Signal).order_by(Signal.created_at.desc())
+    query = select(Signal).order_by(desc(Signal.detected_at))
     
     if source:
         query = query.where(Signal.source == source)
     
+    if status:
+        query = query.where(Signal.status == status)
+    
+    if pillar_id is not None:
+        query = query.where(Signal.pillar_id == pillar_id)
+    
     if min_relevance is not None:
         query = query.where(Signal.relevance_score >= min_relevance)
     
-    query = query.limit(limit).offset(skip)
+    query = query.limit(limit).offset(offset)
     
     result = await db.execute(query)
     signals = result.scalars().all()
@@ -117,13 +133,13 @@ async def get_signal(
     return SignalResponse.model_validate(signal)
 
 
-@router.put("/{signal_id}", response_model=SignalResponse)
-async def update_signal(
+@router.patch("/{signal_id}", response_model=SignalResponse)
+async def update_signal_status(
     signal_id: int,
-    update: SignalUpdate,
+    update: SignalStatusUpdate,
     db: AsyncSession,
 ) -> SignalResponse:
-    """Update a signal."""
+    """Update a signal's status (read, used, archived, etc.)."""
     query = select(Signal).where(Signal.id == signal_id)
     result = await db.execute(query)
     signal = result.scalar_one_or_none()
@@ -131,12 +147,16 @@ async def update_signal(
     if not signal:
         raise HTTPException(status_code=404, detail=f"Signal {signal_id} not found")
     
-    update_data = update.model_dump(exclude_unset=True)
-    for key, value in update_data.items():
-        setattr(signal, key, value)
+    try:
+        signal.status = SignalStatus(update.status)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid status '{update.status}'. Must be one of: new, read, used, archived"
+        )
     
-    await db.flush()
-    logger.info(f"Signal updated: {signal_id}")
+    await db.commit()
+    logger.info(f"Signal {signal_id} status updated to: {update.status}")
     
     return SignalResponse.model_validate(signal)
 
@@ -155,6 +175,7 @@ async def delete_signal(
         raise HTTPException(status_code=404, detail=f"Signal {signal_id} not found")
     
     await db.delete(signal)
+    await db.commit()
     logger.info(f"Signal deleted: {signal_id}")
     
     return {"status": "ok", "deleted_id": signal_id}
