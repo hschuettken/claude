@@ -71,7 +71,30 @@ async def lifespan(app: FastAPI):
     
     logger.info("Database tables created/verified")
     
+    # Initialize Task 338: High-relevance signal consumer (NATS automation)
+    if os.getenv("NATS_URL") or os.getenv("nats_url"):
+        logger.info("Initializing Task 338: NATS high-relevance signal consumer...")
+        try:
+            from app.consumers import start_consumers
+            await start_consumers()
+            logger.info("✅ Task 338: High-relevance signal consumer started successfully")
+        except ImportError:
+            logger.warning("Task 338: Consumer module not found, NATS automation disabled")
+        except Exception as e:
+            logger.warning(f"Task 338: Failed to start high-relevance signal consumer: {e}")
+    else:
+        logger.info("NATS_URL not configured, Task 338 NATS automation disabled")
+    
     yield
+    
+    # Shutdown: Close consumers
+    logger.info("Shutting down Task 338 consumers...")
+    try:
+        from app.consumers import close_consumers
+        await close_consumers()
+        logger.info("Task 338 consumers stopped")
+    except Exception as e:
+        logger.warning(f"Error stopping Task 338 consumers: {e}")
     
     # Shutdown: Close engine
     await engine.dispose()
