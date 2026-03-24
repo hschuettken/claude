@@ -14,6 +14,9 @@ services:
       GHOST_URL: ${GHOST_URL:-https://layer8.schuettken.net}
       MARKETING_PORT: 8210
       LOG_LEVEL: INFO
+      NATS_URL: nats://192.168.0.50:4222
+      NATS_USER: nb9os
+      NATS_PASSWORD: ${NATS_PASSWORD:-nats_secure_docker1_2026}
     
     # Database health check — will retry until PostgreSQL is ready
     healthcheck:
