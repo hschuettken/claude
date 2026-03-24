@@ -39,7 +39,7 @@ from api import signals_router, topics_router, drafts_router, approval_router, k
 from kg_query import get_kg_query
 from kg_ingest import get_kg_ingest
 from events import MarketingNATSClient
-from scout import ScoutScheduler
+from scout import ScoutScheduler, set_scheduler, get_scheduler
 from nats_consumer import MarketingNATSConsumer
 
 logger = logging.getLogger(__name__)
@@ -235,6 +235,7 @@ async def lifespan(app: FastAPI):
                 searxng_url=SEARXNG_URL,
             )
             await scout_scheduler.start()
+            set_scheduler(scout_scheduler)  # Register in global instance
             logger.info("✅ Scout Engine scheduler initialized and started")
         except Exception as e:
             logger.error(f"⚠️  Scout Engine initialization failed: {e}")

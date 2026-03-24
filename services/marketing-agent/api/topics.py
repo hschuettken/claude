@@ -1,4 +1,5 @@
 """Content topics and pillars API."""
+import asyncio
 import logging
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException
@@ -7,7 +8,7 @@ from sqlalchemy import select
 from pydantic import BaseModel
 
 from ..models import Topic
-from ..kg_ingest import get_kg_ingest
+from ..app.knowledge_graph.hooks import KGHooks
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/topics", tags=["topics"])
@@ -46,7 +47,7 @@ async def create_topic(
 ) -> TopicResponse:
     """Create a new content topic.
     
-    Automatically ingests to Knowledge Graph if available.
+    Automatically ingests to Knowledge Graph asynchronously.
     """
     new_topic = Topic(
         name=topic.name,
@@ -57,18 +58,14 @@ async def create_topic(
     db.add(new_topic)
     await db.flush()
     
-    # Ingest to Knowledge Graph
-    kg_ingest = get_kg_ingest()
-    await kg_ingest.ingest_topic(
-        topic_id=new_topic.id,
-        title=new_topic.name,
-        summary=None,
-        pillar_id=None,  # Can be mapped from topic.pillar if needed
-        score=0.5,  # Default score
-        signal_ids=[],  # Can be populated later
-    )
-    
     logger.info(f"Topic created: {new_topic.id} ({topic.name})")
+    
+    # Auto-ingest to Knowledge Graph (fire-and-forget)
+    try:
+        asyncio.create_task(KGHooks.on_topic_created(new_topic, signal_ids=[]))
+    except Exception as e:
+        logger.debug(f"KG hook scheduling failed (non-fatal): {e}")
+    
     return TopicResponse.model_validate(new_topic)
 
 

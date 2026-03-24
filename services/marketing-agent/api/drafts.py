@@ -1,4 +1,5 @@
 """Marketing drafts and Ghost publishing API."""
+import asyncio
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
@@ -12,6 +13,7 @@ from ..ghost_client import GhostAdminAPIClient
 from ..kg_query import get_kg_query
 from ..kg_ingest import get_kg_ingest
 from ..events import publish_draft_created, publish_post_published, publish_performance_updated
+from ..app.knowledge_graph.hooks import KGHooks
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/drafts", tags=["drafts"])
@@ -231,6 +233,9 @@ async def update_draft(
     if not draft:
         raise HTTPException(status_code=404, detail=f"Draft {draft_id} not found")
     
+    # Track old status for hook
+    old_status = draft.status
+    
     update_data = update.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(draft, key, value)
@@ -239,6 +244,20 @@ async def update_draft(
     await db.flush()
     
     logger.info(f"Draft updated: {draft_id}")
+    
+    # Auto-ingest to KG if status changed to 'approved' or 'published'
+    if update.status and update.status in (DraftStatus.approved, DraftStatus.published):
+        try:
+            asyncio.create_task(
+                KGHooks.on_draft_status_changed(
+                    draft=draft,
+                    old_status=str(old_status),
+                    new_status=str(update.status)
+                )
+            )
+        except Exception as e:
+            logger.debug(f"KG hook scheduling failed (non-fatal): {e}")
+    
     return DraftResponse.model_validate(draft)
 
 

@@ -56,6 +56,9 @@ class Signal(Base):
         Index("idx_signals_kg_node", "kg_node_id"),
         Index("idx_signals_status", "status"),
         Index("idx_signals_pillar", "pillar_id"),
+        Index("idx_signals_url_hash", "url_hash"),
+        Index("idx_signals_source_domain", "source_domain"),
+        Index("idx_signals_detected_at", "detected_at"),
         {"schema": "marketing"}
     )
     
@@ -69,6 +72,13 @@ class Signal(Base):
     detected_at = Column(DateTime, default=datetime.utcnow)  # When signal was detected
     kg_node_id = Column(String(100))  # Reference to knowledge graph node
     created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Scout Engine specific fields
+    url_hash = Column(String(64), unique=True)  # SHA256 of URL for deduplication
+    source_domain = Column(String(255))  # Domain extracted from URL
+    snippet = Column(Text)  # Short excerpt from content
+    search_profile_id = Column(String(128))  # Which search profile detected this
+    raw_json = Column(Text)  # Raw search result as JSON
     
     # Relationships
     drafts = relationship("Draft", back_populates="signal")
