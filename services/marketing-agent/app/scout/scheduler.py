@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from ..models import Signal, SignalStatus
 from .searxng_client import SearXNGClient, SearchResult
 from .scorer import score_signal
-from ..events import publish_signal_detected
+from ..events import publish_signal_detected as publish_nats_signal_detected
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,7 @@ async def run_scout_profile(
     new_signals = 0
     duplicates_skipped = 0
     errors = 0
+    created_signal_list: List[Signal] = []  # Track created signals for NATS publishing
     
     logger.info(f"🔍 Scout: Running profile '{profile.name}' (pillar {profile.pillar})")
     
@@ -147,6 +148,7 @@ async def run_scout_profile(
                     )
                     
                     db_session.add(signal)
+                    created_signal_list.append(signal)
                     new_signals += 1
                     
                     logger.debug(
@@ -178,18 +180,21 @@ async def run_scout_profile(
     except Exception as e:
         logger.error(f"Failed to commit signals for profile '{profile.name}': {e}")
         await db_session.rollback()
+        created_signal_list = []  # Clear list on rollback
     
     # Publish NATS events for new signals (best-effort)
-    for _ in range(new_signals):
+    for signal in created_signal_list:
         try:
-            await publish_signal_detected(
-                source="scout",
-                topic=profile.name,
-                score=0.5,  # Would need to track individual scores
-                metadata={"profile_id": profile.id, "pillar_id": profile.pillar},
+            await publish_nats_signal_detected(
+                signal_id=str(signal.id),
+                title=signal.title,
+                pillar_id=str(signal.pillar_id) if signal.pillar_id else "0",
+                relevance_score=signal.relevance_score,
+                url=signal.url or "",
+                detected_at=signal.detected_at or datetime.utcnow(),
             )
         except Exception as e:
-            logger.warning(f"Failed to publish signal event: {e}")
+            logger.warning(f"Failed to publish signal event for signal {signal.id}: {e}")
     
     return {
         "profile_id": profile.id,
