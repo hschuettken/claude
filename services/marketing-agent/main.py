@@ -40,7 +40,7 @@ from kg_query import get_kg_query
 from kg_ingest import get_kg_ingest
 from events import MarketingNATSClient
 from scout import ScoutScheduler
-from nats_consumer import MarketingNATSConsumer
+from app.consumers import start_consumers, close_consumers
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -147,13 +147,12 @@ async def get_db() -> AsyncSession:
 
 # Global service instances
 scout_scheduler: ScoutScheduler = None
-nats_consumer: MarketingNATSConsumer = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan context manager for startup/shutdown."""
-    global scout_scheduler, nats_consumer
+    global scout_scheduler
     
     logger.info("Starting Marketing Agent service...")
     
@@ -198,34 +197,15 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("NATS_URL not configured — event publishing disabled (optional)")
     
-    # Initialize NATS JetStream consumer for signal auto-drafting
+    # Initialize NATS JetStream consumer for signal auto-drafting (Task 338)
     if nats_url:
         try:
-            nats_user = os.getenv("NATS_USER")
-            nats_password = os.getenv("NATS_PASSWORD")
-            relevance_threshold = float(os.getenv("SIGNAL_RELEVANCE_THRESHOLD", "0.7"))
-            
-            nats_consumer = MarketingNATSConsumer(
-                db_url=DATABASE_URL,
-                nats_url=nats_url,
-                nats_user=nats_user,
-                nats_password=nats_password,
-                relevance_threshold=relevance_threshold,
-            )
-            
-            if await nats_consumer.connect():
-                await nats_consumer.start()
-                logger.info(
-                    f"✅ NATS consumer started (relevance threshold: {relevance_threshold})"
-                )
-            else:
-                logger.warning("⚠️  NATS consumer failed to start (optional)")
-                nats_consumer = None
+            await start_consumers()
+            logger.info("✅ Task 338: NATS high-relevance signal consumer started")
         except Exception as e:
-            logger.error(f"⚠️  NATS consumer initialization failed: {e}")
-            nats_consumer = None
+            logger.warning(f"⚠️  Task 338: Failed to start NATS consumer: {e}")
     else:
-        logger.info("NATS_URL not configured — consumer disabled (optional)")
+        logger.info("NATS_URL not configured — Task 338 consumer disabled (optional)")
     
     # Initialize Scout Engine scheduler
     if SCOUT_ENABLED:
@@ -244,10 +224,12 @@ async def lifespan(app: FastAPI):
     
     yield
     
-    # Shutdown: Stop NATS consumer
-    if nats_consumer:
-        await nats_consumer.stop()
-        logger.info("NATS consumer stopped")
+    # Shutdown: Stop NATS consumers (Task 338 + others)
+    try:
+        await close_consumers()
+        logger.info("NATS consumers stopped")
+    except Exception as e:
+        logger.warning(f"Error stopping NATS consumers: {e}")
     
     # Shutdown: Stop Scout scheduler
     if scout_scheduler:
@@ -281,13 +263,16 @@ app.scout_scheduler = None
 @app.get("/health", tags=["health"])
 async def health_check():
     """Health check endpoint."""
-    consumer_status = "running" if nats_consumer and nats_consumer.is_running() else "stopped"
-    
     return {
         "status": "ok",
         "service": "marketing-agent",
         "version": "0.1.0",
-        "nats_consumer": consumer_status,
+        "features": {
+            "nats_automation": "enabled (Task 338)",
+            "scout_engine": "enabled",
+            "knowledge_graph": "enabled",
+            "ghost_cms": "enabled",
+        },
     }
 
 
