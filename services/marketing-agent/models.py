@@ -56,33 +56,18 @@ class Signal(Base):
         Index("idx_signals_kg_node", "kg_node_id"),
         Index("idx_signals_status", "status"),
         Index("idx_signals_pillar", "pillar_id"),
-<<<<<<< HEAD
-        Index("idx_signals_url_hash", "url_hash"),
         {"schema": "marketing"}
-=======
->>>>>>> origin/main
     )
     
     id = Column(Integer, primary_key=True)
     title = Column(String(255), nullable=False)
     url = Column(String(1024))
-    snippet = Column(Text)  # Content snippet from search result
-    source_domain = Column(String(255))  # e.g., sap.com, linkedin.com
     source = Column(String(100), nullable=False)  # scout, manual, research, etc.
     relevance_score = Column(Float, default=0.0)  # 0.0-1.0
-<<<<<<< HEAD
-    pillar_id = Column(Integer, ForeignKey("marketing.content_pillars.id"))  # 1-6
-    status = Column(SQLEnum(SignalStatus), default=SignalStatus.new)  # new, read, used, archived
-=======
     pillar_id = Column(Integer)  # Content pillar (1-6), for KG categorization
     status = Column(String(50), default="new")  # new, read, used, archived
     detected_at = Column(DateTime, default=datetime.utcnow)  # When signal was detected
->>>>>>> origin/main
     kg_node_id = Column(String(100))  # Reference to knowledge graph node
-    url_hash = Column(String(64), unique=True)  # sha256(url) for deduplication
-    search_profile_id = Column(String(100))  # Profile that detected this signal
-    raw_json = Column(JSON)  # Full SearXNG result JSON
-    detected_at = Column(DateTime, default=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
@@ -93,15 +78,10 @@ class Topic(Base):
     """Content topics and topic categorization."""
     __tablename__ = "topics"
     __table_args__ = (
-<<<<<<< HEAD
-        Index("idx_topics_pillar", "pillar"),
-        Index("idx_topics_audience", "audience_segment"),
-        {"schema": "marketing"}
-=======
         Index("idx_topics_pillar_id", "pillar_id"),
         Index("idx_topics_status", "status"),
         Index("idx_topics_created_at", "created_at"),
->>>>>>> origin/main
+        {"schema": "marketing"}
     )
     
     id = Column(Integer, primary_key=True)
@@ -146,9 +126,6 @@ class Draft(Base):
     ghost_post_id = Column(String(255))  # Set after publishing to Ghost
     ghost_url = Column(String(1024))
     
-    # Approval workflow
-    rejection_feedback = Column(Text)  # Feedback when rejected during review
-    
     # Metadata
     tags = Column(ARRAY(String), default=[])
     seo_title = Column(String(255))
@@ -165,8 +142,6 @@ class Draft(Base):
     signal = relationship("Signal", back_populates="drafts")
     blog_posts = relationship("BlogPost", back_populates="draft")
     linkedin_posts = relationship("LinkedInPost", back_populates="draft")
-    status_history = relationship("StatusHistory", back_populates="draft", cascade="all, delete-orphan")
-    approval_queue = relationship("ApprovalQueue", back_populates="draft", uselist=False, cascade="all, delete-orphan")
 
 
 class BlogPost(Base):
@@ -231,11 +206,8 @@ class ContentPillar(Base):
     __tablename__ = "content_pillars"
     __table_args__ = (
         Index("idx_content_pillars_name", "name"),
-<<<<<<< HEAD
-        {"schema": "marketing"}
-=======
         Index("idx_content_pillars_kg_id", "kg_id"),
->>>>>>> origin/main
+        {"schema": "marketing"}
     )
     
     id = Column(Integer, primary_key=True)
@@ -267,49 +239,3 @@ class PerformanceSnapshot(Base):
     engagement_rate = Column(Float)  # 0.0-1.0
     recorded_at = Column(DateTime, default=datetime.utcnow)
     extra_data = Column(JSON, default={})  # Raw analytics data
-
-
-class StatusHistory(Base):
-    """Approval workflow — status transition history for drafts."""
-    __tablename__ = "status_history"
-    __table_args__ = (
-        Index("idx_status_history_draft_id", "draft_id"),
-        Index("idx_status_history_created_at", "created_at"),
-        Index("idx_status_history_to_status", "to_status"),
-        Index("idx_status_history_draft_created", "draft_id", "created_at"),
-        {"schema": "marketing"}
-    )
-    
-    id = Column(Integer, primary_key=True)
-    draft_id = Column(Integer, ForeignKey("marketing.drafts.id"), nullable=False)
-    from_status = Column(String(50))  # NULL for initial status
-    to_status = Column(String(50), nullable=False)
-    changed_by = Column(String(255))  # User who made the transition
-    feedback = Column(Text)  # Rejection feedback or notes
-    created_at = Column(DateTime, default=datetime.utcnow)
-    
-    # Relationships
-    draft = relationship("Draft", back_populates="status_history")
-
-
-class ApprovalQueue(Base):
-    """Approval workflow — pending drafts awaiting review."""
-    __tablename__ = "approval_queue"
-    __table_args__ = (
-        Index("idx_approval_queue_queued_at", "queued_at"),
-        Index("idx_approval_queue_assigned_to", "assigned_to"),
-        Index("idx_approval_queue_orbit_task_id", "orbit_task_id"),
-        UniqueConstraint("draft_id", name="uq_approval_queue_draft_id"),
-        {"schema": "marketing"}
-    )
-    
-    id = Column(Integer, primary_key=True)
-    draft_id = Column(Integer, ForeignKey("marketing.drafts.id"), nullable=False)
-    queued_at = Column(DateTime, default=datetime.utcnow)
-    assigned_to = Column(String(255))  # Who it's assigned to (e.g., "henning")
-    orbit_task_id = Column(String(255))  # Link to Orbit task
-    discord_notified_at = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    
-    # Relationships
-    draft = relationship("Draft", back_populates="approval_queue")
