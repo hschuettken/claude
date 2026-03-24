@@ -64,6 +64,16 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to start Scout scheduler: {e}")
 
+    # Initialize high-relevance signal consumer (Task 338: NATS automation)
+    if settings.nats_url:
+        logger.info("Initializing high-relevance signal consumer (Task 338)...")
+        try:
+            from app.consumers import start_consumers
+            await start_consumers()
+            logger.info("High-relevance signal consumer started successfully")
+        except Exception as e:
+            logger.warning(f"Failed to start high-relevance signal consumer: {e}")
+
     # Initialize SynthesisOS consumer
     if settings.nats_url:
         logger.info("Initializing SynthesisOS NATS consumer...")
@@ -91,6 +101,14 @@ async def lifespan(app: FastAPI):
     
     # Close NATS publisher (always)
     await close_nats_publisher()
+
+    # Stop high-relevance signal consumer (Task 338)
+    try:
+        from app.consumers import close_consumers
+        await close_consumers()
+        logger.info("High-relevance signal consumer stopped")
+    except Exception as e:
+        logger.warning(f"Error stopping high-relevance signal consumer: {e}")
 
     # Stop SynthesisOS consumer
     try:
