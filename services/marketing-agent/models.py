@@ -1,6 +1,11 @@
 """
-SQLAlchemy models for Marketing Agent — full 8-table schema.
+SQLAlchemy models for Marketing Agent — full 12-table schema.
 All tables in the 'marketing' PostgreSQL schema.
+
+Schema tables:
+- signals, topics, storylines, drafts, blog_posts, linkedin_posts
+- visual_concepts, performance_snapshots, idea_notes, voice_rules
+- content_pillars, audience_segments
 """
 from datetime import datetime
 from typing import Optional, List
@@ -56,11 +61,8 @@ class Signal(Base):
         Index("idx_signals_kg_node", "kg_node_id"),
         Index("idx_signals_status", "status"),
         Index("idx_signals_pillar", "pillar_id"),
-<<<<<<< HEAD
         Index("idx_signals_url_hash", "url_hash"),
         {"schema": "marketing"}
-=======
->>>>>>> origin/main
     )
     
     id = Column(Integer, primary_key=True)
@@ -70,14 +72,8 @@ class Signal(Base):
     source_domain = Column(String(255))  # e.g., sap.com, linkedin.com
     source = Column(String(100), nullable=False)  # scout, manual, research, etc.
     relevance_score = Column(Float, default=0.0)  # 0.0-1.0
-<<<<<<< HEAD
     pillar_id = Column(Integer, ForeignKey("marketing.content_pillars.id"))  # 1-6
     status = Column(SQLEnum(SignalStatus), default=SignalStatus.new)  # new, read, used, archived
-=======
-    pillar_id = Column(Integer)  # Content pillar (1-6), for KG categorization
-    status = Column(String(50), default="new")  # new, read, used, archived
-    detected_at = Column(DateTime, default=datetime.utcnow)  # When signal was detected
->>>>>>> origin/main
     kg_node_id = Column(String(100))  # Reference to knowledge graph node
     url_hash = Column(String(64), unique=True)  # sha256(url) for deduplication
     search_profile_id = Column(String(100))  # Profile that detected this signal
@@ -86,6 +82,7 @@ class Signal(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
+    pillar = relationship("ContentPillar", back_populates="signals")
     drafts = relationship("Draft", back_populates="signal")
 
 
@@ -93,30 +90,56 @@ class Topic(Base):
     """Content topics and topic categorization."""
     __tablename__ = "topics"
     __table_args__ = (
-<<<<<<< HEAD
-        Index("idx_topics_pillar", "pillar"),
-        Index("idx_topics_audience", "audience_segment"),
-        {"schema": "marketing"}
-=======
-        Index("idx_topics_pillar_id", "pillar_id"),
+        Index("idx_topics_pillar", "pillar_id"),
+        Index("idx_topics_audience", "audience_segment_id"),
         Index("idx_topics_status", "status"),
         Index("idx_topics_created_at", "created_at"),
->>>>>>> origin/main
+        {"schema": "marketing"}
     )
     
     id = Column(Integer, primary_key=True)
     name = Column(String(255), nullable=False, unique=True)
-    pillar = Column(String(100))  # Legacy: human-readable pillar name
-    pillar_id = Column(Integer)  # KG pillar ID (1-6)
+    kg_id = Column(Integer)  # KG topic ID for cross-system linking
+    pillar_id = Column(Integer, ForeignKey("marketing.content_pillars.id"))
     score = Column(Float, default=0.0)  # Topic relevance/viability score (0.0-1.0)
     summary = Column(Text)  # Topic summary/context for draft writer
     status = Column(String(50), default="candidate")  # candidate, selected, drafted, published, archived
-    audience_segment = Column(String(100))  # e.g., "Enterprise", "SMB", "Developers"
+    audience_segment_id = Column(Integer, ForeignKey("marketing.audience_segments.id"))
+    storyline_id = Column(Integer, ForeignKey("marketing.storylines.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
+    pillar = relationship("ContentPillar", back_populates="topics")
+    audience_segment = relationship("AudienceSegment", back_populates="topics")
+    storyline = relationship("Storyline", back_populates="topics")
     drafts = relationship("Draft", back_populates="topic")
+
+
+class Storyline(Base):
+    """12-week content arcs and narrative structures."""
+    __tablename__ = "storylines"
+    __table_args__ = (
+        Index("idx_storylines_start_date", "start_date"),
+        Index("idx_storylines_pillar_id", "pillar_id"),
+        Index("idx_storylines_status", "status"),
+        {"schema": "marketing"}
+    )
+    
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text)
+    pillar_id = Column(Integer, ForeignKey("marketing.content_pillars.id"))
+    start_date = Column(DateTime, nullable=False)
+    end_date = Column(DateTime, nullable=False)
+    status = Column(String(50), default="planned")  # planned, in-progress, completed, archived
+    color = Column(String(7))  # Hex color for UI
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    pillar = relationship("ContentPillar", back_populates="storylines")
+    topics = relationship("Topic", back_populates="storyline")
 
 
 class Draft(Base):
@@ -189,6 +212,7 @@ class BlogPost(Base):
     
     # Relationships
     draft = relationship("Draft", back_populates="blog_posts")
+    performance_snapshots = relationship("PerformanceSnapshot", back_populates="blog_post")
 
 
 class LinkedInPost(Base):
@@ -211,6 +235,71 @@ class LinkedInPost(Base):
     draft = relationship("Draft", back_populates="linkedin_posts")
 
 
+class VisualConcept(Base):
+    """Visual prompt generations for images, diagrams, and brand assets."""
+    __tablename__ = "visual_concepts"
+    __table_args__ = (
+        Index("idx_visual_concepts_draft_id", "draft_id"),
+        Index("idx_visual_concepts_created_at", "created_at"),
+        {"schema": "marketing"}
+    )
+    
+    id = Column(Integer, primary_key=True)
+    draft_id = Column(Integer, ForeignKey("marketing.drafts.id"))
+    prompt = Column(Text, nullable=False)  # Image generation prompt
+    style_preset = Column(String(100))  # isometric, architecture, data-flow, etc.
+    generated_url = Column(String(1024))  # URL to generated image
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PerformanceSnapshot(Base):
+    """Analytics snapshots from Plausible or Ghost."""
+    __tablename__ = "performance_snapshots"
+    __table_args__ = (
+        Index("idx_perf_post_id", "blog_post_id"),
+        Index("idx_perf_platform", "platform"),
+        Index("idx_perf_recorded_at", "recorded_at"),
+        Index("idx_perf_platform_recorded", "platform", "recorded_at"),
+        {"schema": "marketing"}
+    )
+    
+    id = Column(Integer, primary_key=True)
+    blog_post_id = Column(Integer, ForeignKey("marketing.blog_posts.id"), nullable=False)
+    platform = Column(String(50), nullable=False)  # plausible, ghost, linkedin
+    views = Column(Integer, default=0)
+    engagement_rate = Column(Float)  # 0.0-1.0
+    click_rate = Column(Float)
+    read_time_avg = Column(Float)  # Average reading time in seconds
+    recorded_at = Column(DateTime, default=datetime.utcnow)
+    extra_data = Column(JSON, default={})  # Raw analytics data
+    
+    # Relationships
+    blog_post = relationship("BlogPost", back_populates="performance_snapshots")
+
+
+class IdeaNote(Base):
+    """Quick-capture ideas for future content."""
+    __tablename__ = "idea_notes"
+    __table_args__ = (
+        Index("idx_idea_notes_status", "status"),
+        Index("idx_idea_notes_pillar_id", "pillar_id"),
+        Index("idx_idea_notes_created_at", "created_at"),
+        {"schema": "marketing"}
+    )
+    
+    id = Column(Integer, primary_key=True)
+    title = Column(String(255), nullable=False)
+    content = Column(Text)
+    pillar_id = Column(Integer, ForeignKey("marketing.content_pillars.id"))
+    audience_segment_id = Column(Integer, ForeignKey("marketing.audience_segments.id"))
+    status = Column(String(50), default="draft")  # draft, candidate, used, archived
+    source = Column(String(100))  # memora, meeting, research, inspiration, etc.
+    source_link = Column(String(1024))  # Link to source (meeting recording, article, etc.)
+    tags = Column(ARRAY(String), default=[])
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class VoiceRule(Base):
     """Brand voice guidelines and restrictions."""
     __tablename__ = "voice_rules"
@@ -223,6 +312,8 @@ class VoiceRule(Base):
     id = Column(Integer, primary_key=True)
     rule_type = Column(SQLEnum(RuleType), nullable=False)  # never_say, always_say
     content = Column(String(500), nullable=False)  # The actual rule text
+    context = Column(String(255))  # Where/how the rule applies
+    priority = Column(Integer, default=0)  # Higher priority rules checked first
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -231,11 +322,8 @@ class ContentPillar(Base):
     __tablename__ = "content_pillars"
     __table_args__ = (
         Index("idx_content_pillars_name", "name"),
-<<<<<<< HEAD
-        {"schema": "marketing"}
-=======
         Index("idx_content_pillars_kg_id", "kg_id"),
->>>>>>> origin/main
+        {"schema": "marketing"}
     )
     
     id = Column(Integer, primary_key=True)
@@ -247,26 +335,33 @@ class ContentPillar(Base):
     target_audience = Column(String(255))
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    signals = relationship("Signal", back_populates="pillar")
+    topics = relationship("Topic", back_populates="pillar")
+    storylines = relationship("Storyline", back_populates="pillar")
 
 
-class PerformanceSnapshot(Base):
-    """Analytics snapshots from Plausible or Ghost."""
-    __tablename__ = "performance_snapshots"
+class AudienceSegment(Base):
+    """Target audience segments for content strategy."""
+    __tablename__ = "audience_segments"
     __table_args__ = (
-        Index("idx_perf_post_id", "post_id"),
-        Index("idx_perf_platform", "platform"),
-        Index("idx_perf_recorded_at", "recorded_at"),
-        Index("idx_perf_platform_recorded", "platform", "recorded_at"),
+        Index("idx_audience_segments_name", "name"),
+        Index("idx_audience_segments_kg_id", "kg_id"),
         {"schema": "marketing"}
     )
     
     id = Column(Integer, primary_key=True)
-    post_id = Column(Integer, ForeignKey("marketing.blog_posts.id"), nullable=False)
-    platform = Column(String(50), nullable=False)  # plausible, ghost, linkedin
-    views = Column(Integer, default=0)
-    engagement_rate = Column(Float)  # 0.0-1.0
-    recorded_at = Column(DateTime, default=datetime.utcnow)
-    extra_data = Column(JSON, default={})  # Raw analytics data
+    kg_id = Column(Integer, unique=True)  # KG audience segment ID
+    name = Column(String(255), nullable=False, unique=True)
+    description = Column(Text)
+    size_estimate = Column(Integer)  # Estimated audience size
+    engagement_profile = Column(JSON)  # Preferences, channels, interests
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    topics = relationship("Topic", back_populates="audience_segment")
 
 
 class StatusHistory(Base):
