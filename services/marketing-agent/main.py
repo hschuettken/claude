@@ -35,17 +35,12 @@ from fastapi import FastAPI, Depends, status
 from fastapi.responses import JSONResponse
 
 from models import Base
-<<<<<<< HEAD
-from api import signals_router, topics_router, drafts_router, approval_router
+from api import signals_router, topics_router, drafts_router, approval_router, kg_router, kg_status_router
 from kg_query import get_kg_query
 from kg_ingest import get_kg_ingest
 from events import MarketingNATSClient
 from scout import ScoutScheduler
 from nats_consumer import MarketingNATSConsumer
-=======
-from api import signals_router, topics_router, drafts_router, kg_router, kg_status_router
-from app.knowledge_graph import initialize_kg
->>>>>>> origin/main
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -173,7 +168,6 @@ async def lifespan(app: FastAPI):
     
     logger.info("Database tables created/verified")
     
-<<<<<<< HEAD
     # Initialize Knowledge Graph connections
     logger.info("Initializing Knowledge Graph...")
     
@@ -185,28 +179,6 @@ async def lifespan(app: FastAPI):
     
     if kg_query.is_available():
         logger.info("Knowledge Graph query layer ready")
-=======
-    # Initialize Knowledge Graph (Neo4j)
-    logger.info("Initializing Knowledge Graph subsystem...")
-    kg_status = await initialize_kg()
-    if kg_status.get("success"):
-        logger.info("✓ Knowledge Graph initialized successfully")
-    else:
-        logger.warning(f"⚠ Knowledge Graph initialization incomplete: {kg_status.get('error')}")
-        logger.info("  Marketing agent will continue without KG features (graceful degradation)")
-    
-    # Initialize Task 338: High-relevance signal consumer (NATS automation)
-    if os.getenv("NATS_URL") or os.getenv("nats_url"):
-        logger.info("Initializing Task 338: NATS high-relevance signal consumer...")
-        try:
-            from app.consumers import start_consumers
-            await start_consumers()
-            logger.info("✅ Task 338: High-relevance signal consumer started successfully")
-        except ImportError:
-            logger.warning("Task 338: Consumer module not found, NATS automation disabled")
-        except Exception as e:
-            logger.warning(f"Task 338: Failed to start high-relevance signal consumer: {e}")
->>>>>>> origin/main
     else:
         logger.warning("Knowledge Graph query layer unavailable (optional)")
     
@@ -323,13 +295,9 @@ async def health_check():
 app.include_router(signals_router, prefix="/api/v1", dependencies=[Depends(get_db)])
 app.include_router(topics_router, prefix="/api/v1", dependencies=[Depends(get_db)])
 app.include_router(drafts_router, prefix="/api/v1", dependencies=[Depends(get_db)])
-<<<<<<< HEAD
 app.include_router(approval_router, prefix="/api/v1/marketing", dependencies=[Depends(get_db)])
-=======
-app.include_router(kg_router, prefix="/api/v1", dependencies=[Depends(get_db)])
-app.include_router(kg_status_router, prefix="/api/v1", dependencies=[Depends(get_db)])
-app.include_router(kg_router, prefix="/api/v1")  # KG router doesn't need DB dependency
->>>>>>> origin/main
+app.include_router(kg_router, prefix="/api/v1")
+app.include_router(kg_status_router, prefix="/api/v1")
 
 
 @app.exception_handler(ValueError)

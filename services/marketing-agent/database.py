@@ -1,26 +1,29 @@
 """Database connection and session management."""
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
+import os
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 
-from config import settings
-
-# Create database engine
-engine = create_engine(
-    settings.marketing_db_url,
-    echo=settings.debug,
-    pool_pre_ping=True,
-    pool_recycle=3600,
+# Get database URL from environment
+DATABASE_URL = os.getenv(
+    "MARKETING_DB_URL",
+    "postgresql+asyncpg://homelab:homelab@192.168.0.80:5432/homelab",
 )
 
-# Create session factory
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# Create async engine
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    pool_size=10,
+    max_overflow=20,
+)
+
+# Create async session factory
+async_session_maker = async_sessionmaker(
+    engine, class_=AsyncSession, expire_on_commit=False,
+)
 
 
-def get_db() -> Session:
-    """Dependency to get database session."""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+async def get_db() -> AsyncSession:
+    """Dependency to get async database session."""
+    async with async_session_maker() as session:
+        yield session

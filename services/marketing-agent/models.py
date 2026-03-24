@@ -126,6 +126,10 @@ class Draft(Base):
     ghost_post_id = Column(String(255))  # Set after publishing to Ghost
     ghost_url = Column(String(1024))
     
+    # Author and approval fields
+    author = Column(String(255))  # Author name
+    rejection_feedback = Column(Text)  # Feedback when rejected during review
+    
     # Metadata
     tags = Column(ARRAY(String), default=[])
     seo_title = Column(String(255))
@@ -239,3 +243,40 @@ class PerformanceSnapshot(Base):
     engagement_rate = Column(Float)  # 0.0-1.0
     recorded_at = Column(DateTime, default=datetime.utcnow)
     extra_data = Column(JSON, default={})  # Raw analytics data
+
+
+class StatusHistory(Base):
+    """Approval workflow status change history."""
+    __tablename__ = "status_history"
+    __table_args__ = (
+        Index("idx_status_history_draft_id", "draft_id"),
+        Index("idx_status_history_created_at", "created_at"),
+        Index("idx_status_history_to_status", "to_status"),
+        {"schema": "marketing"}
+    )
+    
+    id = Column(Integer, primary_key=True)
+    draft_id = Column(Integer, ForeignKey("marketing.drafts.id"), nullable=False)
+    from_status = Column(String(50))  # NULL for initial status change
+    to_status = Column(String(50), nullable=False)
+    changed_by = Column(String(255), nullable=False)  # User or system that made change
+    feedback = Column(Text)  # Rejection feedback or notes
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ApprovalQueue(Base):
+    """Drafts pending review."""
+    __tablename__ = "approval_queue"
+    __table_args__ = (
+        Index("idx_approval_queue_created_at", "queued_at"),
+        Index("idx_approval_queue_assigned_to", "assigned_to"),
+        UniqueConstraint("draft_id", name="uq_approval_queue_draft_id"),
+        {"schema": "marketing"}
+    )
+    
+    id = Column(Integer, primary_key=True)
+    draft_id = Column(Integer, ForeignKey("marketing.drafts.id"), nullable=False, unique=True)
+    queued_at = Column(DateTime, default=datetime.utcnow)
+    assigned_to = Column(String(255), default="henning")  # Reviewer
+    orbit_task_id = Column(String(255))  # Link to Orbit task
+    discord_notified_at = Column(DateTime)  # When Discord notification was sent
