@@ -1,0 +1,211 @@
+"""
+SQLAlchemy models for Marketing Agent — full 8-table schema.
+All tables in the 'marketing' PostgreSQL schema.
+"""
+from datetime import datetime
+from typing import Optional, List
+from sqlalchemy import (
+    Column, Integer, String, Text, DateTime, Float, Boolean, 
+    ForeignKey, ARRAY, JSON, Enum as SQLEnum, Index, UniqueConstraint,
+)
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import relationship
+import enum
+
+Base = declarative_base()
+
+
+class DraftStatus(str, enum.Enum):
+    """Draft lifecycle states."""
+    draft = "draft"
+    review = "review"
+    approved = "approved"
+    scheduled = "scheduled"
+    published = "published"
+    archived = "archived"
+
+
+class RuleType(str, enum.Enum):
+    """Voice rule types."""
+    never_say = "never_say"
+    always_say = "always_say"
+
+
+class Platform(str, enum.Enum):
+    """Publishing platforms."""
+    blog = "blog"
+    linkedin = "linkedin"
+    twitter = "twitter"
+    email = "email"
+
+
+class Signal(Base):
+    """Marketing signals/opportunities detected by Scout or manual input."""
+    __tablename__ = "signals"
+    __table_args__ = (
+        Index("idx_signals_created_at", "created_at"),
+        Index("idx_signals_relevance", "relevance_score"),
+        Index("idx_signals_kg_node", "kg_node_id"),
+    )
+    
+    id = Column(Integer, primary_key=True)
+    title = Column(String(255), nullable=False)
+    url = Column(String(1024))
+    source = Column(String(100), nullable=False)  # scout, manual, research, etc.
+    relevance_score = Column(Float, default=0.0)  # 0.0-1.0
+    kg_node_id = Column(String(100))  # Reference to knowledge graph node
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    drafts = relationship("Draft", back_populates="signal")
+
+
+class Topic(Base):
+    """Content pillars and topic categorization."""
+    __tablename__ = "topics"
+    __table_args__ = (
+        Index("idx_topics_pillar", "pillar"),
+        Index("idx_topics_audience", "audience_segment"),
+    )
+    
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False, unique=True)
+    pillar = Column(String(100), nullable=False)  # e.g., "Product", "Thought Leadership"
+    audience_segment = Column(String(100))  # e.g., "Enterprise", "SMB", "Developers"
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    drafts = relationship("Draft", back_populates="topic")
+    pillars = relationship("ContentPillar", secondary="marketing.topic_pillars")
+
+
+class Draft(Base):
+    """Marketing content drafts before publishing."""
+    __tablename__ = "drafts"
+    __table_args__ = (
+        Index("idx_drafts_status", "status"),
+        Index("idx_drafts_created_at", "created_at"),
+        Index("idx_drafts_topic_id", "topic_id"),
+        Index("idx_drafts_status_created", "status", "created_at"),
+        UniqueConstraint("ghost_post_id", name="uq_drafts_ghost_post_id"),
+    )
+    
+    id = Column(Integer, primary_key=True)
+    title = Column(String(255), nullable=False)
+    content = Column(Text, nullable=False)
+    summary = Column(String(500))
+    
+    # Relationships
+    topic_id = Column(Integer, ForeignKey("marketing.topics.id"))
+    signal_id = Column(Integer, ForeignKey("marketing.signals.id"))
+    
+    # Platform & publishing
+    platform = Column(SQLEnum(Platform), default=Platform.blog)
+    status = Column(SQLEnum(DraftStatus), default=DraftStatus.draft)
+    ghost_post_id = Column(String(255))  # Set after publishing to Ghost
+    ghost_url = Column(String(1024))
+    
+    # Metadata
+    tags = Column(ARRAY(String), default=[])
+    seo_title = Column(String(255))
+    seo_description = Column(String(160))
+    metadata = Column(JSON, default={})
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    published_at = Column(DateTime)
+    
+    # Relationships
+    topic = relationship("Topic", back_populates="drafts")
+    signal = relationship("Signal", back_populates="drafts")
+    blog_posts = relationship("BlogPost", back_populates="draft")
+    linkedin_posts = relationship("LinkedInPost", back_populates="draft")
+
+
+class BlogPost(Base):
+    """Published Ghost blog posts with metadata."""
+    __tablename__ = "blog_posts"
+    __table_args__ = (
+        Index("idx_blog_posts_draft_id", "draft_id"),
+        Index("idx_blog_posts_published_at", "published_at"),
+        Index("idx_blog_posts_ghost_post_id", "ghost_post_id"),
+        UniqueConstraint("draft_id", name="uq_blog_posts_draft_id"),
+    )
+    
+    id = Column(Integer, primary_key=True)
+    draft_id = Column(Integer, ForeignKey("marketing.drafts.id"), nullable=False)
+    ghost_post_id = Column(String(255), nullable=False)
+    slug = Column(String(255), unique=True)
+    tags = Column(ARRAY(String), default=[])
+    published_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    draft = relationship("Draft", back_populates="blog_posts")
+
+
+class LinkedInPost(Base):
+    """LinkedIn-specific posts generated from drafts."""
+    __tablename__ = "linkedin_posts"
+    __table_args__ = (
+        Index("idx_linkedin_posts_draft_id", "draft_id"),
+        Index("idx_linkedin_posts_posted_at", "posted_at"),
+    )
+    
+    id = Column(Integer, primary_key=True)
+    draft_id = Column(Integer, ForeignKey("marketing.drafts.id"), nullable=False)
+    content = Column(Text, nullable=False)
+    hook = Column(String(500))  # LinkedIn hook/opening line
+    posted_at = Column(DateTime)
+    linkedin_post_id = Column(String(255))  # LinkedIn post ID
+    
+    # Relationships
+    draft = relationship("Draft", back_populates="linkedin_posts")
+
+
+class VoiceRule(Base):
+    """Brand voice guidelines and restrictions."""
+    __tablename__ = "voice_rules"
+    __table_args__ = (
+        Index("idx_voice_rules_type", "rule_type"),
+        Index("idx_voice_rules_created_at", "created_at"),
+    )
+    
+    id = Column(Integer, primary_key=True)
+    rule_type = Column(SQLEnum(RuleType), nullable=False)  # never_say, always_say
+    content = Column(String(500), nullable=False)  # The actual rule text
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ContentPillar(Base):
+    """Content strategy pillars (Product, Engineering, Culture, etc.)."""
+    __tablename__ = "content_pillars"
+    __table_args__ = (
+        Index("idx_content_pillars_name", "name"),
+    )
+    
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False, unique=True)
+    description = Column(Text)
+    color = Column(String(7))  # Hex color for UI
+    target_audience = Column(String(255))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PerformanceSnapshot(Base):
+    """Analytics snapshots from Plausible or Ghost."""
+    __tablename__ = "performance_snapshots"
+    __table_args__ = (
+        Index("idx_perf_post_id", "post_id"),
+        Index("idx_perf_platform", "platform"),
+        Index("idx_perf_recorded_at", "recorded_at"),
+        Index("idx_perf_platform_recorded", "platform", "recorded_at"),
+    )
+    
+    id = Column(Integer, primary_key=True)
+    post_id = Column(Integer, ForeignKey("marketing.blog_posts.id"), nullable=False)
+    platform = Column(String(50), nullable=False)  # plausible, ghost, linkedin
+    views = Column(Integer, default=0)
+    engagement_rate = Column(Float)  # 0.0-1.0
+    recorded_at = Column(DateTime, default=datetime.utcnow)
+    metadata = Column(JSON, default={})  # Raw analytics data

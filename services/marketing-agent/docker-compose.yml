@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  marketing-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: marketing-agent
+    ports:
+      - "8210:8210"
+    environment:
+      MARKETING_DB_URL: postgresql+asyncpg://homelab:homelab@192.168.0.80:5432/homelab
+      GHOST_ADMIN_API_KEY: ${GHOST_ADMIN_API_KEY:-}
+      GHOST_URL: ${GHOST_URL:-https://layer8.schuettken.net}
+      MARKETING_PORT: 8210
+      LOG_LEVEL: INFO
+    
+    # Database health check — will retry until PostgreSQL is ready
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8210/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    
+    restart: unless-stopped
+    
+    # Disable tmpfs to ensure data persistence
+    # (not needed for stateless FastAPI service, but keeping for consistency)
+    networks:
+      - marketing
+
+networks:
+  marketing:
+    driver: bridge
