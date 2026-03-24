@@ -46,6 +46,8 @@ class Signal(Base):
         Index("idx_signals_created_at", "created_at"),
         Index("idx_signals_relevance", "relevance_score"),
         Index("idx_signals_kg_node", "kg_node_id"),
+        Index("idx_signals_status", "status"),
+        Index("idx_signals_pillar", "pillar_id"),
     )
     
     id = Column(Integer, primary_key=True)
@@ -53,6 +55,9 @@ class Signal(Base):
     url = Column(String(1024))
     source = Column(String(100), nullable=False)  # scout, manual, research, etc.
     relevance_score = Column(Float, default=0.0)  # 0.0-1.0
+    pillar_id = Column(Integer)  # Content pillar (1-6), for KG categorization
+    status = Column(String(50), default="new")  # new, read, used, archived
+    detected_at = Column(DateTime, default=datetime.utcnow)  # When signal was detected
     kg_node_id = Column(String(100))  # Reference to knowledge graph node
     created_at = Column(DateTime, default=datetime.utcnow)
     
@@ -61,18 +66,24 @@ class Signal(Base):
 
 
 class Topic(Base):
-    """Content pillars and topic categorization."""
+    """Content topics and topic categorization."""
     __tablename__ = "topics"
     __table_args__ = (
-        Index("idx_topics_pillar", "pillar"),
-        Index("idx_topics_audience", "audience_segment"),
+        Index("idx_topics_pillar_id", "pillar_id"),
+        Index("idx_topics_status", "status"),
+        Index("idx_topics_created_at", "created_at"),
     )
     
     id = Column(Integer, primary_key=True)
     name = Column(String(255), nullable=False, unique=True)
-    pillar = Column(String(100), nullable=False)  # e.g., "Product", "Thought Leadership"
+    pillar = Column(String(100))  # Legacy: human-readable pillar name
+    pillar_id = Column(Integer)  # KG pillar ID (1-6)
+    score = Column(Float, default=0.0)  # Topic relevance/viability score (0.0-1.0)
+    summary = Column(Text)  # Topic summary/context for draft writer
+    status = Column(String(50), default="candidate")  # candidate, selected, drafted, published, archived
     audience_segment = Column(String(100))  # e.g., "Enterprise", "SMB", "Developers"
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
     drafts = relationship("Draft", back_populates="topic")
@@ -178,18 +189,22 @@ class VoiceRule(Base):
 
 
 class ContentPillar(Base):
-    """Content strategy pillars (Product, Engineering, Culture, etc.)."""
+    """Content strategy pillars aligned with KG ContentPillar nodes (1-6)."""
     __tablename__ = "content_pillars"
     __table_args__ = (
         Index("idx_content_pillars_name", "name"),
+        Index("idx_content_pillars_kg_id", "kg_id"),
     )
     
     id = Column(Integer, primary_key=True)
+    kg_id = Column(Integer, unique=True)  # KG pillar ID (1-6) for KG sync
     name = Column(String(255), nullable=False, unique=True)
+    weight = Column(Float, default=0.0)  # Pillar weight in distribution (sums to 1.0)
     description = Column(Text)
     color = Column(String(7))  # Hex color for UI
     target_audience = Column(String(255))
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class PerformanceSnapshot(Base):
