@@ -6,6 +6,7 @@ from .approval import router as approval_router
 from .knowledge_graph import router as kg_router
 from .kg_status import router as kg_status_router
 from .publish import router as publish_router
+from .scout import router as scout_router
 
 __all__ = [
     "signals_router",
@@ -15,4 +16,5 @@ __all__ = [
     "kg_router",
     "kg_status_router",
     "publish_router",
+    "scout_router",
 ]
