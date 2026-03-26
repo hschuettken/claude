@@ -89,6 +89,12 @@ views:
           - type: entities
             title: "Smart Charging"
             entities:
+              - entity: sensor.ev_forecast_needed_kwh
+                name: "Forecast Needed (kWh)"
+                icon: mdi:battery-charging
+              - entity: sensor.ev_forecast_needed_soc
+                name: "Forecast Needed (SoC %)"
+                icon: mdi:battery-charging-80
               - entity: sensor.smart_ev_charging_kwh_remaining
                 name: "kWh Remaining"
                 icon: mdi:battery-charging
