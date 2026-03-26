@@ -5,11 +5,13 @@ Couple voting, decision history, conflict resolution endpoints.
 Can be included in FastAPI app via APIRouter or included in main.py
 """
 
+import asyncpg
 import logging
+import os
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, status, Depends
 from family_os_models import (
     ConflictAnalysisRequest,
     ConflictAnalysisResponse,
@@ -38,6 +40,36 @@ router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
+# Global service instance
+_service: Optional[FamilyOSService] = None
+
+
+async def get_service() -> FamilyOSService:
+    """Get or create Family OS service instance."""
+    global _service
+    if not _service:
+        # Get database URL from environment
+        db_url = os.getenv(
+            "FAMILY_OS_DB_URL",
+            os.getenv("DATABASE_URL", "postgresql://homelab:homelab@192.168.0.80:5432/homelab")
+        )
+        
+        try:
+            # Create connection pool
+            pool = await asyncpg.create_pool(
+                db_url,
+                min_size=1,
+                max_size=10,
+                command_timeout=60,
+            )
+            _service = FamilyOSService(db_client=pool, llm_client=None)
+            logger.info("Family OS service initialized with database connection")
+        except Exception as e:
+            logger.error(f"Failed to initialize Family OS service: {e}")
+            raise
+    
+    return _service
+
 
 # ============================================================================
 # Decision Management
@@ -53,7 +85,7 @@ async def create_decision(
     household_id: UUID,
     user_id: UUID,  # In real app, from JWT token
     request: DecisionCreateRequest,
-    service: FamilyOSService = None,
+    service: FamilyOSService = Depends(get_service),
 ) -> DecisionResponse:
     """
     Create a new shared decision for the couple/household.
@@ -82,7 +114,7 @@ async def create_decision(
 )
 async def get_decision(
     decision_id: UUID,
-    service: FamilyOSService = None,
+    service: FamilyOSService = Depends(get_service),
 ) -> DecisionResponse:
     """Get a specific decision with current vote count."""
     decision = await service.get_decision(decision_id)
@@ -101,7 +133,7 @@ async def list_decisions(
     status_filter: Optional[DecisionStatus] = Query(None, alias="status"),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    service: FamilyOSService = None,
+    service: FamilyOSService = Depends(get_service),
 ) -> DecisionListResponse:
     """
     List decisions for a household.
@@ -142,7 +174,7 @@ async def cast_vote(
     decision_id: UUID,
     voter_id: UUID,
     request: VoteCreateRequest,
-    service: FamilyOSService = None,
+    service: FamilyOSService = Depends(get_service),
 ) -> dict:
     """
     Cast or update a vote on a decision.
@@ -169,7 +201,7 @@ async def cast_vote(
 )
 async def get_vote_summary(
     decision_id: UUID,
-    service: FamilyOSService = None,
+    service: FamilyOSService = Depends(get_service),
 ) -> VoteSummaryResponse:
     """Get current votes and summary for a decision."""
     summary = await service._get_vote_summary(decision_id)
@@ -201,7 +233,7 @@ async def resolve_decision(
     outcome: str,
     method: ResolutionMethod,
     notes: Optional[str] = None,
-    service: FamilyOSService = None,
+    service: FamilyOSService = Depends(get_service),
 ) -> DecisionResponse:
     """
     Mark a decision as resolved.
@@ -236,7 +268,7 @@ async def resolve_decision(
 async def archive_decision(
     household_id: UUID,
     request: DecisionHistoryCreateRequest,
-    service: FamilyOSService = None,
+    service: FamilyOSService = Depends(get_service),
 ) -> DecisionHistoryResponse:
     """
     Move a resolved decision to historical archive.
@@ -267,7 +299,7 @@ async def list_decision_history(
     household_id: UUID,
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    service: FamilyOSService = None,
+    service: FamilyOSService = Depends(get_service),
 ) -> DecisionHistoryListResponse:
     """Get historical decisions for a household."""
     history, total = await service.get_decision_history(
@@ -296,7 +328,7 @@ async def list_decision_history(
 )
 async def detect_conflict(
     decision_id: UUID,
-    service: FamilyOSService = None,
+    service: FamilyOSService = Depends(get_service),
 ) -> Optional[dict]:
     """
     Analyze if there's a conflict in the voting.
@@ -315,7 +347,7 @@ async def detect_conflict(
 async def get_conflict_resolution(
     decision_id: UUID,
     request: Optional[ConflictAnalysisRequest] = None,
-    service: FamilyOSService = None,
+    service: FamilyOSService = Depends(get_service),
 ) -> dict:
     """
     Get AI-powered suggestions for resolving a decision conflict.
@@ -362,7 +394,7 @@ async def get_conflict_resolution(
 )
 async def get_household_stats(
     household_id: UUID,
-    service: FamilyOSService = None,
+    service: FamilyOSService = Depends(get_service),
 ) -> HouseholdStatsResponse:
     """
     Get analytics on the household's decision-making patterns.
