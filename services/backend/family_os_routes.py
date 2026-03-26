@@ -64,12 +64,6 @@ async def create_decision(
     - **voting_method**: binary (yes/no) or ranked_choice
     - **deadline**: Optional deadline for voting
     """
-    if not service:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Service not initialized",
-        )
-    
     try:
         decision = await service.create_decision(household_id, user_id, request)
         return decision
@@ -91,12 +85,6 @@ async def get_decision(
     service: FamilyOSService = None,
 ) -> DecisionResponse:
     """Get a specific decision with current vote count."""
-    if not service:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Service not initialized",
-        )
-    
     decision = await service.get_decision(decision_id)
     if not decision:
         raise HTTPException(status_code=404, detail="Decision not found")
@@ -122,12 +110,6 @@ async def list_decisions(
     - **limit**: Number of results (max 100)
     - **offset**: Pagination offset
     """
-    if not service:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Service not initialized",
-        )
-    
     decisions, total = await service.list_decisions(
         household_id,
         status=status_filter,
@@ -169,12 +151,6 @@ async def cast_vote(
     - **rationale**: Why you're voting this way
     - **confidence**: 0.0-1.0 (how sure you are)
     """
-    if not service:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Service not initialized",
-        )
-    
     try:
         result = await service.cast_vote(decision_id, voter_id, request)
         return result
@@ -196,12 +172,6 @@ async def get_vote_summary(
     service: FamilyOSService = None,
 ) -> VoteSummaryResponse:
     """Get current votes and summary for a decision."""
-    if not service:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Service not initialized",
-        )
-    
     summary = await service._get_vote_summary(decision_id)
     if not summary:
         raise HTTPException(status_code=404, detail="Decision not found")
@@ -240,12 +210,6 @@ async def resolve_decision(
     - **method**: How was it decided (consensus, majority, compromise, etc.)
     - **notes**: Explanation of the resolution
     """
-    if not service:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Service not initialized",
-        )
-    
     try:
         result = await service.resolve_decision(
             decision_id, outcome, method, notes
@@ -281,12 +245,6 @@ async def archive_decision(
     - **impact_assessment**: Was it a good call?
     - **learned_lessons**: What did you learn
     """
-    if not service:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Service not initialized",
-        )
-    
     try:
         history = await service.archive_decision(household_id, request)
         return DecisionHistoryResponse(**history)
@@ -312,12 +270,6 @@ async def list_decision_history(
     service: FamilyOSService = None,
 ) -> DecisionHistoryListResponse:
     """Get historical decisions for a household."""
-    if not service:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Service not initialized",
-        )
-    
     history, total = await service.get_decision_history(
         household_id, limit=limit, offset=offset
     )
@@ -351,12 +303,6 @@ async def detect_conflict(
     
     Returns conflict type and severity if detected, None if consensus.
     """
-    if not service:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Service not initialized",
-        )
-    
     conflict = await service.detect_conflict(decision_id)
     return conflict
 
@@ -378,12 +324,6 @@ async def get_conflict_resolution(
     
     Returns multiple suggested approaches with likelihood of success.
     """
-    if not service:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Service not initialized",
-        )
-    
     # Detect conflict type first
     conflict = await service.detect_conflict(decision_id)
     if not conflict:
@@ -432,12 +372,6 @@ async def get_household_stats(
     - Decision trends
     - Recent conflicts
     """
-    if not service:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Service not initialized",
-        )
-    
     # Get all decisions for stats
     decisions, total = await service.list_decisions(household_id, limit=100)
     
