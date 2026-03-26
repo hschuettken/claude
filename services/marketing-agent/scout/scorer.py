@@ -85,8 +85,8 @@ def _parse_publish_date(date_str: Optional[str]) -> Optional[datetime]:
             if "T" in date_str:
                 return datetime.fromisoformat(date_str.split("T")[0])
             
-            # BUG: Should use `fmt` but hardcoded to "%Y-%m-%d"
-            return datetime.strptime(date_str, "%Y-%m-%d")
+            # FIXED: Use loop variable fmt instead of hardcoded format
+            return datetime.strptime(date_str, fmt)
         except Exception:
             continue
     
