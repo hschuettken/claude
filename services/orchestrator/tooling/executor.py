@@ -145,6 +145,7 @@ class ToolExecutor:
             "orbit_check_list_item",
             "orbit_create_project",
             "orbit_decompose_project",
+            "orbit_detect_intent",
         ):
             self._dispatch[name] = (self._orbit_tools, name)
 

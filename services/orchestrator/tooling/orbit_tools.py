@@ -329,6 +329,40 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "orbit_detect_intent",
+            "description": (
+                "Detect intent from user input (message, note, voice) and auto-create Orbit task. "
+                "Uses Claude to parse natural language, infer priority/due date, and create task. "
+                "Returns detected intent confidence, suggested task title, and created task ID (if any)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "User input text containing the intent (e.g., 'I should review the energy bill')",
+                    },
+                    "source_type": {
+                        "type": "string",
+                        "enum": ["chat", "voice", "message", "meeting", "email"],
+                        "description": "Source of the intent (default: chat)",
+                    },
+                    "source_id": {
+                        "type": "string",
+                        "description": "Reference ID (message_id, transcript_id, etc.) — optional",
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "If known, force task creation in this project (UUID) — optional",
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+    },
 ]
 
 
@@ -611,5 +645,69 @@ class OrbitTools:
             "Decomposed project %s: generated %d subtasks",
             project_id,
             len(data.get("subtasks", [])),
+        )
+        return data
+
+    # ------------------------------------------------------------------
+    # Intent Detection (Task 130)
+    # ------------------------------------------------------------------
+
+    async def orbit_detect_intent(
+        self,
+        text: str,
+        source_type: str = "chat",
+        source_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Detect intent from user input and auto-create Orbit task.
+        
+        Uses Claude NLP to parse natural language, infer priority, due date,
+        and duration, then creates task if confidence >= 65%.
+        
+        Returns:
+            {
+                "signal_id": "uuid of intent signal",
+                "detected_intent": {
+                    "has_intent": bool,
+                    "intent_type": "task|reminder|note|decision",
+                    "confidence": 0.0-1.0,
+                    "task_title": str,
+                    "inferred_priority": "low|medium|high|urgent",
+                    "inferred_due_date": "YYYY-MM-DD",
+                    "inferred_duration_min": int,
+                    "suggested_project_name": str,
+                    "reasoning": str,
+                },
+                "task_created": bool,
+                "task_id": "uuid or null",
+                "message": str,
+            }
+        """
+        client = await self._get_client()
+        body: dict[str, Any] = {
+            "text": text,
+            "source_type": source_type,
+        }
+        if source_id:
+            body["source_id"] = source_id
+        if project_id:
+            body["project_id"] = project_id
+
+        resp = await client.post(
+            _url("/intent/detect"),
+            json=body,
+            headers=_headers(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        
+        task_id = data.get("task_id")
+        task_title = data.get("task_title")
+        confidence = data.get("detected_intent", {}).get("confidence", 0.0)
+        
+        logger.info(
+            "Intent detected in text (confidence: %.0f%%): %s",
+            confidence * 100,
+            f"task created: {task_title} (id={task_id})" if task_id else "no task created",
         )
         return data
