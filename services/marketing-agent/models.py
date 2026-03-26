@@ -290,3 +290,96 @@ class ApprovalQueue(Base):
     assigned_to = Column(String(255), default="henning")  # Reviewer
     orbit_task_id = Column(String(255))  # Link to Orbit task
     discord_notified_at = Column(DateTime)  # When Discord notification was sent
+
+
+class Storyline(Base):
+    """
+    Content storyline — 12-week horizontal timeline with pillar distribution,
+    arc narrative, and drag-to-reschedule capability.
+    
+    Represents a strategic multi-week narrative arc composed of:
+    - Multiple content pieces distributed across 12 weeks
+    - Alignment to content pillars
+    - Arc narrative metadata (hook, theme, resolution)
+    - Drag-enabled weekly slot assignments
+    """
+    __tablename__ = "storylines"
+    __table_args__ = (
+        Index("idx_storylines_created_at", "created_at"),
+        Index("idx_storylines_start_week", "start_week"),
+        Index("idx_storylines_status", "status"),
+        {"schema": "marketing"}
+    )
+    
+    id = Column(Integer, primary_key=True)
+    
+    # Timeline metadata
+    name = Column(String(255), nullable=False)  # e.g., "Q2 2025 — Data Governance Arc"
+    description = Column(Text)  # Arc narrative, theme, strategic intent
+    start_week = Column(Integer, nullable=False)  # ISO week number (e.g., 13 for Q2 start)
+    duration_weeks = Column(Integer, default=12)  # Typically 12 weeks
+    
+    # Arc narrative
+    arc_hook = Column(String(500))  # Opening hook to capture attention
+    arc_theme = Column(String(255))  # Central theme/story
+    arc_resolution = Column(String(500))  # How the arc concludes/resolves
+    
+    # Content distribution
+    pillar_distribution = Column(JSON, default={})  # {pillar_id: percentage, ...}
+    # e.g., {"1": 0.45, "2": 0.20, "3": 0.15, "4": 0.10, "5": 0.07, "6": 0.03}
+    
+    # Status
+    status = Column(String(50), default="draft")  # draft, active, paused, archived
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    slots = relationship("StorylineSlot", back_populates="storyline", cascade="all, delete-orphan")
+
+
+class StorylineSlot(Base):
+    """
+    A single week slot within a storyline.
+    
+    Represents one week within the 12-week timeline, containing:
+    - Week number (1-12 relative to storyline start)
+    - Assigned draft/post (drag-to-reschedule)
+    - Pillar assignment
+    - Publishing target date
+    """
+    __tablename__ = "storyline_slots"
+    __table_args__ = (
+        Index("idx_storyline_slots_storyline_id", "storyline_id"),
+        Index("idx_storyline_slots_draft_id", "draft_id"),
+        Index("idx_storyline_slots_week_number", "week_number"),
+        UniqueConstraint("storyline_id", "week_number", name="uq_storyline_slot_week"),
+        {"schema": "marketing"}
+    )
+    
+    id = Column(Integer, primary_key=True)
+    storyline_id = Column(Integer, ForeignKey("marketing.storylines.id"), nullable=False)
+    
+    # Week positioning
+    week_number = Column(Integer, nullable=False)  # 1-12
+    publish_date = Column(DateTime)  # Target publication date for this slot
+    
+    # Content assignment (drag-to-reschedule)
+    draft_id = Column(Integer, ForeignKey("marketing.drafts.id"))  # Assigned draft, if any
+    pillar_id = Column(Integer)  # Content pillar for this slot (1-6)
+    
+    # Slot status
+    status = Column(String(50), default="open")  # open, assigned, scheduled, published
+    
+    # Rescheduling tracking
+    last_rescheduled_at = Column(DateTime)  # Track drag-to-reschedule operations
+    rescheduled_by = Column(String(255))  # User who performed reschedule
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    storyline = relationship("Storyline", back_populates="slots")
+    draft = relationship("Draft", foreign_keys=[draft_id])
