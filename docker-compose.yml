@@ -47,7 +47,7 @@ services:
 
   pv-forecast:
     build:
-      context: .
+      context: services/marketing-agent
       dockerfile: services/pv-forecast/Dockerfile
     restart: unless-stopped
     env_file: .env
@@ -58,7 +58,7 @@ services:
 
   smart-ev-charging:
     build:
-      context: .
+      context: services/marketing-agent
       dockerfile: services/smart-ev-charging/Dockerfile
     restart: unless-stopped
     env_file: .env
@@ -69,7 +69,7 @@ services:
 
   orchestrator:
     build:
-      context: .
+      context: services/marketing-agent
       dockerfile: services/orchestrator/Dockerfile
     restart: unless-stopped
     env_file: .env
@@ -94,7 +94,7 @@ services:
 
   ev-forecast:
     build:
-      context: .
+      context: services/marketing-agent
       dockerfile: services/ev-forecast/Dockerfile
     restart: unless-stopped
     env_file: .env
@@ -105,7 +105,7 @@ services:
 
   dashboard:
     build:
-      context: .
+      context: services/marketing-agent
       dockerfile: services/dashboard/Dockerfile
     restart: unless-stopped
     env_file: .env
@@ -125,7 +125,7 @@ services:
 
   ollama-router:
     build:
-      context: ./services/ollama-router
+      context: services/marketing-agent/services/ollama-router
     container_name: claude-ollama-router-1
     restart: unless-stopped
     ports:
@@ -144,7 +144,7 @@ services:
 
   hems:
     build:
-      context: .
+      context: services/marketing-agent
       dockerfile: services/hems/Dockerfile
     container_name: claude-hems-1
     restart: unless-stopped
@@ -163,8 +163,8 @@ services:
 
   marketing-agent:
     build:
-      context: .
-      dockerfile: services/marketing-agent/Dockerfile
+      context: services/marketing-agent
+      dockerfile: Dockerfile
     container_name: claude-marketing-agent-1
     restart: unless-stopped
     env_file: .env
@@ -186,7 +186,7 @@ services:
   # --- Template for new services ---
   # my-new-service:
   #   build:
-  #     context: .
+  #     context: services/marketing-agent
   #     dockerfile: services/my-new-service/Dockerfile
   #   restart: unless-stopped
   #   env_file: .env
