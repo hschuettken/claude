@@ -278,6 +278,10 @@ class SmartEVChargingService(BaseService):
                 session_energy_kwh=round(wallbox.session_energy_kwh, 2),
             )
             # Force immediate re-evaluation (already in a cycle, so just log)
+            # --- R3: Smart mode sync on plug-in ---
+            # On plug-in event: sync forecast values → manual targets
+            await self._sync_forecast_to_manual_targets()
+        
         self._last_vehicle_connected = wallbox.vehicle_connected
 
         # --- BUG #2 FIX: Cumulative grid kWh tracker ---
