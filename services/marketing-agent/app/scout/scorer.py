@@ -77,15 +77,22 @@ def _parse_publish_date(date_str: Optional[str]) -> Optional[datetime]:
     if not date_str:
         return None
     
-    try:
-        # ISO format: 2025-03-23T...
-        if "T" in date_str:
+    # ISO format with time component: strip time part first
+    if "T" in date_str:
+        try:
             return datetime.fromisoformat(date_str.split("T")[0])
-        
-        # Other common formats can be added here
-        return None
-    except Exception:
-        return None
+        except Exception:
+            pass
+    
+    # Try multiple date formats
+    formats = ["%Y-%m-%d", "%Y/%m/%d", "%d.%m.%Y", "%m-%d-%Y"]
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str, fmt)
+        except Exception:
+            continue
+    
+    return None
 
 
 def _get_recency_boost(published: Optional[str]) -> float:

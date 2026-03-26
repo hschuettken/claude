@@ -825,6 +825,60 @@ class EVForecastService:
             },
         )
 
+        # Plan: Needed SoC (target SoC for today)
+        self.mqtt.publish_ha_discovery(
+            "sensor", "ev_forecast_needed_soc", node_id=node, config={
+                "name": "EV Forecast Needed SoC",
+                "device": device,
+                "state_topic": plan_topic,
+                "value_template": (
+                    "{% if value_json.days and value_json.days | length > 0 %}"
+                    "{{ value_json.days[0].soc_needed_pct }}"
+                    "{% else %}0{% endif %}"
+                ),
+                "unit_of_measurement": "%",
+                "device_class": "battery",
+                "state_class": "measurement",
+                "icon": "mdi:battery-check-outline",
+            },
+        )
+
+        # Plan: Needed kWh (energy needed to reach target)
+        self.mqtt.publish_ha_discovery(
+            "sensor", "ev_forecast_needed_kwh", node_id=node, config={
+                "name": "EV Forecast Needed kWh",
+                "device": device,
+                "state_topic": plan_topic,
+                "value_template": (
+                    "{% if value_json.days and value_json.days | length > 0 %}"
+                    "{{ value_json.days[0].energy_needed_kwh }}"
+                    "{% else %}0{% endif %}"
+                ),
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "state_class": "measurement",
+                "icon": "mdi:lightning-bolt-outline",
+            },
+        )
+
+        # Plan: kWh to charge left (to_charge - already charged)
+        self.mqtt.publish_ha_discovery(
+            "sensor", "ev_kwh_to_charge_left", node_id=node, config={
+                "name": "EV kWh to Charge Left",
+                "device": device,
+                "state_topic": plan_topic,
+                "value_template": (
+                    "{% if value_json.days and value_json.days | length > 0 %}"
+                    "{{ value_json.days[0].energy_to_charge_kwh }}"
+                    "{% else %}0{% endif %}"
+                ),
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "state_class": "measurement",
+                "icon": "mdi:battery-charging",
+            },
+        )
+
         # Plan: Charge Mode
         self.mqtt.publish_ha_discovery(
             "sensor", "recommended_mode", node_id=node, config={
