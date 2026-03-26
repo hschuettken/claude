@@ -47,7 +47,7 @@ services:
 
   pv-forecast:
     build:
-      context: services/marketing-agent
+      context: .
       dockerfile: services/pv-forecast/Dockerfile
     restart: unless-stopped
     env_file: .env
@@ -58,7 +58,7 @@ services:
 
   smart-ev-charging:
     build:
-      context: services/marketing-agent
+      context: .
       dockerfile: services/smart-ev-charging/Dockerfile
     restart: unless-stopped
     env_file: .env
@@ -69,7 +69,7 @@ services:
 
   orchestrator:
     build:
-      context: services/marketing-agent
+      context: .
       dockerfile: services/orchestrator/Dockerfile
     restart: unless-stopped
     env_file: .env
@@ -94,7 +94,7 @@ services:
 
   ev-forecast:
     build:
-      context: services/marketing-agent
+      context: .
       dockerfile: services/ev-forecast/Dockerfile
     restart: unless-stopped
     env_file: .env
@@ -105,7 +105,7 @@ services:
 
   dashboard:
     build:
-      context: services/marketing-agent
+      context: .
       dockerfile: services/dashboard/Dockerfile
     restart: unless-stopped
     env_file: .env
@@ -125,7 +125,7 @@ services:
 
   ollama-router:
     build:
-      context: services/marketing-agent/services/ollama-router
+      context: services/ollama-router
     container_name: claude-ollama-router-1
     restart: unless-stopped
     ports:
@@ -144,7 +144,7 @@ services:
 
   hems:
     build:
-      context: services/marketing-agent
+      context: .
       dockerfile: services/hems/Dockerfile
     container_name: claude-hems-1
     restart: unless-stopped
@@ -186,7 +186,7 @@ services:
   # --- Template for new services ---
   # my-new-service:
   #   build:
-  #     context: services/marketing-agent
+  #     context: .
   #     dockerfile: services/my-new-service/Dockerfile
   #   restart: unless-stopped
   #   env_file: .env
