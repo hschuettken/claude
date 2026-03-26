@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from fastapi import FastAPI, status
@@ -409,7 +409,7 @@ async def get_vault_stats() -> dict[str, Any]:
             by_pillar[pillar_name] = by_pillar.get(pillar_name, 0) + 1
     
     # Count this week (past 7 days)
-    week_ago = datetime.utcnow() - timedelta(days=7)
+    week_ago = datetime.now(timezone.utc) - timedelta(days=7)
     this_week = sum(
         1 for card in cards
         if datetime.fromisoformat(card.created_at.replace("Z", "+00:00")) > week_ago
