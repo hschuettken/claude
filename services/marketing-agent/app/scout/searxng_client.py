@@ -2,6 +2,7 @@
 
 import logging
 import httpx
+import asyncio
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 from datetime import datetime
@@ -30,13 +31,13 @@ class SearXNGClient:
     - Timeout/error handling with graceful degradation
     """
     
-    def __init__(self, base_url: str = "http://192.168.0.84:8080", timeout: float = 30.0):
+    def __init__(self, base_url: str = "http://192.168.0.84:8080", timeout: float = 5.0):
         """
         Initialize SearXNG client.
         
         Args:
             base_url: SearXNG base URL (default: internal LXC)
-            timeout: HTTP request timeout in seconds
+            timeout: HTTP request timeout in seconds (default: 5.0, matches health_check)
         """
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
@@ -49,7 +50,7 @@ class SearXNGClient:
         language: str = "en",
     ) -> List[SearchResult]:
         """
-        Execute a search query against SearXNG.
+        Execute a search query against SearXNG with retry logic and error handling.
         
         Args:
             query: Search query string
@@ -58,12 +59,11 @@ class SearXNGClient:
             language: Language code (default: en)
         
         Returns:
-            List of SearchResult objects
-        
-        Raises:
-            httpx.RequestError: Network or timeout error (caller should handle)
+            List of SearchResult objects (empty list on failure after retries)
         """
         url = f"{self.base_url}/search"
+        max_retries = 3
+        base_backoff = 0.5  # seconds
         
         params = {
             "q": query,
@@ -76,41 +76,83 @@ class SearXNGClient:
         if engines:
             params["engines"] = ",".join(engines)
         
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(url, params=params)
-                response.raise_for_status()
-                
-                data = response.json()
-                results = []
-                
-                for result in data.get("results", [])[:max_results]:
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    response = await client.get(url, params=params)
+                    response.raise_for_status()
+                    
+                    # Parse JSON with explicit error handling
                     try:
-                        sr = SearchResult(
-                            title=result.get("title", ""),
-                            url=result.get("url", ""),
-                            content=result.get("content", ""),
-                            engine=result.get("engine", "unknown"),
-                            score=result.get("score"),
-                            published=result.get("publishedDate"),
+                        data = response.json()
+                    except ValueError as json_err:
+                        logger.error(
+                            f"SearXNG malformed JSON (attempt {attempt + 1}/{max_retries}): "
+                            f"query='{query}', status={response.status_code}, error={json_err}"
                         )
-                        results.append(sr)
-                    except Exception as e:
-                        logger.warning(f"Failed to parse result: {e}")
-                        continue
-                
-                logger.debug(f"SearXNG returned {len(results)} results for '{query}'")
-                return results
+                        # Server is up but broke response — don't retry
+                        return []
+                    
+                    results = []
+                    for result in data.get("results", [])[:max_results]:
+                        try:
+                            sr = SearchResult(
+                                title=result.get("title", ""),
+                                url=result.get("url", ""),
+                                content=result.get("content", ""),
+                                engine=result.get("engine", "unknown"),
+                                score=result.get("score"),
+                                published=result.get("publishedDate"),
+                            )
+                            results.append(sr)
+                        except Exception as e:
+                            logger.warning(f"Failed to parse result: {type(e).__name__}: {e}")
+                            continue
+                    
+                    logger.debug(f"SearXNG returned {len(results)} results for '{query}'")
+                    return results
+            
+            except httpx.ConnectError as e:
+                logger.error(
+                    f"SearXNG connection refused (attempt {attempt + 1}/{max_retries}): "
+                    f"query='{query}', base_url={self.base_url}, error={e}"
+                )
+                # Transient — retry with backoff
+                if attempt < max_retries - 1:
+                    backoff_secs = base_backoff * (2 ** attempt)
+                    await asyncio.sleep(backoff_secs)
+            
+            except httpx.TimeoutException as e:
+                logger.error(
+                    f"SearXNG timeout (attempt {attempt + 1}/{max_retries}): "
+                    f"query='{query}', timeout={self.timeout}s, error={e}"
+                )
+                # Transient — retry with backoff
+                if attempt < max_retries - 1:
+                    backoff_secs = base_backoff * (2 ** attempt)
+                    await asyncio.sleep(backoff_secs)
+            
+            except httpx.HTTPStatusError as e:
+                logger.error(
+                    f"SearXNG HTTP error (attempt {attempt + 1}/{max_retries}): "
+                    f"query='{query}', status={e.response.status_code}, error={e}"
+                )
+                # Non-transient (4xx/5xx) — don't retry
+                return []
+            
+            except Exception as e:
+                logger.error(
+                    f"SearXNG search failed (attempt {attempt + 1}/{max_retries}): "
+                    f"query='{query}', error_type={type(e).__name__}, error={e}"
+                )
+                # Unknown error — retry with backoff
+                if attempt < max_retries - 1:
+                    backoff_secs = base_backoff * (2 ** attempt)
+                    await asyncio.sleep(backoff_secs)
         
-        except httpx.TimeoutException:
-            logger.error(f"SearXNG timeout for query '{query}'")
-            raise
-        except httpx.HTTPStatusError as e:
-            logger.error(f"SearXNG HTTP error {e.status_code}: {e.response.text[:200]}")
-            raise
-        except Exception as e:
-            logger.error(f"SearXNG request failed: {e}")
-            raise
+        # All retries exhausted
+        logger.error(f"SearXNG search exhausted {max_retries} attempts: query='{query}'")
+        return []
     
     async def health_check(self) -> bool:
         """
