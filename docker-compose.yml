@@ -67,6 +67,30 @@ services:
     networks:
       - homelab
 
+  backend:
+    build:
+      context: .
+      dockerfile: services/backend/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PYTHONPATH: "/app:/app/shared"
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      PORT: 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - backend_data:/app/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.homelab-backend-api.rule=Host(`${TRAEFIK_BACKEND_HOST:-backend.local.schuettken.net}`)"
+      - "traefik.http.routers.homelab-backend-api.entrypoints=${TRAEFIK_ENTRYPOINT:-https}"
+      - "traefik.http.routers.homelab-backend-api.tls=true"
+      - "traefik.http.services.homelab-backend-api.loadbalancer.server.port=8000"
+    networks:
+      - homelab
+      - traefik
+
   orchestrator:
     build:
       context: .
@@ -201,6 +225,7 @@ services:
 # =============================================================
 
 volumes:
+  backend_data:
   hems_data:
   marketing_agent_data:
   pv_forecast_data:
