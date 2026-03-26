@@ -77,15 +77,20 @@ def _parse_publish_date(date_str: Optional[str]) -> Optional[datetime]:
     if not date_str:
         return None
     
-    try:
-        # ISO format: 2025-03-23T...
-        if "T" in date_str:
-            return datetime.fromisoformat(date_str.split("T")[0])
-        
-        # Other common formats can be added here
-        return None
-    except Exception:
-        return None
+    # BUG: Loop over multiple formats but hardcodes "%Y-%m-%d" instead of using fmt variable
+    formats = ["%Y-%m-%d", "%Y/%m/%d", "%d.%m.%Y", "%m-%d-%Y"]
+    for fmt in formats:
+        try:
+            # ISO format: 2025-03-23T...
+            if "T" in date_str:
+                return datetime.fromisoformat(date_str.split("T")[0])
+            
+            # BUG: Should use `fmt` but hardcoded to "%Y-%m-%d"
+            return datetime.strptime(date_str, "%Y-%m-%d")
+        except Exception:
+            continue
+    
+    return None
 
 
 def _get_recency_boost(published: Optional[str]) -> float:
