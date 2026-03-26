@@ -5,10 +5,13 @@ Handles couple voting, decision history, conflict resolution.
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime
 from typing import Any, Optional
 from uuid import UUID
+
+import asyncpg
 
 from family_os_models import (
     ConflictType,
@@ -19,6 +22,7 @@ from family_os_models import (
     ResolutionMethod,
     VotingMethod,
     VoteCreateRequest,
+    VoteResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,7 +36,7 @@ class FamilyOSService:
         Initialize FamilyOS service.
         
         Args:
-            db_client: Database connection client (PostgreSQL)
+            db_client: Database connection client (PostgreSQL pool or connection)
             llm_client: LLM client for generating conflict resolutions
         """
         self.db = db_client
@@ -67,8 +71,8 @@ class FamilyOSService:
                 household_id, title, description, category,
                 status, voting_method, options, created_by, deadline
             ) VALUES (
-                %s, %s, %s, %s,
-                %s, %s, %s, %s, %s
+                $1, $2, $3, $4,
+                $5, $6, $7, $8, $9
             )
             RETURNING id, household_id, title, description, category,
                       status, voting_method, options, created_by,
@@ -76,18 +80,20 @@ class FamilyOSService:
                       resolution_notes, updated_at
         """
         
-        result = await self.db.fetchrow(
-            query,
-            household_id,
-            request.title,
-            request.description,
-            request.category,
-            DecisionStatus.OPEN,
-            request.voting_method,
-            request.options or [],
-            user_id,
-            request.deadline,
-        )
+        # Use asyncpg syntax ($1, $2, etc.)
+        async with self.db.acquire() as conn:
+            result = await conn.fetchrow(
+                query,
+                household_id,
+                request.title,
+                request.description,
+                request.category,
+                DecisionStatus.OPEN.value,
+                request.voting_method.value,
+                json.dumps(request.options or []),
+                user_id,
+                request.deadline,
+            )
         
         return self._row_to_decision(result)
 
@@ -97,10 +103,12 @@ class FamilyOSService:
             SELECT d.*, COUNT(v.id) as vote_count
             FROM family_os.decisions d
             LEFT JOIN family_os.votes v ON d.id = v.decision_id
-            WHERE d.id = %s
+            WHERE d.id = $1
             GROUP BY d.id
         """
-        result = await self.db.fetchrow(query, decision_id)
+        async with self.db.acquire() as conn:
+            result = await conn.fetchrow(query, decision_id)
+        
         if result:
             return self._row_to_decision(result)
         return None
@@ -124,33 +132,43 @@ class FamilyOSService:
         Returns:
             Tuple of (decisions, total_count)
         """
-        where_clause = "WHERE d.household_id = %s"
+        where_clause = "WHERE d.household_id = $1"
         params = [household_id]
+        param_count = 1
         
         if status:
-            where_clause += " AND d.status = %s"
-            params.append(status)
+            param_count += 1
+            where_clause += f" AND d.status = ${param_count}"
+            params.append(status.value)
 
         # Get total count
         count_query = f"""
             SELECT COUNT(*) FROM family_os.decisions d
             {where_clause}
         """
-        total = await self.db.fetchval(count_query, *params)
-
-        # Get paginated results with vote counts
-        query = f"""
-            SELECT d.*, COUNT(v.id) as vote_count
-            FROM family_os.decisions d
-            LEFT JOIN family_os.votes v ON d.id = v.decision_id
-            {where_clause}
-            GROUP BY d.id
-            ORDER BY d.created_at DESC
-            LIMIT %s OFFSET %s
-        """
-        params.extend([limit, offset])
         
-        results = await self.db.fetch(query, *params)
+        async with self.db.acquire() as conn:
+            total = await conn.fetchval(count_query, *params)
+
+            # Get paginated results with vote counts
+            param_count += 1
+            limit_param = param_count
+            param_count += 1
+            offset_param = param_count
+            
+            query = f"""
+                SELECT d.*, COUNT(v.id) as vote_count
+                FROM family_os.decisions d
+                LEFT JOIN family_os.votes v ON d.id = v.decision_id
+                {where_clause}
+                GROUP BY d.id
+                ORDER BY d.created_at DESC
+                LIMIT ${limit_param} OFFSET ${offset_param}
+            """
+            params.extend([limit, offset])
+            
+            results = await conn.fetch(query, *params)
+        
         decisions = [self._row_to_decision(row) for row in results]
         
         return decisions, total
@@ -176,7 +194,7 @@ class FamilyOSService:
         query = """
             INSERT INTO family_os.votes (
                 decision_id, voter_id, vote_value, rationale, confidence
-            ) VALUES (%s, %s, %s, %s, %s)
+            ) VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (decision_id, voter_id)
             DO UPDATE SET
                 vote_value = EXCLUDED.vote_value,
@@ -186,23 +204,23 @@ class FamilyOSService:
             RETURNING id, decision_id, voter_id, vote_value, rationale, confidence, created_at
         """
         
-        vote = await self.db.fetchrow(
-            query,
-            decision_id,
-            voter_id,
-            request.vote_value,
-            request.rationale,
-            request.confidence,
-        )
+        async with self.db.acquire() as conn:
+            vote = await conn.fetchrow(
+                query,
+                decision_id,
+                voter_id,
+                request.vote_value,
+                request.rationale,
+                request.confidence,
+            )
         
         # Check if we now have consensus or need conflict resolution
         summary = await self._get_vote_summary(decision_id)
         
-        if summary["consensus_reached"]:
+        if summary.get("consensus_reached"):
             logger.info(f"Consensus reached on decision {decision_id}")
-            # Could auto-resolve here, but let user decide
         
-        return {"vote": vote, "summary": summary}
+        return {"vote": dict(vote), "summary": summary}
 
     async def resolve_decision(
         self,
@@ -212,7 +230,7 @@ class FamilyOSService:
         notes: Optional[str] = None,
     ) -> DecisionResponse:
         """
-        Resolve a decision and move to archived status.
+        Resolve a decision and move to resolved status.
         
         Args:
             decision_id: Which decision
@@ -226,25 +244,26 @@ class FamilyOSService:
         query = """
             UPDATE family_os.decisions
             SET
-                status = %s,
-                final_outcome = %s,
-                resolution_notes = %s,
+                status = $1,
+                final_outcome = $2,
+                resolution_notes = $3,
                 resolved_at = NOW(),
                 updated_at = NOW()
-            WHERE id = %s
+            WHERE id = $4
             RETURNING id, household_id, title, description, category,
                       status, voting_method, options, created_by,
                       created_at, deadline, resolved_at, final_outcome,
                       resolution_notes, updated_at
         """
         
-        result = await self.db.fetchrow(
-            query,
-            DecisionStatus.RESOLVED,
-            outcome,
-            notes,
-            decision_id,
-        )
+        async with self.db.acquire() as conn:
+            result = await conn.fetchrow(
+                query,
+                DecisionStatus.RESOLVED.value,
+                outcome,
+                notes,
+                decision_id,
+            )
         
         return self._row_to_decision(result)
 
@@ -281,26 +300,39 @@ class FamilyOSService:
                 household_id, decision_id, original_title,
                 voting_summary, final_outcome, resolution_method,
                 impact_assessment, learned_lessons, resolved_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING id, household_id, decision_id, original_title,
                       voting_summary, final_outcome, resolution_method,
                       impact_assessment, learned_lessons, resolved_at, created_at
         """
         
-        result = await self.db.fetchrow(
-            query,
-            household_id,
-            request.decision_id,
-            decision.title,
-            summary["voting_summary"],
-            decision.final_outcome,
-            request.resolution_method,
-            request.impact_assessment,
-            request.learned_lessons,
-            decision.resolved_at,
-        )
+        async with self.db.acquire() as conn:
+            result = await conn.fetchrow(
+                query,
+                household_id,
+                request.decision_id,
+                decision.title,
+                json.dumps(summary.get("voting_summary", {})),
+                decision.final_outcome,
+                request.resolution_method.value,
+                request.impact_assessment,
+                json.dumps(request.learned_lessons),
+                decision.resolved_at,
+            )
         
-        return dict(result) if result else None
+        return {
+            "id": str(result["id"]),
+            "household_id": str(result["household_id"]),
+            "decision_id": str(result["decision_id"]),
+            "original_title": result["original_title"],
+            "voting_summary": result["voting_summary"],
+            "final_outcome": result["final_outcome"],
+            "resolution_method": result["resolution_method"],
+            "impact_assessment": result["impact_assessment"],
+            "learned_lessons": result["learned_lessons"],
+            "resolved_at": result["resolved_at"].isoformat() if result["resolved_at"] else None,
+            "created_at": result["created_at"].isoformat() if result["created_at"] else None,
+        }
 
     async def get_decision_history(
         self,
@@ -311,21 +343,23 @@ class FamilyOSService:
         """Get historical decisions for a household."""
         count_query = """
             SELECT COUNT(*) FROM family_os.decision_history
-            WHERE household_id = %s
+            WHERE household_id = $1
         """
-        total = await self.db.fetchval(count_query, household_id)
-
+        
         query = """
             SELECT id, household_id, decision_id, original_title,
                    voting_summary, final_outcome, resolution_method,
                    impact_assessment, learned_lessons, resolved_at, created_at
             FROM family_os.decision_history
-            WHERE household_id = %s
+            WHERE household_id = $1
             ORDER BY resolved_at DESC
-            LIMIT %s OFFSET %s
+            LIMIT $2 OFFSET $3
         """
         
-        results = await self.db.fetch(query, household_id, limit, offset)
+        async with self.db.acquire() as conn:
+            total = await conn.fetchval(count_query, household_id)
+            results = await conn.fetch(query, household_id, limit, offset)
+        
         return [dict(row) for row in results], total
 
     # ========================================================================
@@ -340,11 +374,11 @@ class FamilyOSService:
         """
         summary = await self._get_vote_summary(decision_id)
         
-        if summary["consensus_reached"]:
+        if summary.get("consensus_reached"):
             return None  # No conflict
         
         # Analyze the conflict
-        votes = summary["votes"]
+        votes = summary.get("votes", [])
         if len(votes) == 0:
             return None
         
@@ -371,8 +405,9 @@ class FamilyOSService:
             severity = 3.0  # Someone uncertain = easier to resolve
         
         # Look for stalemate (tied votes)
-        if summary["vote_counts"]:
-            counts = list(summary["vote_counts"].values())
+        vote_counts = summary.get("vote_counts", {})
+        if vote_counts:
+            counts = list(vote_counts.values())
             if all(c == counts[0] for c in counts):
                 conflict_type = ConflictType.STALEMATE
                 severity = 7.0
@@ -380,7 +415,7 @@ class FamilyOSService:
         return {
             "conflict_type": conflict_type.value,
             "severity": severity,
-            "vote_split": summary["vote_counts"],
+            "vote_split": vote_counts,
         }
 
     async def generate_conflict_resolution(
@@ -407,31 +442,7 @@ class FamilyOSService:
             # Fallback to rule-based suggestions
             return self._rule_based_resolutions(decision, summary, conflict_type)
         
-        # Build LLM prompt
-        prompt = f"""
-        A couple needs help resolving a decision conflict.
-        
-        Decision: {decision.title}
-        Description: {decision.description}
-        Category: {decision.category}
-        
-        Voting Summary:
-        {self._format_vote_summary(summary)}
-        
-        Conflict Type: {conflict_type.value}
-        
-        {f'Additional Context: {additional_context}' if additional_context else ''}
-        
-        Please suggest 3 creative resolutions that might satisfy both people, 
-        including:
-        1. A compromise position
-        2. An alternative both might accept
-        3. A "try first" approach to gather more data
-        
-        Format as JSON with: type, details, rationale, likelihood_of_success
-        """
-        
-        # Call LLM (would be integrated with actual LLM service)
+        # Would call LLM here in production
         # For now, return rule-based suggestions
         return self._rule_based_resolutions(decision, summary, conflict_type)
 
@@ -450,15 +461,10 @@ class FamilyOSService:
             FROM family_os.decisions d
             LEFT JOIN family_os.votes v ON d.id = v.decision_id
             LEFT JOIN family_os.users u ON v.voter_id = u.id
-            WHERE d.id = %s
+            WHERE d.id = $1
             GROUP BY d.id, d.voting_method, d.options
         """
         
-        result = await self.db.fetchrow(query, decision_id)
-        if not result:
-            return {}
-        
-        # Get all votes with voter info
         votes_query = """
             SELECT
                 v.id, v.decision_id, v.voter_id,
@@ -466,26 +472,52 @@ class FamilyOSService:
                 v.rationale, v.confidence, v.created_at
             FROM family_os.votes v
             JOIN family_os.users u ON v.voter_id = u.id
-            WHERE v.decision_id = %s
+            WHERE v.decision_id = $1
+            ORDER BY v.created_at
         """
         
-        votes = await self.db.fetch(votes_query, decision_id)
+        async with self.db.acquire() as conn:
+            result = await conn.fetchrow(query, decision_id)
+            if not result:
+                return {}
+            
+            votes = await conn.fetch(votes_query, decision_id)
         
-        # Count votes by value
+        # Convert votes to list and count by value
+        votes_list = []
         vote_counts = {}
+        
         for v in votes:
+            vote_dict = {
+                "id": str(v["id"]),
+                "decision_id": str(v["decision_id"]),
+                "voter_id": str(v["voter_id"]),
+                "voter_name": v["voter_name"],
+                "vote_value": v["vote_value"],
+                "rationale": v["rationale"],
+                "confidence": float(v["confidence"]) if v["confidence"] else 1.0,
+                "created_at": v["created_at"].isoformat() if v["created_at"] else None,
+            }
+            votes_list.append(vote_dict)
+            
             val = v["vote_value"]
             vote_counts[val] = vote_counts.get(val, 0) + 1
         
         # Determine consensus and winner
-        consensus = len(set(v["vote_value"] for v in votes)) <= 1 and len(votes) > 0
+        vote_values = [v["vote_value"] for v in votes_list]
+        consensus = len(set(vote_values)) <= 1 and len(vote_values) > 0
         winner = max(vote_counts, key=vote_counts.get) if vote_counts else None
         
+        # Parse voting_summary JSON
+        voting_summary = result["voting_summary"]
+        if isinstance(voting_summary, str):
+            voting_summary = json.loads(voting_summary) if voting_summary else {}
+        
         return {
-            "decision_id": decision_id,
-            "voting_summary": result["voting_summary"] or {},
+            "decision_id": str(decision_id),
+            "voting_summary": voting_summary or {},
             "total_votes": result["total_votes"],
-            "votes": [dict(v) for v in votes],
+            "votes": votes_list,
             "vote_counts": vote_counts,
             "consensus_reached": consensus,
             "winner": winner,
@@ -494,16 +526,34 @@ class FamilyOSService:
 
     def _row_to_decision(self, row: dict[str, Any]) -> DecisionResponse:
         """Convert database row to DecisionResponse."""
+        # Handle UUID conversion if needed
+        decision_id = row["id"]
+        if not isinstance(decision_id, UUID):
+            decision_id = UUID(str(decision_id))
+        
+        household_id = row["household_id"]
+        if not isinstance(household_id, UUID):
+            household_id = UUID(str(household_id))
+        
+        created_by = row["created_by"]
+        if not isinstance(created_by, UUID):
+            created_by = UUID(str(created_by))
+        
+        # Handle options JSON
+        options = row.get("options") or []
+        if isinstance(options, str):
+            options = json.loads(options)
+        
         return DecisionResponse(
-            id=row["id"],
-            household_id=row["household_id"],
+            id=decision_id,
+            household_id=household_id,
             title=row["title"],
             description=row.get("description"),
             category=row.get("category", "general"),
             status=DecisionStatus(row["status"]),
             voting_method=VotingMethod(row["voting_method"]),
-            options=row.get("options") or [],
-            created_by=row["created_by"],
+            options=options,
+            created_by=created_by,
             created_at=row["created_at"],
             deadline=row.get("deadline"),
             resolved_at=row.get("resolved_at"),
