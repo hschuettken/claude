@@ -8,6 +8,7 @@ from .kg_status import router as kg_status_router
 from .publish import router as publish_router
 from .scout import router as scout_router
 from .storylines import router as storylines_router
+from .draft_studio import router as draft_studio_router
 
 __all__ = [
     "signals_router",
@@ -19,4 +20,5 @@ __all__ = [
     "publish_router",
     "scout_router",
     "storylines_router",
+    "draft_studio_router",
 ]
