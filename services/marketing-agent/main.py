@@ -35,7 +35,7 @@ from fastapi import FastAPI, Depends, status
 from fastapi.responses import JSONResponse
 
 from models import Base
-from api import signals_router, topics_router, drafts_router, approval_router, kg_router, kg_status_router
+from api import signals_router, topics_router, drafts_router, approval_router, kg_router, kg_status_router, scout_router, routing_router, metaphor_router
 from kg_query import get_kg_query
 from kg_ingest import get_kg_ingest
 from events import MarketingNATSClient
@@ -215,12 +215,15 @@ async def lifespan(app: FastAPI):
                 searxng_url=SEARXNG_URL,
             )
             await scout_scheduler.start()
+            app.scout_scheduler = scout_scheduler  # Store in app state for endpoint access
             logger.info("✅ Scout Engine scheduler initialized and started")
         except Exception as e:
             logger.error(f"⚠️  Scout Engine initialization failed: {e}")
             scout_scheduler = None
+            app.scout_scheduler = None
     else:
         logger.info("Scout Engine disabled (SCOUT_ENABLED=false)")
+        app.scout_scheduler = None
     
     yield
     
@@ -283,6 +286,9 @@ app.include_router(drafts_router, prefix="/api/v1", dependencies=[Depends(get_db
 app.include_router(approval_router, prefix="/api/v1/marketing", dependencies=[Depends(get_db)])
 app.include_router(kg_router, prefix="/api/v1")
 app.include_router(kg_status_router, prefix="/api/v1")
+app.include_router(scout_router, prefix="/api/v1")
+app.include_router(routing_router, prefix="/api/v1")
+app.include_router(metaphor_router, prefix="/api/v1")
 
 
 @app.exception_handler(ValueError)
