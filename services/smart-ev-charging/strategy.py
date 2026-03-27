@@ -21,6 +21,7 @@ class ChargeMode(str, Enum):
     ECO = "Eco"
     FAST = "Fast"
     MANUAL = "Manual"
+    MANUAL_UNTIL = "manual_until"
 
 
 @dataclass
@@ -149,6 +150,28 @@ class ChargingStrategy:
             return ChargingDecision(
                 0, "Manual mode — service not controlling wallbox",
                 skip_control=True,
+            )
+
+        if ctx.mode == ChargeMode.MANUAL_UNTIL:
+            # MANUAL_UNTIL: Charge at max power until target SoC or kWh is reached, then stop
+            if ctx.target_reached:
+                self._reset()
+                if ctx.ev_soc_pct is not None:
+                    return ChargingDecision(
+                        0,
+                        f"Manual Until: Target SoC reached ({ctx.ev_soc_pct:.0f}%"
+                        f" >= {ctx.ev_target_soc_pct:.0f}%)",
+                    )
+                return ChargingDecision(
+                    0,
+                    f"Manual Until: Target reached ({ctx.session_energy_kwh:.1f}"
+                    f"/{ctx.target_energy_kwh:.0f} kWh)",
+                )
+            # Target not reached — charge at maximum power
+            return ChargingDecision(
+                self.max_power_w,
+                f"Manual Until: Charging to {ctx.ev_target_soc_pct:.0f}% SoC "
+                f"({ctx.ev_soc_pct:.0f}% current) at {self.max_power_w} W",
             )
 
         # --- No vehicle ---

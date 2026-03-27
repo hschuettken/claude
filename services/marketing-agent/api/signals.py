@@ -1,4 +1,5 @@
 """Marketing signals API — detect and register marketing opportunities."""
+import asyncio
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -8,6 +9,7 @@ from sqlalchemy import select, desc, func
 from pydantic import BaseModel
 
 from ..models import Signal, SignalStatus
+from ..app.knowledge_graph.hooks import KGHooks
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/signals", tags=["signals"])
@@ -57,6 +59,7 @@ async def create_signal(
     Register a new marketing signal/opportunity.
     
     Can be detected by Scout, manual input, research, etc.
+    Auto-ingests to Knowledge Graph asynchronously.
     """
     new_signal = Signal(
         title=signal.title,
@@ -71,6 +74,13 @@ async def create_signal(
     await db.flush()
     
     logger.info(f"Signal created: {new_signal.id} ({signal.title})")
+    
+    # Auto-ingest to Knowledge Graph (fire-and-forget)
+    try:
+        asyncio.create_task(KGHooks.on_signal_created(new_signal))
+    except Exception as e:
+        logger.debug(f"KG hook scheduling failed (non-fatal): {e}")
+    
     return SignalResponse.model_validate(new_signal)
 
 

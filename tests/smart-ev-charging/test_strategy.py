@@ -588,6 +588,66 @@ class TestClamp:
 
 
 # ===========================================================================
+# MANUAL_UNTIL mode
+# ===========================================================================
+
+class TestManualUntilMode:
+    def test_manual_until_charges_at_max_when_target_not_reached(self):
+        """MANUAL_UNTIL should charge at max power until target SoC is reached."""
+        s = fresh_strategy()
+        ctx = make_ctx(
+            mode=ChargeMode.MANUAL_UNTIL,
+            ev_soc_pct=30.0,
+            ev_target_soc_pct=80.0,
+            ev_battery_capacity_kwh=77.0,
+        )
+        d = s.decide(ctx)
+        assert d.target_power_w == s.max_power_w
+        assert "Manual Until" in d.reason
+
+    def test_manual_until_stops_when_target_soc_reached(self):
+        """MANUAL_UNTIL should stop when target SoC is reached."""
+        s = fresh_strategy()
+        ctx = make_ctx(
+            mode=ChargeMode.MANUAL_UNTIL,
+            ev_soc_pct=80.0,
+            ev_target_soc_pct=80.0,
+            ev_battery_capacity_kwh=77.0,
+        )
+        d = s.decide(ctx)
+        assert d.target_power_w == 0
+        assert "Target SoC reached" in d.reason
+
+    def test_manual_until_stops_when_target_kwh_reached(self):
+        """MANUAL_UNTIL should stop when target kWh is reached."""
+        s = fresh_strategy()
+        ctx = make_ctx(
+            mode=ChargeMode.MANUAL_UNTIL,
+            ev_soc_pct=None,  # No SoC available, use kWh
+            target_energy_kwh=10.0,
+            session_energy_kwh=10.0,
+        )
+        d = s.decide(ctx)
+        assert d.target_power_w == 0
+        assert "Target reached" in d.reason
+
+    def test_manual_until_resets_state_on_target(self):
+        """MANUAL_UNTIL should reset state when target is reached."""
+        s = fresh_strategy()
+        s._was_pv_charging = True
+        s._last_target_w = s.max_power_w
+        ctx = make_ctx(
+            mode=ChargeMode.MANUAL_UNTIL,
+            ev_soc_pct=85.0,
+            ev_target_soc_pct=80.0,
+            ev_battery_capacity_kwh=77.0,
+        )
+        s.decide(ctx)
+        assert not s._was_pv_charging
+        assert s._last_target_w == 0
+
+
+# ===========================================================================
 # Nighttime smart
 # ===========================================================================
 
