@@ -10,8 +10,8 @@ router = APIRouter(prefix="/admin")
 
 
 def _get_deps(request: Request):
-    state = request.app.state._state
-    return state["node_manager"], state["model_manager"], state["settings"]
+    s = request.app.state
+    return getattr(s, "node_manager"), getattr(s, "model_manager"), getattr(s, "settings")
 
 
 @router.get("/nodes")
