@@ -423,7 +423,7 @@ class BrandPreset(Base):
     # Metadata
     is_default = Column(Boolean, default=False)
     created_by = Column(String(255))
-    metadata = Column(JSON, default={})
+    extra_metadata = Column(JSON, default={})
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -461,7 +461,7 @@ class VisualPromptTemplate(Base):
     # Status
     status = Column(String(50), default="active")  # active, archived, experimental
     
-    metadata = Column(JSON, default={})
+    extra_metadata = Column(JSON, default={})
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -512,7 +512,7 @@ class VisualPrompt(Base):
     approved = Column(Boolean, default=False)
     
     # Metadata
-    metadata = Column(JSON, default={})
+    extra_metadata = Column(JSON, default={})
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
