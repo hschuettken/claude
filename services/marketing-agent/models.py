@@ -383,3 +383,141 @@ class StorylineSlot(Base):
     # Relationships
     storyline = relationship("Storyline", back_populates="slots")
     draft = relationship("Draft", foreign_keys=[draft_id])
+
+
+class BrandPreset(Base):
+    """Brand style presets for image generation — predefined color/tone/style combinations."""
+    __tablename__ = "brand_presets"
+    __table_args__ = (
+        Index("idx_brand_presets_name", "name"),
+        Index("idx_brand_presets_is_default", "is_default"),
+        Index("idx_brand_presets_created_at", "created_at"),
+        {"schema": "marketing"}
+    )
+    
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False, unique=True)
+    description = Column(Text)
+    
+    # Visual branding (hex colors)
+    primary_color = Column(String(7), default="#1e3a8a")
+    secondary_color = Column(String(7), default="#0891b2")
+    accent_color = Column(String(7), default="#f59e0b")
+    text_dark_color = Column(String(7), default="#1f2937")
+    text_light_color = Column(String(7), default="#f3f4f6")
+    background_color = Column(String(7), default="#ffffff")
+    
+    # Typography
+    heading_font = Column(String(255), default="Montserrat")
+    body_font = Column(String(255), default="Open Sans")
+    mono_font = Column(String(255), default="JetBrains Mono")
+    
+    # Tone and style
+    tone = Column(String(255), default="professional_insightful")
+    style_keywords = Column(ARRAY(String), default=[])
+    
+    # Image generation specifics
+    aspect_ratio = Column(String(20), default="16:9")
+    style_notes = Column(Text)
+    
+    # Metadata
+    is_default = Column(Boolean, default=False)
+    created_by = Column(String(255))
+    metadata = Column(JSON, default={})
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    visual_prompts = relationship("VisualPrompt", back_populates="brand_preset")
+
+
+class VisualPromptTemplate(Base):
+    """Reusable prompt templates for visual generation."""
+    __tablename__ = "visual_prompt_templates"
+    __table_args__ = (
+        Index("idx_visual_templates_category", "category"),
+        Index("idx_visual_templates_status", "status"),
+        Index("idx_visual_templates_created_at", "created_at"),
+        {"schema": "marketing"}
+    )
+    
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False, unique=True)
+    category = Column(String(100), nullable=False)  # architecture_diagram, signal_map, isometric_scene, etc.
+    description = Column(Text)
+    
+    # Template with {variable} placeholders
+    template = Column(Text, nullable=False)
+    
+    # Metadata
+    parameters = Column(ARRAY(String), default=[])  # Available variable names
+    example_output = Column(Text)  # Example filled-in prompt
+    
+    # Usage tracking
+    usage_count = Column(Integer, default=0)
+    popularity_score = Column(Float, default=0.0)  # 0-1
+    
+    # Status
+    status = Column(String(50), default="active")  # active, archived, experimental
+    
+    metadata = Column(JSON, default={})
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    visual_prompts = relationship("VisualPrompt", back_populates="template")
+
+
+class VisualPrompt(Base):
+    """Generated visual prompts ready for image generation."""
+    __tablename__ = "visual_prompts"
+    __table_args__ = (
+        Index("idx_visual_prompts_draft_id", "draft_id"),
+        Index("idx_visual_prompts_template_id", "template_id"),
+        Index("idx_visual_prompts_brand_preset_id", "brand_preset_id"),
+        Index("idx_visual_prompts_use_case", "use_case"),
+        Index("idx_visual_prompts_generator", "generator_name"),
+        Index("idx_visual_prompts_approved", "approved"),
+        Index("idx_visual_prompts_created_at", "created_at"),
+        {"schema": "marketing"}
+    )
+    
+    id = Column(Integer, primary_key=True)
+    
+    # Relationships
+    draft_id = Column(Integer, ForeignKey("marketing.drafts.id"), nullable=False)
+    template_id = Column(Integer, ForeignKey("marketing.visual_prompt_templates.id"))
+    brand_preset_id = Column(Integer, ForeignKey("marketing.brand_presets.id"))
+    
+    # Generated prompt
+    prompt_text = Column(Text, nullable=False)
+    prompt_variants = Column(ARRAY(String), default=[])
+    
+    # Metadata
+    use_case = Column(String(100), nullable=False)  # hero_image, carousel_slide_1, diagram, etc.
+    image_style = Column(String(255))
+    aspect_ratio = Column(String(20))
+    
+    # Generation tracking
+    generator_name = Column(String(100))  # grok, ollama, dall-e
+    generation_attempted = Column(Boolean, default=False)
+    generation_timestamp = Column(DateTime)
+    generated_image_url = Column(String(1024))
+    
+    # Quality assessment
+    quality_score = Column(Integer, default=0)  # 1-5 or internal score
+    feedback = Column(Text)
+    approved = Column(Boolean, default=False)
+    
+    # Metadata
+    metadata = Column(JSON, default={})
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    draft = relationship("Draft")
+    template = relationship("VisualPromptTemplate", back_populates="visual_prompts")
+    brand_preset = relationship("BrandPreset", back_populates="visual_prompts")
