@@ -30,6 +30,7 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, status
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 from models import Base
 from database import get_db, _get_engine
@@ -137,8 +138,7 @@ async def lifespan(app: FastAPI):
     # Startup: Create tables
     _engine, _ = _get_engine()
     async with _engine.begin() as conn:
-        await conn.execute("CREATE SCHEMA IF NOT EXISTS marketing")
-        await conn.commit()
+        await conn.execute(text("CREATE SCHEMA IF NOT EXISTS marketing"))
     
     # Create all tables
     async with _engine.begin() as conn:
