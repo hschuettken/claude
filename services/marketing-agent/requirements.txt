@@ -9,3 +9,4 @@ pydantic-settings==2.1.0
 apscheduler==3.10.4
 pyyaml==6.0.1
 nats-py==2.6.0
+neo4j==5.17.0
