@@ -521,3 +521,6 @@ class VisualPrompt(Base):
     draft = relationship("Draft")
     template = relationship("VisualPromptTemplate", back_populates="visual_prompts")
     brand_preset = relationship("BrandPreset", back_populates="visual_prompts")
+
+# Alias for backward compatibility
+MarketingDraft = Draft
