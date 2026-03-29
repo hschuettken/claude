@@ -2,11 +2,18 @@
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Optional, Union
 
-from neo4j import AsyncDriver, AsyncSession, basic_auth
-from typing import Union
-ManagedAsyncSession = AsyncSession  # alias for compatibility
+try:
+    from neo4j import AsyncDriver, AsyncSession, basic_auth
+    ManagedAsyncSession = AsyncSession  # alias for compatibility
+    NEO4J_AVAILABLE = True
+except ImportError:
+    AsyncDriver = None  # type: ignore
+    AsyncSession = None  # type: ignore
+    ManagedAsyncSession = None  # type: ignore
+    basic_auth = None  # type: ignore
+    NEO4J_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +37,11 @@ class Neo4jSingleton:
         """Initialize the singleton instance with Neo4j connection."""
         async with cls._lock:
             instance = cls()
+            if not NEO4J_AVAILABLE:
+                instance._connected = False
+                instance._connection_error = "neo4j package not installed"
+                logger.warning("Neo4j package not available — KG features disabled")
+                return instance
             if instance._driver is None:
                 try:
                     logger.info(f"Initializing Neo4j connection to {neo4j_url}...")
