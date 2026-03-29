@@ -201,7 +201,13 @@ services:
       SEARXNG_URL: ${SEARXNG_URL:-http://192.168.0.84:8888}
       NEO4J_URL: ${NEO4J_URL:-bolt://192.168.0.88:7687}
     ports:
-      - "${MARKETING_PORT:-8211}:8000"
+      - "${MARKETING_PORT:-8211}:${MARKETING_PORT:-8211}"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import httpx; httpx.get('http://localhost:${MARKETING_PORT:-8211}/health', timeout=5)\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
     volumes:
       - marketing_agent_data:/app/data
     networks:
