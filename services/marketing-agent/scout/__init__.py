@@ -2,7 +2,7 @@
 
 from .searxng_client import SearXNGClient, SearchResult
 from .scorer import score_signal
-from .scheduler import ScoutScheduler, SearchProfile, load_profiles, run_scout_profile
+from .scheduler import ScoutScheduler, SearchProfile, load_profiles, run_scout_profile, get_scheduler, set_scheduler
 
 __all__ = [
     "SearXNGClient",
@@ -12,4 +12,6 @@ __all__ = [
     "SearchProfile",
     "load_profiles",
     "run_scout_profile",
+    "get_scheduler",
+    "set_scheduler",
 ]

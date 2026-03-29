@@ -7,8 +7,11 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Header, BackgroundTasks
 
 from app.scout.scheduler import get_scheduler, load_profiles, run_scout_profile
-from app.events.nats_client import NATSClient
-from app.database import get_db
+try:
+    from app.events.nats_client import NATSClient
+except ImportError:
+    from events import MarketingNATSClient as NATSClient
+from database import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)

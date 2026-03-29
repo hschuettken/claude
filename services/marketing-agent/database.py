@@ -25,3 +25,31 @@ async def get_db() -> AsyncSession:
     _, session_maker = _get_engine()
     async with session_maker() as session:
         yield session
+
+
+# Sync SessionLocal for backward compatibility (used by app/consumers/*.py)
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker as sync_sessionmaker
+import os
+
+def _get_sync_engine():
+    """Get synchronous SQLAlchemy engine."""
+    db_url = os.getenv("MARKETING_DB_URL", "postgresql://homelab:homelab@192.168.0.80:5432/homelab")
+    # Convert asyncpg URL to sync psycopg2-compatible URL
+    sync_url = db_url.replace("postgresql+asyncpg://", "postgresql://").replace("asyncpg://", "postgresql://")
+    return create_engine(sync_url)
+
+_sync_engine = None
+_SessionLocal = None
+
+def _get_session_local():
+    global _sync_engine, _SessionLocal
+    if _SessionLocal is None:
+        _sync_engine = _get_sync_engine()
+        _SessionLocal = sync_sessionmaker(bind=_sync_engine, autocommit=False, autoflush=False)
+    return _SessionLocal
+
+class SessionLocal:
+    """Sync session factory proxy for backward compatibility."""
+    def __new__(cls):
+        return _get_session_local()()

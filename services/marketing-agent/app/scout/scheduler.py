@@ -375,3 +375,21 @@ class ScoutScheduler:
             "signals_today": today_signals,
             "searxng_url": self.searxng_url,
         }
+
+
+# Global scheduler singleton
+_scheduler_instance = None
+
+
+def set_scheduler(scheduler) -> None:
+    """Register the global ScoutScheduler instance."""
+    global _scheduler_instance
+    _scheduler_instance = scheduler
+
+
+def get_scheduler():
+    """Get the global ScoutScheduler instance."""
+    global _scheduler_instance
+    if _scheduler_instance is None:
+        _scheduler_instance = ScoutScheduler()
+    return _scheduler_instance

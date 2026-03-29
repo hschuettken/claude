@@ -548,3 +548,12 @@ class GhostAdminAPIClient:
         email = emails[0]
         logger.info(f"Newsletter sent: status={email.get('status')}, id={email.get('id')}")
         return email
+
+
+# Aliases for backward compatibility
+GhostAdminClient = GhostAdminAPIClient
+
+
+def get_ghost_client() -> GhostAdminAPIClient:
+    """Factory function — returns a GhostAdminAPIClient instance from env vars."""
+    return GhostAdminAPIClient()
