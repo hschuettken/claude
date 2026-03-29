@@ -49,6 +49,7 @@ class ChargingContext:
     overnight_grid_kwh_charged: float  # kWh already charged from grid this overnight session
     now: datetime
     departure_passed: bool = False     # True when departure time is in the past
+    battery_drain: bool = False        # Battery Drain mode: add max battery discharge to PV surplus
 
     @property
     def energy_needed_kwh(self) -> float:
@@ -271,15 +272,59 @@ class ChargingStrategy:
         return ChargingDecision(power_w, f"{label} charging at {power_w} W")
 
     def _pv_surplus(self, ctx: ChargingContext) -> ChargingDecision:
-        """Track PV surplus — charge primarily from solar excess."""
+        """Track PV surplus — charge primarily from solar excess.
+
+        When battery_drain=True: add min(battery_available_w, 3500) to target
+        to force home battery discharge into the EV until battery SoC reaches
+        minimum, then fall back to pure PV surplus.
+        """
         pv_only = self._calc_pv_only_available(ctx)
+
+        # Battery Drain mode: force battery discharge (up to 3500 W) into EV
+        drain_boost = 0.0
+        drain_reason = ""
+        if ctx.battery_drain and ctx.battery_soc_pct > self.battery_min_soc_pct:
+            # Available battery discharge = full 3500 W cap (we request more from
+            # the wallbox; the inverter will discharge the battery to compensate).
+            # When SoC <= min, this block is skipped and we fall back to pure PV.
+            battery_drain_max_w = self.battery_ev_assist_max_w  # 3500 W
+            drain_boost = battery_drain_max_w
+            drain_reason = (
+                f"Battery Drain: +{drain_boost:.0f} W force-discharge "
+                f"(SoC {ctx.battery_soc_pct:.0f}% > min {self.battery_min_soc_pct:.0f}%)"
+            )
+            logger.debug(
+                "battery_drain_active",
+                battery_soc=round(ctx.battery_soc_pct),
+                battery_min_soc=self.battery_min_soc_pct,
+                drain_boost_w=round(drain_boost),
+            )
+        elif ctx.battery_drain and ctx.battery_soc_pct <= self.battery_min_soc_pct:
+            drain_reason = (
+                f"Battery Drain: SoC {ctx.battery_soc_pct:.0f}% <= min "
+                f"{self.battery_min_soc_pct:.0f}% — pure PV surplus only"
+            )
+            logger.info(
+                "battery_drain_soc_floor_reached",
+                battery_soc=round(ctx.battery_soc_pct),
+                battery_min_soc=self.battery_min_soc_pct,
+            )
+
         assist, assist_reason = self._calc_battery_assist_detailed(ctx, pv_only)
+        # When battery_drain is active, we already use drain_boost instead of assist
+        if ctx.battery_drain and drain_boost > 0:
+            assist = 0.0
+            assist_reason = f"Battery Drain mode overrides standard assist: {drain_reason}"
 
         # Battery hold boost: when battery SoC >= hold threshold during daytime,
         # redirect battery charging power to EV instead.  Released in the evening
         # so the battery can top off to 100% for overnight use.
         hold_boost, hold_reason = self._calc_battery_hold_boost(ctx)
-        available = pv_only + assist + hold_boost
+        # Battery Drain mode overrides hold boost (they serve different purposes)
+        if ctx.battery_drain and drain_boost > 0:
+            hold_boost = 0.0
+            hold_reason = "Battery Drain mode active — hold boost suppressed"
+        available = pv_only + assist + hold_boost + drain_boost
 
         ev_soc_low = ctx.ev_soc_pct is not None and ctx.ev_soc_pct < 50
         battery_high = ctx.battery_soc_pct >= 80
@@ -302,21 +347,24 @@ class ChargingStrategy:
 
         base_fields = {
             "pv_surplus_w": round(pv_only, 1),
-            "battery_assist_w": round(assist + hold_boost, 1),
+            "battery_assist_w": round(assist + hold_boost + drain_boost, 1),
             "battery_assist_reason": (
-                f"{assist_reason} | Hold: {hold_reason}" if hold_boost > 0
-                else assist_reason
+                drain_reason if drain_boost > 0
+                else (f"{assist_reason} | Hold: {hold_reason}" if hold_boost > 0
+                      else assist_reason)
             ),
         }
 
         if available >= threshold:
             target = self._clamp(available)
             parts = [f"PV surplus {pv_only:.0f} W"]
-            if assist > 0:
+            if drain_boost > 0:
+                parts.append(f"+ {drain_boost:.0f} W battery drain")
+            elif assist > 0:
                 parts.append(f"+ {assist:.0f} W battery assist")
             if hold_boost > 0:
                 parts.append(f"+ {hold_boost:.0f} W battery hold boost")
-            if ctx.battery_soc_pct > 80 and ctx.battery_power_w > 0:
+            if ctx.battery_soc_pct > 80 and ctx.battery_power_w > 0 and not ctx.battery_drain:
                 parts.append("(prioritize EV over battery)")
             if ev_soc_low:
                 parts.append("(low EV SoC — economic priority)")
@@ -328,7 +376,8 @@ class ChargingStrategy:
             # Before stopping: if battery SoC is high enough, use full battery
             # discharge to bridge the gap. Better to drain battery than to cycle
             # the wallbox on/off (which triggers anti-cycling cooldowns).
-            if ctx.battery_soc_pct > self.battery_min_soc_pct + 10:
+            # Skip bridge logic in Battery Drain mode — drain_boost already handles this.
+            if not ctx.battery_drain and ctx.battery_soc_pct > self.battery_min_soc_pct + 10:
                 bridge_shortfall = self.min_power_w - available
                 bridge_available = min(bridge_shortfall, self.battery_ev_assist_max_w)
                 bridged = available + bridge_available

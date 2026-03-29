@@ -874,6 +874,10 @@ input_boolean:
     name: EV Full by Morning
     icon: mdi:battery-clock
     initial: false
+  ev_battery_drain:
+    name: EV Battery Drain
+    icon: mdi:battery-arrow-down-outline
+    initial: false
 
 input_datetime:
   ev_departure_time:

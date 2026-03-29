@@ -72,6 +72,7 @@ def make_ctx(**overrides) -> MagicMock:
         overnight_grid_kwh_charged=0.0,
         now=datetime(2024, 6, 15, 12, 0, 0),
         departure_passed=False,
+        battery_drain=False,
     )
     defaults.update(overrides)
 

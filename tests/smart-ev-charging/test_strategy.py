@@ -697,3 +697,156 @@ class TestNighttimeSmart:
         d = s._nighttime_smart(ctx)
         assert d.target_power_w == 0
         assert "waiting" in d.reason.lower() or "complete" in d.reason.lower()
+
+
+# ===========================================================================
+# Battery Drain Mode (#779)
+# ===========================================================================
+
+class TestBatteryDrainMode:
+    """Tests for Battery Drain mode: PV surplus + force battery discharge to EV."""
+
+    def test_battery_drain_adds_3500w_when_soc_above_min(self):
+        """With battery_drain=ON and SoC > min, target should include drain boost."""
+        s = fresh_strategy(
+            min_power_w=4000,
+            max_power_w=11000,
+            battery_min_soc_pct=20.0,
+            battery_ev_assist_max_w=3500.0,
+        )
+        # PV surplus alone: grid=0, ev_power=0, battery=0, so pv_only=0
+        # With drain_boost=3500, available=3500, which is < 4000 min_power
+        # Let's set grid_power_w > 0 to ensure surplus
+        ctx = make_ctx(
+            mode=ChargeMode.PV_SURPLUS,
+            grid_power_w=1500.0,   # 1500 W surplus
+            battery_power_w=0.0,
+            battery_soc_pct=60.0,  # above min (20%)
+            battery_drain=True,
+            pv_forecast_remaining_kwh=10.0,
+        )
+        ctx.wallbox.current_power_w = 0.0
+        d = s.decide(ctx)
+        # pv_only = 1500+0+0-(-100) = 1600; drain_boost = 3500; available = 5100
+        # 5100 >= 4000 min → should charge
+        assert d.target_power_w > 0
+        assert "drain" in d.reason.lower() or "battery drain" in d.reason.lower()
+
+    def test_battery_drain_stops_at_min_soc(self):
+        """When battery SoC hits min, Battery Drain mode falls back to pure PV surplus."""
+        s = fresh_strategy(
+            min_power_w=4000,
+            max_power_w=11000,
+            battery_min_soc_pct=20.0,
+            battery_ev_assist_max_w=3500.0,
+        )
+        ctx = make_ctx(
+            mode=ChargeMode.PV_SURPLUS,
+            grid_power_w=500.0,   # only 500 W surplus — not enough without drain
+            battery_power_w=0.0,
+            battery_soc_pct=20.0,  # AT min SoC — drain should NOT activate
+            battery_drain=True,
+            pv_forecast_remaining_kwh=2.0,
+        )
+        ctx.wallbox.current_power_w = 0.0
+        d = s.decide(ctx)
+        # pv_only = 500+0+0-(-100) = 600; no drain (SoC <= min)
+        # 600 < 4000 + 300 hysteresis (not yet charging) → stop
+        assert d.target_power_w == 0
+
+    def test_battery_drain_disabled_normal_pv_surplus(self):
+        """With battery_drain=OFF, normal PV surplus behavior applies."""
+        s = fresh_strategy(
+            min_power_w=4000,
+            max_power_w=11000,
+            battery_min_soc_pct=20.0,
+            battery_ev_assist_max_w=3500.0,
+        )
+        ctx = make_ctx(
+            mode=ChargeMode.PV_SURPLUS,
+            grid_power_w=4500.0,  # 4500 W surplus — enough without drain
+            battery_power_w=0.0,
+            battery_soc_pct=60.0,
+            battery_drain=False,
+            pv_forecast_remaining_kwh=10.0,
+        )
+        ctx.wallbox.current_power_w = 0.0
+        d = s.decide(ctx)
+        assert d.target_power_w > 0
+        assert "drain" not in d.reason.lower()
+
+    def test_battery_drain_respects_min_power_wallbox(self):
+        """With drain, target must still meet 4000 W minimum (as per spec)."""
+        s = fresh_strategy(
+            min_power_w=4000,
+            max_power_w=11000,
+            battery_min_soc_pct=20.0,
+            battery_ev_assist_max_w=3500.0,
+        )
+        # pv_only = 200+0+0-(-100) = 300
+        # drain_boost = 3500; available = 3800 < 4000
+        # Should NOT charge (clamp returns 0 for < min_power_w)
+        ctx = make_ctx(
+            mode=ChargeMode.PV_SURPLUS,
+            grid_power_w=200.0,
+            battery_power_w=0.0,
+            battery_soc_pct=60.0,
+            battery_drain=True,
+            pv_forecast_remaining_kwh=5.0,
+        )
+        ctx.wallbox.current_power_w = 0.0
+        d = s.decide(ctx)
+        assert d.target_power_w == 0
+
+    def test_battery_drain_capped_at_3500w(self):
+        """Drain boost is capped at battery_ev_assist_max_w (3500 W)."""
+        s = fresh_strategy(
+            min_power_w=4000,
+            max_power_w=11000,
+            battery_min_soc_pct=20.0,
+            battery_ev_assist_max_w=3500.0,
+        )
+        ctx = make_ctx(
+            mode=ChargeMode.PV_SURPLUS,
+            grid_power_w=7000.0,  # high surplus
+            battery_power_w=0.0,
+            battery_soc_pct=80.0,
+            battery_drain=True,
+            pv_forecast_remaining_kwh=20.0,
+        )
+        ctx.wallbox.current_power_w = 0.0
+        d = s.decide(ctx)
+        # pv_only = 7000+0+0-(-100) = 7100; drain_boost = 3500; available = 10600
+        # Clamped to max_power_w=11000, but 10600 < 11000 → 10600
+        assert d.target_power_w > 0
+        assert d.target_power_w <= 11000
+        # battery_assist_w should include the drain boost
+        assert d.battery_assist_w == 3500.0
+
+    def test_battery_drain_soc_just_above_min_activates(self):
+        """Drain activates when SoC is strictly above min."""
+        s = fresh_strategy(
+            min_power_w=4000,
+            max_power_w=11000,
+            battery_min_soc_pct=20.0,
+            battery_ev_assist_max_w=3500.0,
+        )
+        ctx = make_ctx(
+            mode=ChargeMode.PV_SURPLUS,
+            grid_power_w=1000.0,
+            battery_power_w=0.0,
+            battery_soc_pct=21.0,  # just 1% above min
+            battery_drain=True,
+            pv_forecast_remaining_kwh=5.0,
+        )
+        ctx.wallbox.current_power_w = 0.0
+        d = s.decide(ctx)
+        # pv_only = 1100; drain_boost = 3500; available = 4600 >= 4000+300 → charge
+        assert d.target_power_w > 0
+
+    def test_battery_drain_not_active_in_off_mode(self):
+        """Battery drain flag is irrelevant when mode=OFF."""
+        s = fresh_strategy()
+        ctx = make_ctx(mode=ChargeMode.OFF, battery_drain=True, battery_soc_pct=60.0)
+        d = s.decide(ctx)
+        assert d.target_power_w == 0

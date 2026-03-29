@@ -56,6 +56,7 @@ class EVChargingSettings(BaseSettings):
     # --- HA helper entity IDs ---
     charge_mode_entity: str = "input_select.ev_charge_mode"
     full_by_morning_entity: str = "input_boolean.ev_full_by_morning"
+    battery_drain_entity: str = "input_boolean.ev_battery_drain"
     departure_time_entity: str = "input_datetime.ev_departure_time"
     target_soc_entity: str = "input_number.ev_target_soc_pct"
     target_energy_entity: str = "input_number.ev_target_energy_kwh"

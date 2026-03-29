@@ -236,6 +236,7 @@ class SmartEVChargingService(BaseService):
         grid_power = await self._read_float(self.settings.grid_power_entity)
         pv_power = await self._read_float(self.settings.pv_power_entity)
         full_by_morning = await self._read_bool(self.settings.full_by_morning_entity)
+        battery_drain = await self._read_bool(self.settings.battery_drain_entity)
         departure_time = await self._read_time(self.settings.departure_time_entity)
         target_energy = await self._read_float(self.settings.target_energy_entity)
 
@@ -352,6 +353,7 @@ class SmartEVChargingService(BaseService):
             overnight_grid_kwh_charged=overnight_grid_kwh,
             now=now,
             departure_passed=departure_passed,
+            battery_drain=battery_drain,
         )
 
         # 2) Decide target power
@@ -420,6 +422,7 @@ class SmartEVChargingService(BaseService):
             target_w=decision.target_power_w,
             reason=decision.reason,
             departure_passed=departure_passed,
+            battery_drain=battery_drain,
             cumulative_grid_kwh=round(self._cumulative_grid_kwh, 2),
         )
 
@@ -562,6 +565,7 @@ class SmartEVChargingService(BaseService):
             "pv_forecast_tomorrow_kwh": round(ctx.pv_forecast_tomorrow_kwh, 1),
             "overnight_grid_kwh_charged": round(ctx.overnight_grid_kwh_charged, 1),
             "full_by_morning": ctx.full_by_morning,
+            "battery_drain": ctx.battery_drain,
             "departure_passed": ctx.departure_passed,
             "reason": decision.reason,
             # --- Feature #5: kWh remaining + ETA ---
@@ -941,6 +945,19 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
+            "binary_sensor", "battery_drain", node_id=node, config={
+                "name": "Battery Drain Mode",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": (
+                    "{{ 'ON' if value_json.battery_drain else 'OFF' }}"
+                ),
+                "icon": "mdi:battery-arrow-down-outline",
+                "entity_category": "diagnostic",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
             "binary_sensor", "vehicle_connected", node_id=node, config={
                 "name": "Vehicle Connected",
                 "device": device,
@@ -1089,7 +1106,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.logger.info("ha_discovery_registered", entity_count=29)
+        self.logger.info("ha_discovery_registered", entity_count=30)
 
     # ------------------------------------------------------------------
     # Healthcheck
