@@ -28,13 +28,11 @@ Environment variables:
 import os
 import logging
 from contextlib import asynccontextmanager
-from sqlalchemy.ext.asyncio import (
-    AsyncSession, create_async_engine, async_sessionmaker,
-)
 from fastapi import FastAPI, Depends, status
 from fastapi.responses import JSONResponse
 
 from models import Base
+from database import get_db, _get_engine
 from api import signals_router, topics_router, drafts_router, approval_router, kg_router, kg_status_router, publish_router, scout_router, storylines_router, draft_studio_router, performance_pulse_router
 from kg_query import get_kg_query
 from kg_ingest import get_kg_ingest
@@ -116,33 +114,12 @@ def _initialize_kg_schema():
         driver.close()
 
 
-# Database configuration
-DATABASE_URL = os.getenv(
-    "MARKETING_DB_URL",
-    "postgresql+asyncpg://homelab:homelab@192.168.0.80:5432/homelab",
-)
-
 # Scout configuration
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://192.168.0.84:8080")
 SCOUT_ENABLED = os.getenv("SCOUT_ENABLED", "true").lower() == "true"
 
-# Create async engine and session factory
-engine = create_async_engine(
-    DATABASE_URL,
-    echo=False,
-    pool_size=10,
-    max_overflow=20,
-)
-
-async_session_maker = async_sessionmaker(
-    engine, class_=AsyncSession, expire_on_commit=False,
-)
-
-
-async def get_db() -> AsyncSession:
-    """Dependency injection for database session."""
-    async with async_session_maker() as session:
-        yield session
+# Database engine is created lazily in database.py via _get_engine()
+# to avoid psycopg2 import errors when MARKETING_DB_URL uses postgresql:// scheme
 
 
 # Global service instances
@@ -158,12 +135,13 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Marketing Agent service...")
     
     # Startup: Create tables
-    async with engine.begin() as conn:
+    _engine, _ = _get_engine()
+    async with _engine.begin() as conn:
         await conn.execute("CREATE SCHEMA IF NOT EXISTS marketing")
         await conn.commit()
     
     # Create all tables
-    async with engine.begin() as conn:
+    async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     
     logger.info("Database tables created/verified")
@@ -205,8 +183,11 @@ async def lifespan(app: FastAPI):
             nats_password = os.getenv("NATS_PASSWORD")
             relevance_threshold = float(os.getenv("SIGNAL_RELEVANCE_THRESHOLD", "0.7"))
             
+            _db_url = os.getenv("MARKETING_DB_URL", "postgresql+asyncpg://homelab:homelab@192.168.0.80:5432/homelab")
+            if _db_url.startswith("postgresql://") or _db_url.startswith("postgres://"):
+                _db_url = _db_url.replace("postgresql://", "postgresql+asyncpg://", 1).replace("postgres://", "postgresql+asyncpg://", 1)
             nats_consumer = MarketingNATSConsumer(
-                db_url=DATABASE_URL,
+                db_url=_db_url,
                 nats_url=nats_url,
                 nats_user=nats_user,
                 nats_password=nats_password,
@@ -262,7 +243,8 @@ async def lifespan(app: FastAPI):
     kg_ingest.close()
     
     # Shutdown: Close database engine
-    await engine.dispose()
+    _engine, _ = _get_engine()
+    await _engine.dispose()
     logger.info("Marketing Agent service stopped")
 
 
