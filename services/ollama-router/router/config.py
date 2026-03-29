@@ -39,6 +39,13 @@ class MetricsCfg(BaseModel):
 class ServerCfg(BaseModel):
     host: str = "0.0.0.0"
     port: int = 11434
+    metrics_port: int = 9090
+
+
+class PrometheusCfg(BaseModel):
+    enabled: bool = False
+    port: int = 9090
+    path: str = "/metrics"
 
 
 class Settings(BaseSettings):
@@ -47,8 +54,9 @@ class Settings(BaseSettings):
     lifecycle: LifecycleCfg = LifecycleCfg()
     metrics: MetricsCfg = MetricsCfg()
     server: ServerCfg = ServerCfg()
+    prometheus: PrometheusCfg = PrometheusCfg()
 
-    model_config = {"env_prefix": "OLLAMA_ROUTER_", "env_nested_delimiter": "__"}
+    model_config = {"env_prefix": "OLLAMA_ROUTER_", "env_nested_delimiter": "__", "extra": "ignore"}
 
 
 def load_config(path: str | None = None) -> Settings:
