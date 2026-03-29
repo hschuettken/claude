@@ -15,6 +15,7 @@ Aggregates performance data from blog_posts and performance_snapshots, keyed by:
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
+from database import get_db
 from sqlalchemy import select, func, desc, and_, or_
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
@@ -175,7 +176,7 @@ def _get_intensity_color(engagement_rate: float) -> str:
 )
 async def get_sparklines(
     days: int = Query(30, ge=7, le=90),
-    db: AsyncSession = Depends(),
+    db: AsyncSession = Depends(get_db),
 ) -> List[SparklineData]:
     """
     Get performance sparklines for all topics over the past N days.
@@ -251,7 +252,7 @@ async def get_sparklines(
 )
 async def get_heatmap(
     weeks: int = Query(4, ge=1, le=12),
-    db: AsyncSession = Depends(),
+    db: AsyncSession = Depends(get_db),
 ) -> Heatmap:
     """
     Get a heatmap of performance metrics by week and pillar.
@@ -333,7 +334,7 @@ async def get_heatmap(
 )
 async def get_pillar_radar(
     days: int = Query(90, ge=7, le=365),
-    db: AsyncSession = Depends(),
+    db: AsyncSession = Depends(get_db),
 ) -> Radar:
     """
     Get pillar effectiveness radar data.
@@ -407,7 +408,7 @@ async def get_pillar_radar(
 async def get_hook_analysis(
     limit: int = Query(10, ge=5, le=50),
     days: int = Query(90, ge=7, le=365),
-    db: AsyncSession = Depends(),
+    db: AsyncSession = Depends(get_db),
 ) -> HookAnalysis:
     """
     Analyze hook effectiveness across LinkedIn posts.
@@ -510,7 +511,7 @@ async def get_hook_analysis(
 )
 async def get_performance_pulse(
     days: int = Query(30, ge=7, le=90),
-    db: AsyncSession = Depends(),
+    db: AsyncSession = Depends(get_db),
 ) -> PerformancePulse:
     """
     Get the complete performance pulse dashboard.

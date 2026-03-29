@@ -13,6 +13,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
+from database import get_db
 from sqlalchemy import select, desc
 from pydantic import BaseModel, Field
 
@@ -193,7 +194,7 @@ async def _generate_visual_prompt(title: str, tags: List[str]) -> str:
 @router.post("/open", response_model=DraftStudioState)
 async def open_draft(
     draft_id: int,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> DraftStudioState:
     """
     Open a draft in Draft Studio.
@@ -388,7 +389,7 @@ async def open_draft(
 async def update_center_pane(
     draft_id: int,
     editor_data: DraftEditorData,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> DraftEditorData:
     """
     Update center pane (rich text editor content).
@@ -436,7 +437,7 @@ async def update_center_pane(
 @router.get("/{draft_id}/right", response_model=RightPaneChecks)
 async def get_right_pane(
     draft_id: int,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> RightPaneChecks:
     """
     Get/refresh right pane (style checks, risk flags, CTA variants).
@@ -506,7 +507,7 @@ async def get_right_pane(
 async def add_citation(
     draft_id: int,
     citation: Citation,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> Citation:
     """
     Add a citation to the left pane.
@@ -545,7 +546,7 @@ async def add_citation(
 async def delete_citation(
     draft_id: int,
     citation_index: int,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
     """Remove a citation from the left pane."""
     query = select(Draft).where(Draft.id == draft_id)

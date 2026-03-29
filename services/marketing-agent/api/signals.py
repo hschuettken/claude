@@ -3,8 +3,9 @@ import asyncio
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
+from database import get_db
 from sqlalchemy import select, desc, func
 from pydantic import BaseModel
 
@@ -53,7 +54,7 @@ class SignalResponse(BaseModel):
 @router.post("", response_model=SignalResponse)
 async def create_signal(
     signal: SignalCreate,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> SignalResponse:
     """
     Register a new marketing signal/opportunity.
@@ -86,7 +87,7 @@ async def create_signal(
 
 @router.get("", response_model=List[SignalResponse])
 async def list_signals(
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
     source: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     pillar_id: Optional[int] = Query(None),
@@ -130,7 +131,7 @@ async def list_signals(
 @router.get("/{signal_id}", response_model=SignalResponse)
 async def get_signal(
     signal_id: int,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> SignalResponse:
     """Get a single signal by ID."""
     query = select(Signal).where(Signal.id == signal_id)
@@ -147,7 +148,7 @@ async def get_signal(
 async def update_signal_status(
     signal_id: int,
     update: SignalStatusUpdate,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> SignalResponse:
     """Update a signal's status (read, used, archived, etc.)."""
     query = select(Signal).where(Signal.id == signal_id)
@@ -174,7 +175,7 @@ async def update_signal_status(
 @router.delete("/{signal_id}")
 async def delete_signal(
     signal_id: int,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
     """Delete a signal."""
     query = select(Signal).where(Signal.id == signal_id)

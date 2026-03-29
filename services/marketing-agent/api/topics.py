@@ -2,8 +2,9 @@
 import asyncio
 import logging
 from typing import List, Dict, Any, Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
+from database import get_db
 from sqlalchemy import select
 from pydantic import BaseModel
 
@@ -43,7 +44,7 @@ class TopicResponse(BaseModel):
 @router.post("", response_model=TopicResponse)
 async def create_topic(
     topic: TopicCreate,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> TopicResponse:
     """Create a new content topic.
     
@@ -71,7 +72,7 @@ async def create_topic(
 
 @router.get("", response_model=List[TopicResponse])
 async def list_topics(
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> List[TopicResponse]:
     """List all content topics."""
     query = select(Topic).order_by(Topic.name)
@@ -84,7 +85,7 @@ async def list_topics(
 @router.get("/{topic_id}", response_model=TopicResponse)
 async def get_topic(
     topic_id: int,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> TopicResponse:
     """Get a single topic by ID."""
     query = select(Topic).where(Topic.id == topic_id)
@@ -101,7 +102,7 @@ async def get_topic(
 async def update_topic(
     topic_id: int,
     update: TopicUpdate,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> TopicResponse:
     """Update a topic."""
     query = select(Topic).where(Topic.id == topic_id)

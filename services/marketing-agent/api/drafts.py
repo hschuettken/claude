@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
+from database import get_db
 from sqlalchemy import select
 from pydantic import BaseModel
 
@@ -80,7 +81,7 @@ class DraftWithKGContext(DraftResponse):
 @router.post("", response_model=DraftWithKGContext)
 async def create_draft(
     draft: DraftCreate,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> DraftWithKGContext:
     """Create a new marketing draft with KG context enrichment.
     
@@ -158,7 +159,7 @@ async def create_draft(
 
 @router.get("", response_model=List[DraftResponse])
 async def list_drafts(
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
     status_filter: Optional[str] = None,
 ) -> List[DraftResponse]:
     """
@@ -181,7 +182,7 @@ async def list_drafts(
 @router.get("/{draft_id}", response_model=DraftWithKGContext)
 async def get_draft(
     draft_id: int,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
     include_kg: bool = True,
 ) -> DraftWithKGContext:
     """Get a single draft by ID.
@@ -223,7 +224,7 @@ async def get_draft(
 async def update_draft(
     draft_id: int,
     update: DraftUpdate,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> DraftResponse:
     """Update a draft."""
     query = select(Draft).where(Draft.id == draft_id)
@@ -264,7 +265,7 @@ async def update_draft(
 @router.delete("/{draft_id}")
 async def delete_draft(
     draft_id: int,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
     """Delete a draft."""
     query = select(Draft).where(Draft.id == draft_id)
@@ -343,7 +344,7 @@ async def kg_cluster(topic_id: str) -> Dict[str, Any]:
 @router.post("/{draft_id}/publish", response_model=Dict[str, Any])
 async def publish_draft(
     draft_id: int,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
     """
     Publish a draft to Ghost CMS.

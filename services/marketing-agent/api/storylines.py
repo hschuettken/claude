@@ -15,9 +15,10 @@ Endpoints:
 """
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from database import get_db
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel, Field
 
@@ -141,7 +142,7 @@ class ArcNarrativeView(BaseModel):
 @router.post("", response_model=StorylineResponse, status_code=status.HTTP_201_CREATED)
 async def create_storyline(
     req: StorylineCreate,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> StorylineResponse:
     """Create a new 12-week storyline with empty slots."""
     
@@ -191,7 +192,7 @@ async def create_storyline(
 
 @router.get("", response_model=List[StorylineResponse])
 async def list_storylines(
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
     status_filter: Optional[str] = None,
     limit: int = 100,
 ) -> List[StorylineResponse]:
@@ -213,7 +214,7 @@ async def list_storylines(
 @router.get("/{storyline_id}", response_model=StorylineResponse)
 async def get_storyline(
     storyline_id: int,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> StorylineResponse:
     """Get a specific storyline with all slots."""
     
@@ -231,7 +232,7 @@ async def get_storyline(
 async def update_storyline(
     storyline_id: int,
     req: StorylineUpdate,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> StorylineResponse:
     """Update storyline metadata."""
     
@@ -269,7 +270,7 @@ async def update_storyline(
 @router.delete("/{storyline_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_storyline(
     storyline_id: int,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ):
     """Archive/delete a storyline."""
     
@@ -294,7 +295,7 @@ async def delete_storyline(
 @router.get("/{storyline_id}/visualization", response_model=TimelineVisualization)
 async def get_timeline_visualization(
     storyline_id: int,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> TimelineVisualization:
     """
     Get 12-week timeline visualization data.
@@ -387,7 +388,7 @@ async def get_timeline_visualization(
 @router.get("/{storyline_id}/arc-narrative", response_model=ArcNarrativeView)
 async def get_arc_narrative(
     storyline_id: int,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> ArcNarrativeView:
     """
     Get story arc narrative view.
@@ -444,7 +445,7 @@ async def reschedule_slot(
     storyline_id: int,
     week_number: int,
     req: RescheduleRequest,
-    db: AsyncSession,
+    db: AsyncSession = Depends(get_db),
 ) -> StorylineSlotResponse:
     """
     Drag-to-reschedule: assign a draft to a week slot or move draft between weeks.
