@@ -16,10 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sess
 from sqlalchemy import select, desc
 from pydantic import BaseModel
 
-from ..models import Signal, SignalStatus
-from .searxng_client import SearXNGClient, SearchResult
-from .scorer import score_signal
-from ..events import publish_signal_detected
+from models import Signal, SignalStatus
+from app.scout.searxng_client import SearXNGClient, SearchResult
+from app.scout.scorer import score_signal
+from events import publish_signal_detected
 
 logger = logging.getLogger(__name__)
 
