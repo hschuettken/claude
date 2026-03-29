@@ -211,8 +211,11 @@ async def lifespan(app: FastAPI):
     # Initialize Scout Engine scheduler
     if SCOUT_ENABLED:
         try:
+            _scout_db_url = os.getenv("MARKETING_DB_URL", "postgresql+asyncpg://homelab:homelab@192.168.0.80:5432/homelab")
+            if _scout_db_url.startswith("postgresql://") or _scout_db_url.startswith("postgres://"):
+                _scout_db_url = _scout_db_url.replace("postgresql://", "postgresql+asyncpg://", 1).replace("postgres://", "postgresql+asyncpg://", 1)
             scout_scheduler = ScoutScheduler(
-                db_url=DATABASE_URL,
+                db_url=_scout_db_url,
                 searxng_url=SEARXNG_URL,
             )
             await scout_scheduler.start()
