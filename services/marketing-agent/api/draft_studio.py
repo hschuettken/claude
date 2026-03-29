@@ -16,9 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 from pydantic import BaseModel, Field
 
-from ..models import Draft, DraftStatus, Signal, Topic, Platform
-from ..kg_query import get_kg_query
-from ..app.drafts.governance import scan_risk_flags, format_risk_report, RiskFlag
+from models import Draft, DraftStatus, Signal, Topic, Platform
+from kg_query import get_kg_query
+from app.drafts.governance import scan_risk_flags, format_risk_report, RiskFlag
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/draft-studio", tags=["draft-studio"])

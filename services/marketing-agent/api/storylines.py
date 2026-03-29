@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel, Field
 
-from ..models import Storyline, StorylineSlot, Draft, ContentPillar, Topic
+from models import Storyline, StorylineSlot, Draft, ContentPillar, Topic
 
 router = APIRouter(prefix="/storylines", tags=["storylines"])
 

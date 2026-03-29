@@ -7,8 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
 
-from ..models import Topic
-from ..app.knowledge_graph.hooks import KGHooks
+from models import Topic
+from app.knowledge_graph.hooks import KGHooks
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/topics", tags=["topics"])
