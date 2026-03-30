@@ -29,6 +29,11 @@ from meeting_intelligence import (
     OpenQuestion,
     Risk,
 )
+from semantic_search import (
+    SemanticSearchService,
+    SemanticSearchResponse,
+    KeywordSearchResponse,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -47,6 +52,7 @@ app = FastAPI(
 # Global service instances
 transcriber: Optional[TranscriberService] = None
 meeting_intelligence: Optional[MeetingIntelligenceService] = None
+semantic_search: Optional[SemanticSearchService] = None
 
 # Request/Response models
 class HealthResponse(BaseModel):
