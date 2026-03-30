@@ -148,7 +148,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
 async def get_weather():
     """Get current weather and forecast from Home Assistant."""
     from shared.ha_client import HomeAssistantClient
-    from services.orchestrator.config import OrchestratorSettings
+    from config import OrchestratorSettings
 
     settings = OrchestratorSettings()
     ha = HomeAssistantClient(settings.ha_url, settings.ha_token)
@@ -156,7 +156,6 @@ async def get_weather():
     try:
         state = await ha.get_state("weather.forecast_home")
     except Exception as e:
-        # Try alternative entity names
         try:
             state = await ha.get_state("weather.home")
         except Exception:
@@ -164,7 +163,7 @@ async def get_weather():
 
     attrs = state.get("attributes", {})
     return {
-        "state": state.get("state", "unknown"),  # e.g. "sunny", "cloudy", "rainy"
+        "state": state.get("state", "unknown"),
         "temperature": attrs.get("temperature"),
         "humidity": attrs.get("humidity"),
         "wind_speed": attrs.get("wind_speed"),
@@ -172,7 +171,7 @@ async def get_weather():
         "pressure": attrs.get("pressure"),
         "visibility": attrs.get("visibility"),
         "attribution": attrs.get("attribution"),
-        "forecast": attrs.get("forecast", [])[:5],  # next 5 periods
+        "forecast": attrs.get("forecast", [])[:5],
         "friendly_name": attrs.get("friendly_name", "Weather"),
         "unit_of_measurement": {
             "temperature": attrs.get("temperature_unit", "°C"),
@@ -186,7 +185,7 @@ async def get_weather():
 async def get_weather_forecast(days: int = 5):
     """Get extended weather forecast from Home Assistant."""
     from shared.ha_client import HomeAssistantClient
-    from services.orchestrator.config import OrchestratorSettings
+    from config import OrchestratorSettings
 
     settings = OrchestratorSettings()
     ha = HomeAssistantClient(settings.ha_url, settings.ha_token)
