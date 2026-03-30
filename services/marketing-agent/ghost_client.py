@@ -95,6 +95,7 @@ class GhostAdminAPIClient:
         tags: Optional[List[str]] = None,
         status: str = "draft",
         custom_excerpt: Optional[str] = None,
+        feature_image: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Create a new Ghost post.
@@ -105,6 +106,7 @@ class GhostAdminAPIClient:
             tags: List of tag names
             status: draft, scheduled, published
             custom_excerpt: Short description for post list
+            feature_image: URL for featured/cover image
         
         Returns:
             Post dict with id, url, slug, etc.
@@ -117,6 +119,9 @@ class GhostAdminAPIClient:
         
         if custom_excerpt:
             post_data["custom_excerpt"] = custom_excerpt
+        
+        if feature_image:
+            post_data["feature_image"] = feature_image
         
         if tags:
             post_data["tags"] = [{"name": t} for t in tags]
