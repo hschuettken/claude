@@ -15,7 +15,6 @@ from pydantic import BaseModel, Field
 
 from shared.ha_client import HomeAssistantClient
 from shared.log import get_logger
-from config import OrchestratorSettings
 
 logger = get_logger("api.context_snapshot")
 
@@ -240,7 +239,8 @@ async def _get_weather() -> tuple[Optional[WeatherCondition], Optional[WeatherFo
         
         # Get current weather via HA
         try:
-            settings = OrchestratorSettings()
+            # Use the already-configured settings passed to configure()
+            settings = _settings
             ha = HomeAssistantClient(settings.ha_url, settings.ha_token)
             
             # Try entities in priority order
