@@ -453,6 +453,138 @@ async def status() -> dict[str, Any]:
 
 
 # ============================================================================
+# Recovery-Aware Planning Routes (Task #810)
+# ============================================================================
+
+@app.post("/api/v1/recovery/assess", response_model=RecoveryAssessmentResponse, tags=["recovery-planning"])
+async def assess_recovery(
+    user_id: str = None,
+    date_str: str = None,
+) -> RecoveryAssessmentResponse:
+    """
+    POST /api/v1/recovery/assess
+    
+    Assess current recovery state based on wellness signals from intervals.icu.
+    
+    Returns recovery level and recommendations.
+    Task #810: Recovery-aware planning
+    """
+    from datetime import date as date_type
+    
+    target_date = date_type.fromisoformat(date_str) if date_str else date_type.today()
+    
+    # Create mock wellness signals for demonstration
+    signals = WellnessSignals(
+        date=target_date,
+        hrv_rmssd=45.5,
+        resting_hr=68,
+        sleep_hours=6.2,
+        sleep_score=65,
+        stress_avg=45,
+        body_battery=35,
+        baseline_resting_hr=58,
+    )
+    
+    recovery_level = analyze_wellness_signals(signals, baseline_resting_hr=58)
+    
+    signal_interpretation = {
+        "hrv_rmssd": interpret_wellness_signal("hrv_rmssd", signals.hrv_rmssd),
+        "sleep_hours": interpret_wellness_signal("sleep_hours", signals.sleep_hours),
+        "sleep_score": interpret_wellness_signal("sleep_score", signals.sleep_score),
+        "body_battery": interpret_wellness_signal("body_battery", signals.body_battery),
+    }
+    
+    task_recommendations = get_task_recommendations(recovery_level)
+    workout_recommendations = get_workout_recommendations(recovery_level)
+    recovery_priorities = get_recovery_priorities(recovery_level, signals)
+    
+    summary = f"Recovery state: {recovery_level.value}. "
+    if recovery_level == RecoveryLevel.DEPLETED:
+        summary += "Critical fatigue detected. Strongly recommend rest day and prioritize sleep."
+    elif recovery_level == RecoveryLevel.FATIGUED:
+        summary += "Fatigued state. Suggest light tasks only and active recovery instead of training."
+    elif recovery_level == RecoveryLevel.GOOD:
+        summary += "Normal recovery. Standard scheduling recommended."
+    else:
+        summary += "Excellent recovery state. Can handle demanding work and training."
+    
+    return RecoveryAssessmentResponse(
+        recovery_level=recovery_level,
+        wellness_signals={
+            "date": target_date.isoformat(),
+            "hrv_rmssd": signals.hrv_rmssd,
+            "resting_hr": signals.resting_hr,
+            "sleep_hours": signals.sleep_hours,
+            "sleep_score": signals.sleep_score,
+            "body_battery": signals.body_battery,
+            "stress_avg": signals.stress_avg,
+        },
+        signal_interpretation=signal_interpretation,
+        recommended_intensity=TaskIntensity.LIGHTWEIGHT if recovery_level == RecoveryLevel.FATIGUED else (
+            TaskIntensity.REST if recovery_level == RecoveryLevel.DEPLETED else TaskIntensity.STANDARD
+        ),
+        task_recommendations=task_recommendations,
+        workout_recommendations=workout_recommendations,
+        recovery_priorities=recovery_priorities,
+        summary=summary,
+        confidence=0.75,
+    )
+
+
+@app.get("/api/v1/recovery/interpret-signal", tags=["recovery-planning"])
+async def interpret_signal(
+    signal_name: str,
+    value: float,
+) -> dict:
+    """
+    GET /api/v1/recovery/interpret-signal
+    
+    Get human-readable interpretation of a wellness signal.
+    
+    Examples:
+    - /api/v1/recovery/interpret-signal?signal_name=hrv_rmssd&value=45
+    - /api/v1/recovery/interpret-signal?signal_name=sleep_hours&value=6.2
+    
+    Task #810: Recovery-aware planning
+    """
+    interpretation = interpret_wellness_signal(signal_name, value)
+    
+    return {
+        "signal": signal_name,
+        "value": value,
+        "interpretation": interpretation,
+    }
+
+
+@app.get("/api/v1/recovery/recommendations", tags=["recovery-planning"])
+async def get_recommendations(
+    recovery_level: RecoveryLevel,
+    include_tasks: bool = True,
+    include_workouts: bool = True,
+) -> dict:
+    """
+    GET /api/v1/recovery/recommendations
+    
+    Get recovery recommendations for a given recovery level.
+    
+    Task #810: Recovery-aware planning
+    """
+    result = {}
+    
+    if include_tasks:
+        result["task_recommendations"] = get_task_recommendations(recovery_level)
+    
+    if include_workouts:
+        result["workout_recommendations"] = get_workout_recommendations(recovery_level)
+    
+    return {
+        "recovery_level": recovery_level.value,
+        "recommendations": result,
+        "summary": f"Recommendations for {recovery_level.value} recovery state",
+    }
+
+
+# ============================================================================
 # Error handlers
 # ============================================================================
 
