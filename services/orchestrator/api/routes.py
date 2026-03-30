@@ -14,7 +14,7 @@ import json
 import time
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from shared.log import get_logger
 
@@ -140,3 +140,73 @@ async def chat(request: ChatRequest) -> ChatResponse:
         user_name=request.user_name,
     )
     return ChatResponse(response=response, chat_id=request.chat_id)
+
+
+# --- Weather proxy (proxies HA weather entities) ---
+
+@router.get("/weather")
+async def get_weather():
+    """Get current weather and forecast from Home Assistant."""
+    from shared.ha_client import HomeAssistantClient
+    from services.orchestrator.config import OrchestratorSettings
+
+    settings = OrchestratorSettings()
+    ha = HomeAssistantClient(settings.ha_url, settings.ha_token)
+
+    try:
+        state = await ha.get_state("weather.forecast_home")
+    except Exception as e:
+        # Try alternative entity names
+        try:
+            state = await ha.get_state("weather.home")
+        except Exception:
+            raise HTTPException(status_code=502, detail=f"Could not get weather from HA: {e}")
+
+    attrs = state.get("attributes", {})
+    return {
+        "state": state.get("state", "unknown"),  # e.g. "sunny", "cloudy", "rainy"
+        "temperature": attrs.get("temperature"),
+        "humidity": attrs.get("humidity"),
+        "wind_speed": attrs.get("wind_speed"),
+        "wind_bearing": attrs.get("wind_bearing"),
+        "pressure": attrs.get("pressure"),
+        "visibility": attrs.get("visibility"),
+        "attribution": attrs.get("attribution"),
+        "forecast": attrs.get("forecast", [])[:5],  # next 5 periods
+        "friendly_name": attrs.get("friendly_name", "Weather"),
+        "unit_of_measurement": {
+            "temperature": attrs.get("temperature_unit", "°C"),
+            "wind_speed": attrs.get("wind_speed_unit", "km/h"),
+            "pressure": attrs.get("pressure_unit", "hPa"),
+        }
+    }
+
+
+@router.get("/weather/forecast")
+async def get_weather_forecast(days: int = 5):
+    """Get extended weather forecast from Home Assistant."""
+    from shared.ha_client import HomeAssistantClient
+    from services.orchestrator.config import OrchestratorSettings
+
+    settings = OrchestratorSettings()
+    ha = HomeAssistantClient(settings.ha_url, settings.ha_token)
+
+    try:
+        state = await ha.get_state("weather.forecast_home")
+    except Exception:
+        try:
+            state = await ha.get_state("weather.home")
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Could not get forecast from HA: {e}")
+
+    attrs = state.get("attributes", {})
+    forecast = attrs.get("forecast", [])
+
+    return {
+        "forecast": forecast[:days],
+        "current": {
+            "state": state.get("state"),
+            "temperature": attrs.get("temperature"),
+            "humidity": attrs.get("humidity"),
+        }
+    }
