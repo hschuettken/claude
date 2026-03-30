@@ -186,12 +186,17 @@ async def transcribe(
 async def root():
     """Service info endpoint."""
     return {
-        "service": "memora-transcription",
-        "version": "1.0.0",
+        "service": "memora",
+        "version": "2.0.0",
         "status": "running",
         "endpoints": {
             "health": "/health",
             "transcribe": "/transcribe",
+            "extract_intelligence": "/extract_intelligence",
+            "extract_action_items": "/extract_action_items",
+            "extract_decisions": "/extract_decisions",
+            "extract_questions": "/extract_questions",
+            "extract_risks": "/extract_risks",
             "docs": "/docs",
         },
     }
