@@ -17,8 +17,9 @@ import tempfile
 from typing import Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel
+import pathlib
 
 from transcriber import TranscriberService, TranscriptionResult
 from meeting_intelligence import (
@@ -864,6 +865,25 @@ async def search_stats() -> JSONResponse:
         )
 
 
+@app.get("/ui", response_class=HTMLResponse, tags=["ui"])
+async def get_ui():
+    """
+    Serve Memora voice capture UI.
+    
+    Returns HTML frontend for browser-based voice recording,
+    transcription, and classification.
+    """
+    frontend_path = pathlib.Path(__file__).parent / "frontend.html"
+    if not frontend_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Frontend UI not found",
+        )
+    
+    with open(frontend_path, "r") as f:
+        return f.read()
+
+
 @app.get("/", tags=["info"])
 async def root():
     """Service info endpoint."""
@@ -878,6 +898,7 @@ async def root():
             "Keyword-based search",
         ],
         "endpoints": {
+            "ui": "/ui",
             "health": "/health",
             "transcribe": "/transcribe",
             "classify": "/classify",

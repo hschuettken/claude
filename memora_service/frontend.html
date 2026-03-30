@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Memora - Voice Capture & Transcription</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 600px;
+            width: 100%;
+            padding: 40px;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+
+        h1 {
+            color: #333;
+            font-size: 28px;
+            margin-bottom: 8px;
+        }
+
+        .subtitle {
+            color: #888;
+            font-size: 14px;
+        }
+
+        .section {
+            margin-bottom: 32px;
+        }
+
+        .section-title {
+            color: #667eea;
+            font-size: 14px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 16px;
+        }
+
+        .recorder-box {
+            background: #f8f9fa;
+            border: 2px solid #e0e0e0;
+            border-radius: 12px;
+            padding: 24px;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+
+        .recorder-box.recording {
+            background: #ffebee;
+            border-color: #ef5350;
+        }
+
+        .record-button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 80px;
+            height: 80px;
+            font-size: 36px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .record-button:hover:not(:disabled) {
+            transform: scale(1.05);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+        }
+
+        .record-button:active:not(:disabled) {
+            transform: scale(0.95);
+        }
+
+        .record-button.recording {
+            background: linear-gradient(135deg, #ef5350 0%, #e53935 100%);
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                box-shadow: 0 4px 15px rgba(239, 83, 80, 0.4);
+            }
+            50% {
+                box-shadow: 0 4px 30px rgba(239, 83, 80, 0.8);
+            }
+        }
+
+        .status {
+            margin-top: 16px;
+            font-size: 14px;
+            color: #666;
+        }
+
+        .timer {
+            font-size: 24px;
+            font-weight: 600;
+            color: #667eea;
+            margin-top: 12px;
+            font-family: 'Courier New', monospace;
+        }
+
+        .timer.recording {
+            color: #ef5350;
+        }
+
+        .controls {
+            display: flex;
+            gap: 12px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-secondary {
+            background: #e0e0e0;
+            color: #333;
+        }
+
+        .btn-secondary:hover:not(:disabled) {
+            background: #d0d0d0;
+        }
+
+        .btn-danger {
+            background: #ef5350;
+            color: white;
+        }
+
+        .btn-danger:hover:not(:disabled) {
+            background: #e53935;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .transcript-box {
+            background: #f8f9fa;
+            border: 1px solid #e0e0e0;
+            border-radius: 12px;
+            padding: 16px;
+            min-height: 100px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-size: 14px;
+            color: #333;
+            line-height: 1.6;
+            margin: 0;
+        }
+
+        .transcript-box.empty {
+            color: #aaa;
+            font-style: italic;
+        }
+
+        .result-box {
+            background: #f0f4ff;
+            border-left: 4px solid #667eea;
+            border-radius: 8px;
+            padding: 16px;
+            margin-top: 16px;
+        }
+
+        .result-label {
+            font-size: 12px;
+            font-weight: 600;
+            color: #667eea;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+
+        .result-value {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 8px;
+        }
+
+        .result-confidence {
+            font-size: 12px;
+            color: #666;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #667eea;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-left: 8px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .alert {
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            font-size: 14px;
+        }
+
+        .alert-error {
+            background: #ffebee;
+            color: #c62828;
+            border-left: 4px solid #ef5350;
+        }
+
+        .alert-success {
+            background: #e8f5e9;
+            color: #2e7d32;
+            border-left: 4px solid #4caf50;
+        }
+
+        .alert-info {
+            background: #e3f2fd;
+            color: #1565c0;
+            border-left: 4px solid #2196f3;
+        }
+
+        .loading {
+            opacity: 0.6;
+            pointer-events: none;
+        }
+
+        .metadata {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-top: 12px;
+            font-size: 12px;
+        }
+
+        .metadata-item {
+            background: white;
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: 1px solid #e0e0e0;
+        }
+
+        .metadata-label {
+            color: #888;
+            font-weight: 600;
+            display: block;
+            margin-bottom: 4px;
+        }
+
+        .metadata-value {
+            color: #333;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎙️ Memora</h1>
+            <p class="subtitle">Voice Capture → Transcription → Smart Classification</p>
+        </header>
+
+        <div id="alertContainer"></div>
+
+        <!-- Recording Section -->
+        <div class="section">
+            <div class="section-title">📍 Record Your Voice</div>
+            <div class="recorder-box" id="recorderBox">
+                <button class="record-button" id="recordButton" title="Click to start recording">
+                    ● 
+                </button>
+                <div class="status" id="status">Ready to record</div>
+                <div class="timer" id="timer">00:00</div>
+                <div class="controls">
+                    <button class="btn btn-secondary" id="pauseButton" disabled>Pause</button>
+                    <button class="btn btn-danger" id="stopButton" disabled>Stop</button>
+                    <button class="btn btn-secondary" id="cancelButton">Clear</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Transcript Section -->
+        <div class="section" id="transcriptSection" style="display: none;">
+            <div class="section-title">📝 Transcript</div>
+            <textarea class="transcript-box" id="transcript" readonly></textarea>
+            <div class="metadata">
+                <div class="metadata-item">
+                    <span class="metadata-label">Duration</span>
+                    <span class="metadata-value" id="duration">-</span>
+                </div>
+                <div class="metadata-item">
+                    <span class="metadata-label">Language</span>
+                    <span class="metadata-value" id="language">-</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Classification Section -->
+        <div class="section" id="classificationSection" style="display: none;">
+            <div class="section-title">✨ Classification</div>
+            <div class="result-box">
+                <div class="result-label">Type</div>
+                <div class="result-value" id="classification">-</div>
+                <div class="result-confidence">
+                    Confidence: <span id="confidence">-</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Actions Section -->
+        <div class="section" id="actionsSection" style="display: none;">
+            <div class="section-title">⚡ Actions</div>
+            <div class="controls">
+                <button class="btn btn-primary" id="extractButton">Extract Intelligence</button>
+                <button class="btn btn-secondary" id="downloadButton">Download</button>
+                <button class="btn btn-danger" id="resetButton">Start Over</button>
+            </div>
+        </div>
+
+        <!-- Extracted Intelligence Section -->
+        <div class="section" id="intelligenceSection" style="display: none;">
+            <div class="section-title">🧠 Extracted Intelligence</div>
+            <div id="intelligenceContent"></div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const API_BASE = window.location.origin.includes('localhost') 
+            ? 'http://localhost:8071'
+            : '/api/memora';
+
+        // DOM Elements
+        const recordButton = document.getElementById('recordButton');
+        const pauseButton = document.getElementById('pauseButton');
+        const stopButton = document.getElementById('stopButton');
+        const cancelButton = document.getElementById('cancelButton');
+        const status = document.getElementById('status');
+        const timer = document.getElementById('timer');
+        const recorderBox = document.getElementById('recorderBox');
+        const alertContainer = document.getElementById('alertContainer');
+        const transcriptSection = document.getElementById('transcriptSection');
+        const classificationSection = document.getElementById('classificationSection');
+        const actionsSection = document.getElementById('actionsSection');
+        const intelligenceSection = document.getElementById('intelligenceSection');
+        const extractButton = document.getElementById('extractButton');
+        const downloadButton = document.getElementById('downloadButton');
+        const resetButton = document.getElementById('resetButton');
+
+        // State
+        let mediaRecorder;
+        let audioChunks = [];
+        let recordingStartTime;
+        let timerInterval;
+        let transcriptData = null;
+        let classificationData = null;
+
+        // Initialize
+        async function init() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream, {
+                    mimeType: 'audio/webm;codecs=opus',
+                });
+
+                mediaRecorder.ondataavailable = (e) => {
+                    audioChunks.push(e.data);
+                };
+
+                mediaRecorder.onstop = async () => {
+                    await onRecordingStop();
+                };
+
+                recordButton.disabled = false;
+            } catch (err) {
+                showAlert('Microphone access denied. Please enable microphone permissions.', 'error');
+                recordButton.disabled = true;
+            }
+        }
+
+        // Recording Functions
+        function startRecording() {
+            audioChunks = [];
+            mediaRecorder.start();
+            recordingStartTime = Date.now();
+            recordButton.disabled = true;
+            pauseButton.disabled = false;
+            stopButton.disabled = false;
+            recordButton.classList.add('recording');
+            recorderBox.classList.add('recording');
+            timer.classList.add('recording');
+            status.textContent = 'Recording...';
+            startTimer();
+        }
+
+        function pauseRecording() {
+            if (mediaRecorder.state === 'recording') {
+                mediaRecorder.pause();
+                pauseButton.textContent = 'Resume';
+                status.textContent = 'Paused';
+            } else {
+                mediaRecorder.resume();
+                pauseButton.textContent = 'Pause';
+                status.textContent = 'Recording...';
+            }
+        }
+
+        function stopRecording() {
+            mediaRecorder.stop();
+        }
+
+        function cancelRecording() {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+            }
+            reset();
+        }
+
+        function startTimer() {
+            timerInterval = setInterval(() => {
+                const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+                const minutes = Math.floor(elapsed / 60);
+                const seconds = elapsed % 60;
+                timer.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+            }, 100);
+        }
+
+        function stopTimer() {
+            clearInterval(timerInterval);
+        }
+
+        async function onRecordingStop() {
+            stopTimer();
+            recordButton.classList.remove('recording');
+            recorderBox.classList.remove('recording');
+            timer.classList.remove('recording');
+            recordButton.disabled = false;
+            pauseButton.disabled = true;
+            stopButton.disabled = true;
+            pauseButton.textContent = 'Pause';
+            status.textContent = 'Processing...';
+
+            // Create audio blob
+            const audioBlob = new Blob(audioChunks, { type: 'audio/webm;codecs=opus' });
+
+            // Transcribe
+            await transcribeAudio(audioBlob);
+        }
+
+        async function transcribeAudio(audioBlob) {
+            try {
+                const formData = new FormData();
+                formData.append('file', audioBlob, 'recording.webm');
+
+                const response = await fetch(`${API_BASE}/transcribe`, {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Transcription failed: ${response.statusText}`);
+                }
+
+                const result = await response.json();
+
+                if (result.success) {
+                    transcriptData = result;
+                    displayTranscript(result);
+                    await classifyContent(result.text);
+                    showAlert('Transcription successful!', 'success');
+                } else {
+                    showAlert(`Transcription error: ${result.error}`, 'error');
+                }
+            } catch (err) {
+                showAlert(`Error: ${err.message}`, 'error');
+                status.textContent = 'Error during transcription';
+            }
+        }
+
+        function displayTranscript(data) {
+            document.getElementById('transcript').textContent = data.text;
+            document.getElementById('duration').textContent = 
+                data.duration_seconds ? `${data.duration_seconds.toFixed(1)}s` : '-';
+            document.getElementById('language').textContent = data.language || '-';
+            transcriptSection.style.display = 'block';
+            actionsSection.style.display = 'block';
+            status.textContent = 'Ready';
+        }
+
+        async function classifyContent(text) {
+            try {
+                const response = await fetch(`${API_BASE}/classify`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text }),
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Classification failed: ${response.statusText}`);
+                }
+
+                const result = await response.json();
+
+                if (result.success) {
+                    classificationData = result;
+                    displayClassification(result);
+                } else {
+                    showAlert(`Classification error: ${result.error}`, 'error');
+                }
+            } catch (err) {
+                showAlert(`Classification error: ${err.message}`, 'error');
+            }
+        }
+
+        function displayClassification(data) {
+            const typeEmojis = {
+                'idea': '💡',
+                'task': '✅',
+                'note': '📌',
+                'meeting': '🤝',
+            };
+
+            document.getElementById('classification').textContent = 
+                `${typeEmojis[data.classification] || '📝'} ${data.classification}`;
+            document.getElementById('confidence').textContent = 
+                `${(data.confidence * 100).toFixed(0)}%`;
+            classificationSection.style.display = 'block';
+        }
+
+        async function extractIntelligence() {
+            if (!transcriptData) return;
+
+            try {
+                extractButton.disabled = true;
+                extractButton.innerHTML = 'Extracting <span class="spinner"></span>';
+
+                const response = await fetch(`${API_BASE}/extract_intelligence`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        transcript: transcriptData.text,
+                        meeting_id: `memora_${Date.now()}`,
+                        language: transcriptData.language || 'en',
+                        duration_seconds: transcriptData.duration_seconds,
+                    }),
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Intelligence extraction failed: ${response.statusText}`);
+                }
+
+                const result = await response.json();
+
+                if (result.success) {
+                    displayIntelligence(result.result);
+                    showAlert('Intelligence extracted successfully!', 'success');
+                } else {
+                    showAlert(`Extraction error: ${result.error}`, 'error');
+                }
+            } catch (err) {
+                showAlert(`Error: ${err.message}`, 'error');
+            } finally {
+                extractButton.disabled = false;
+                extractButton.textContent = 'Extract Intelligence';
+            }
+        }
+
+        function displayIntelligence(data) {
+            let html = '';
+
+            if (data.summary) {
+                html += `<p style="margin-bottom: 16px; font-size: 14px; color: #666;"><strong>Summary:</strong> ${data.summary}</p>`;
+            }
+
+            if (data.action_items && data.action_items.length > 0) {
+                html += '<div style="margin-bottom: 16px;">';
+                html += '<strong style="color: #667eea;">✅ Action Items</strong>';
+                html += '<ul style="margin-left: 20px; margin-top: 8px;">';
+                data.action_items.forEach(item => {
+                    html += `<li>${item.description}`;
+                    if (item.owner) html += ` <strong>(${item.owner})</strong>`;
+                    if (item.due_date) html += ` - Due: ${item.due_date}`;
+                    html += '</li>';
+                });
+                html += '</ul></div>';
+            }
+
+            if (data.decisions && data.decisions.length > 0) {
+                html += '<div style="margin-bottom: 16px;">';
+                html += '<strong style="color: #667eea;">🤝 Decisions</strong>';
+                html += '<ul style="margin-left: 20px; margin-top: 8px;">';
+                data.decisions.forEach(dec => {
+                    html += `<li>${dec.description}`;
+                    if (dec.rationale) html += ` - ${dec.rationale}`;
+                    html += '</li>';
+                });
+                html += '</ul></div>';
+            }
+
+            if (data.open_questions && data.open_questions.length > 0) {
+                html += '<div style="margin-bottom: 16px;">';
+                html += '<strong style="color: #667eea;">❓ Open Questions</strong>';
+                html += '<ul style="margin-left: 20px; margin-top: 8px;">';
+                data.open_questions.forEach(q => {
+                    html += `<li>${q.question}</li>`;
+                });
+                html += '</ul></div>';
+            }
+
+            if (data.risks && data.risks.length > 0) {
+                html += '<div style="margin-bottom: 16px;">';
+                html += '<strong style="color: #667eea;">⚠️ Risks</strong>';
+                html += '<ul style="margin-left: 20px; margin-top: 8px;">';
+                data.risks.forEach(risk => {
+                    const severityColor = {
+                        'critical': '#ef5350',
+                        'high': '#ff9800',
+                        'medium': '#fbc02d',
+                        'low': '#4caf50',
+                    }[risk.severity] || '#999';
+                    html += `<li style="color: ${severityColor};"><strong>[${risk.severity.toUpperCase()}]</strong> ${risk.description}`;
+                    if (risk.mitigation) html += ` - Mitigation: ${risk.mitigation}`;
+                    html += '</li>';
+                });
+                html += '</ul></div>';
+            }
+
+            document.getElementById('intelligenceContent').innerHTML = html;
+            intelligenceSection.style.display = 'block';
+        }
+
+        function downloadData() {
+            const data = {
+                transcript: transcriptData?.text || '',
+                classification: classificationData?.classification || '',
+                confidence: classificationData?.confidence || 0,
+                timestamp: new Date().toISOString(),
+            };
+
+            const json = JSON.stringify(data, null, 2);
+            const blob = new Blob([json], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `memora_${Date.now()}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        function reset() {
+            audioChunks = [];
+            transcriptData = null;
+            classificationData = null;
+            document.getElementById('transcript').textContent = '';
+            document.getElementById('classification').textContent = '-';
+            document.getElementById('confidence').textContent = '-';
+            document.getElementById('intelligenceContent').innerHTML = '';
+            timer.textContent = '00:00';
+            status.textContent = 'Ready to record';
+            recordButton.disabled = false;
+            pauseButton.disabled = true;
+            stopButton.disabled = true;
+            pauseButton.textContent = 'Pause';
+            recordButton.classList.remove('recording');
+            recorderBox.classList.remove('recording');
+            timer.classList.remove('recording');
+            transcriptSection.style.display = 'none';
+            classificationSection.style.display = 'none';
+            actionsSection.style.display = 'none';
+            intelligenceSection.style.display = 'none';
+            alertContainer.innerHTML = '';
+        }
+
+        function showAlert(message, type = 'info') {
+            const alert = document.createElement('div');
+            alert.className = `alert alert-${type}`;
+            alert.textContent = message;
+            alertContainer.appendChild(alert);
+            setTimeout(() => alert.remove(), 5000);
+        }
+
+        // Event Listeners
+        recordButton.addEventListener('click', startRecording);
+        pauseButton.addEventListener('click', pauseRecording);
+        stopButton.addEventListener('click', stopRecording);
+        cancelButton.addEventListener('click', cancelRecording);
+        extractButton.addEventListener('click', extractIntelligence);
+        downloadButton.addEventListener('click', downloadData);
+        resetButton.addEventListener('click', reset);
+
+        // Initialize on load
+        window.addEventListener('load', init);
+    </script>
+</body>
+</html>
