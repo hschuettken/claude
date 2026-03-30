@@ -153,16 +153,20 @@ async def get_weather():
     settings = OrchestratorSettings()
     ha = HomeAssistantClient(settings.ha_url, settings.ha_token)
 
-    try:
-        state = await ha.get_state("weather.forecast_home")
-    except Exception as e:
+    # Try entities in priority order
+    for entity in ["weather.forecast_home_2", "weather.home", "weather.openweathermap", "weather.forecast_home"]:
         try:
-            state = await ha.get_state("weather.home")
+            state = await ha.get_state(entity)
+            if state.get("state") != "unavailable":
+                break
         except Exception:
-            raise HTTPException(status_code=502, detail=f"Could not get weather from HA: {e}")
+            continue
+    else:
+        raise HTTPException(status_code=502, detail="No working weather entity found in HA")
 
     attrs = state.get("attributes", {})
     return {
+        "entity_id": entity,
         "state": state.get("state", "unknown"),
         "temperature": attrs.get("temperature"),
         "humidity": attrs.get("humidity"),
@@ -190,13 +194,15 @@ async def get_weather_forecast(days: int = 5):
     settings = OrchestratorSettings()
     ha = HomeAssistantClient(settings.ha_url, settings.ha_token)
 
-    try:
-        state = await ha.get_state("weather.forecast_home")
-    except Exception:
+    for entity in ["weather.forecast_home_2", "weather.home", "weather.openweathermap", "weather.forecast_home"]:
         try:
-            state = await ha.get_state("weather.home")
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Could not get forecast from HA: {e}")
+            state = await ha.get_state(entity)
+            if state.get("state") != "unavailable":
+                break
+        except Exception:
+            continue
+    else:
+        raise HTTPException(status_code=502, detail="No working weather entity found in HA")
 
     attrs = state.get("attributes", {})
     forecast = attrs.get("forecast", [])
