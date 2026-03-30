@@ -6,6 +6,7 @@ Endpoints:
     GET  /api/v1/tools          -- List available tools
     POST /api/v1/tools/execute  -- Execute a single tool directly
     POST /api/v1/chat           -- Full Brain reasoning (like Telegram)
+    GET  /api/v1/context/snapshot -- Cross-domain context (calendar+weather+energy+tasks)
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from api.models import (
     ToolRequest,
     ToolResponse,
 )
+from api import context_snapshot
 from tools import TOOL_DEFINITIONS
 
 logger = get_logger("api.routes")
@@ -58,6 +60,9 @@ def configure(
     _settings = settings
     _service_states = service_states
     _start_time = start_time
+    
+    # Configure context snapshot service
+    context_snapshot.configure(tool_executor=tool_executor, settings=settings)
 
 
 @router.get("/status", response_model=ServiceStatus)

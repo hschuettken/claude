@@ -23,7 +23,7 @@ from mcp.server.sse import SseServerTransport
 
 from shared.log import get_logger
 
-from api import routes, mcp_server
+from api import routes, mcp_server, context_snapshot
 from api.auth import APIKeyMiddleware
 
 logger = get_logger("api.server")
@@ -73,6 +73,10 @@ def create_app(
         start_time=start_time,
     )
     app.include_router(routes.router)
+    
+    # --- Wire up context snapshot routes ---
+    context_snapshot.configure(tool_executor=tool_executor, settings=settings)
+    app.include_router(context_snapshot.router)
 
     # --- Health endpoint (exempt from auth) ---
     @app.get("/_health", tags=["health"])

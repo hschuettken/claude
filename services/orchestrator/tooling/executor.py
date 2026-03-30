@@ -25,6 +25,7 @@ from tooling.memory_tools import MemoryTools
 from tooling.notification_tools import NotificationTools
 from tooling.orbit_tools import OrbitTools
 from tooling.hems_tools import HEMSTools
+from tooling.training_tools import TrainingTools
 
 logger = get_logger("tooling.executor")
 
@@ -85,6 +86,7 @@ class ToolExecutor:
         self._notification_tools = NotificationTools(send_notification_fn=send_notification_fn)
         self._orbit_tools = OrbitTools()
         self._hems_tools = HEMSTools()
+        self._training_tools = TrainingTools()
 
         # Build dispatch table: tool_name → (handler_instance, method_name)
         self._dispatch: dict[str, tuple[Any, str]] = {}
@@ -146,6 +148,8 @@ class ToolExecutor:
             "orbit_create_project",
             "orbit_decompose_project",
             "orbit_detect_intent",
+            "orbit_rescue_week",
+            "orbit_overload_protection",
         ):
             self._dispatch[name] = (self._orbit_tools, name)
 
@@ -164,6 +168,16 @@ class ToolExecutor:
             "get_energy_status",
         ):
             self._dispatch[name] = (self._hems_tools, name)
+
+        # Training tools (performance trend estimation)
+        for name in (
+            "get_performance_trend",
+            "predict_fitness_improvement",
+            "detect_overtraining_risk",
+            "get_weekly_training_load",
+            "get_recovery_status",
+        ):
+            self._dispatch[name] = (self._training_tools, name)
 
         # Weather (inline on self — uses HA directly)
         self._dispatch["get_weather_forecast"] = (self, "_impl_get_weather_forecast")

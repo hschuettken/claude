@@ -363,6 +363,61 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "orbit_what_now",
+            "description": (
+                "Planning mode: 'What Now?' — Get the best action for the next 15–120 minutes. "
+                "Considers available time, energy level, and task priorities. "
+                "Returns top 3 suggestions with explanations."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "available_minutes": {
+                        "type": "integer",
+                        "description": "Available time in minutes (default: 60)",
+                    },
+                    "energy_level": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high"],
+                        "description": "Current energy level (optional)",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "orbit_rescue_week",
+            "description": (
+                "Planning mode: 'Rescue My Week' — Repair a failing week by reprioritizing. "
+                "Analyzes current schedule and tasks, identifies what can be done to salvage the week. "
+                "Returns priorities, deferrable items, and quick-win suggestions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "orbit_overload_protection",
+            "description": (
+                "Planning mode: 'Overload Protection' — Reduce strain when overloaded. "
+                "Detects when >8h scheduled, identifies defeatable tasks, and suggests smart deferrals. "
+                "Preserves essentials while intelligently lowering ambition."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
 ]
 
 
@@ -710,4 +765,40 @@ class OrbitTools:
             confidence * 100,
             f"task created: {task_title} (id={task_id})" if task_id else "no task created",
         )
+        return data
+
+    # ------------------------------------------------------------------
+    # Planning Modes
+    # ------------------------------------------------------------------
+
+    async def orbit_rescue_week(self) -> dict[str, Any]:
+        """Rescue My Week planning mode — repair a failing week.
+        
+        Analyzes the current schedule and tasks to identify quick wins,
+        deferrable items, and priority shifts that can salvage the week.
+        """
+        client = await self._get_client()
+        resp = await client.post(
+            _url("/planning/rescue-week"),
+            headers=_headers(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        logger.info("Rescue Week analysis: %s", data.get("summary", ""))
+        return data
+
+    async def orbit_overload_protection(self) -> dict[str, Any]:
+        """Overload Protection planning mode — reduce strain when overloaded.
+        
+        Detects if >8h scheduled today, identifies defeatable tasks,
+        and suggests smart deferrals to restore balance.
+        """
+        client = await self._get_client()
+        resp = await client.post(
+            _url("/planning/overload-protection"),
+            headers=_headers(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        logger.info("Overload Protection check: %s", data.get("summary", ""))
         return data
