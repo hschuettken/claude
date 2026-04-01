@@ -377,7 +377,31 @@ class ChargingStrategy:
             # discharge to bridge the gap. Better to drain battery than to cycle
             # the wallbox on/off (which triggers anti-cycling cooldowns).
             # Skip bridge logic in Battery Drain mode — drain_boost already handles this.
-            if not ctx.battery_drain and ctx.battery_soc_pct > self.battery_min_soc_pct + 10:
+            #
+            # ENERGY CHECK: Only bridge if there's enough remaining PV to
+            # cover household + battery top-off after bridging.  Otherwise
+            # we drain the battery for the last dribbles of sun and end up
+            # with a lower overnight SoC for no meaningful EV charge.
+            bridge_energy_ok = True
+            bridge_deny_reason = ""
+            if not ctx.battery_drain:
+                hours_left = max(0.5, self._estimate_daylight_hours_remaining(ctx.now))
+                household_kwh = (ctx.house_power_w / 1000.0) * hours_left
+                battery_to_full_kwh = (
+                    (100.0 - ctx.battery_soc_pct) / 100.0
+                    * ctx.battery_capacity_kwh
+                )
+                pv_net_kwh = ctx.pv_forecast_remaining_kwh - household_kwh
+                # Need enough PV surplus to still fill battery + small buffer
+                if pv_net_kwh < battery_to_full_kwh + 0.5:
+                    bridge_energy_ok = False
+                    bridge_deny_reason = (
+                        f"PV net surplus ({pv_net_kwh:.1f} kWh) too low to "
+                        f"refill battery ({battery_to_full_kwh:.1f} kWh needed). "
+                        f"Letting wallbox stop to preserve battery SoC."
+                    )
+
+            if not ctx.battery_drain and bridge_energy_ok and ctx.battery_soc_pct > self.battery_min_soc_pct + 10:
                 bridge_shortfall = self.min_power_w - available
                 bridge_available = min(bridge_shortfall, self.battery_ev_assist_max_w)
                 bridged = available + bridge_available
@@ -391,6 +415,13 @@ class ChargingStrategy:
                         battery_assist_w=round(assist + hold_boost + bridge_available, 1),
                         battery_assist_reason=f"Bridge: {bridge_available:.0f} W to prevent stop",
                     )
+            elif not ctx.battery_drain and not bridge_energy_ok:
+                logger.info(
+                    "bridge_denied_energy",
+                    reason=bridge_deny_reason,
+                    pv_remaining=round(ctx.pv_forecast_remaining_kwh, 1),
+                    battery_soc=round(ctx.battery_soc_pct),
+                )
 
             return ChargingDecision(
                 0,
