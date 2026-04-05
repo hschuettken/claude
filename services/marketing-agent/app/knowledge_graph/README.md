@@ -147,12 +147,12 @@ Example enriched prompt:
 Set these environment variables:
 
 ```bash
-NEO4J_URL=bolt://192.168.0.23:7687          # LXC 340 or actual Neo4j host
+NEO4J_URL=bolt://192.168.0.88:7687          # LXC 340
 NEO4J_USER=neo4j                              # Neo4j username
 NEO4J_PASSWORD=<password>                    # Neo4j password
 ```
 
-Default Neo4j URL is `bolt://192.168.0.23:7687` (LXC 340 on Proxmox).
+Default Neo4j URL is `bolt://192.168.0.88:7687` (LXC 340 on Proxmox).
 
 ## Graceful Degradation
 

@@ -21,7 +21,7 @@ class MarketingSettings(BaseSettings):
     scout_enabled: bool = True
 
     # Knowledge Graph (Neo4j)
-    neo4j_url: str = "bolt://192.168.0.23:7687"  # LXC 340 (or actual host IP)
+    neo4j_url: str = "bolt://192.168.0.88:7687"  # LXC 340
     neo4j_user: str = "neo4j"
     neo4j_password: str = ""  # Set via .env or secrets
 
