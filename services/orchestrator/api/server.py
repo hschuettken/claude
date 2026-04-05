@@ -2,7 +2,7 @@
 
 Creates a single ASGI app that serves:
   /api/v1/*  -- REST API endpoints
-  /mcp       -- MCP SSE transport
+  /mcp       -- MCP streamable HTTP transport
   /_health   -- Docker healthcheck
 
 The server is started as a background asyncio task alongside
@@ -16,10 +16,8 @@ from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
-from starlette.applications import Starlette
-from starlette.routing import Mount, Route
 
-from mcp.server.sse import SseServerTransport
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
 from shared.log import get_logger
 
@@ -79,7 +77,7 @@ def create_app(
     async def health() -> dict[str, str]:
         return {"status": "healthy"}
 
-    # --- MCP server (SSE transport) ---
+    # --- MCP server (streamable HTTP transport) ---
     mcp_server.configure(
         tool_executor=tool_executor,
         brain=brain,
@@ -88,27 +86,10 @@ def create_app(
         activity=activity,
     )
     server = mcp_server.create_mcp_server()
-    sse = SseServerTransport("/mcp/messages/")
 
-    async def handle_sse(request: Any) -> None:
-        """Handle MCP SSE connection."""
-        async with sse.connect_sse(
-            request.scope, request.receive, request._send,
-        ) as (read_stream, write_stream):
-            await server.run(
-                read_stream,
-                write_stream,
-                server.create_initialization_options(),
-            )
-
-    # Mount MCP SSE endpoints as a Starlette sub-app
-    mcp_app = Starlette(
-        routes=[
-            Route("/sse", endpoint=handle_sse),
-            Mount("/messages/", app=sse.handle_post_message),
-        ],
-    )
-    app.mount("/mcp", mcp_app)
+    # Mount MCP streamable HTTP transport
+    manager = StreamableHTTPSessionManager(app=server)
+    app.mount("/mcp", manager.handle_request)
 
     logger.info(
         "api_app_created",
