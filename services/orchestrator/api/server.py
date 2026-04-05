@@ -89,6 +89,20 @@ def create_app(
 
     # Mount MCP streamable HTTP transport
     manager = StreamableHTTPSessionManager(app=server)
+    _mcp_state: dict = {}
+
+    @app.on_event("startup")
+    async def _start_mcp_manager() -> None:
+        _mcp_state["ctx"] = manager.run()
+        await _mcp_state["ctx"].__aenter__()
+        logger.info("mcp_http_started", endpoint="/mcp")
+
+    @app.on_event("shutdown")
+    async def _stop_mcp_manager() -> None:
+        ctx = _mcp_state.get("ctx")
+        if ctx:
+            await ctx.__aexit__(None, None, None)
+
     app.mount("/mcp", manager.handle_request)
 
     logger.info(
