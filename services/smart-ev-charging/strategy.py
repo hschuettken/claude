@@ -684,8 +684,14 @@ class ChargingStrategy:
         if not ctx.departure_time:
             return False, 0.0, "no departure time set"
 
-        hours_until_departure = self._hours_until_departure(ctx.departure_time, ctx.now)
-        if hours_until_departure is None or hours_until_departure <= 0:
+        # _hours_until_departure returns None when departure is past TODAY — but this
+        # method is called from _nighttime_smart where departure is TOMORROW morning.
+        # Use _hours_until_hour to compute forward-looking hours correctly.
+        departure_hour_float = (
+            ctx.departure_time.hour + ctx.departure_time.minute / 60.0
+        )
+        hours_until_departure = self._hours_until_hour(departure_hour_float, ctx.now)
+        if hours_until_departure <= 0:
             return False, 0.0, "departure already passed"
 
         # Require a minimum window before departure so we can recover if PV disappoints
