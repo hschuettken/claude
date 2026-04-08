@@ -30,28 +30,30 @@ class ChargingContext:
 
     mode: ChargeMode
     wallbox: WallboxState
-    grid_power_w: float        # positive = exporting to grid, negative = importing
-    pv_power_w: float          # total PV production (DC input)
-    battery_power_w: float     # positive = charging, negative = discharging
-    battery_soc_pct: float     # 0–100 %
+    grid_power_w: float  # positive = exporting to grid, negative = importing
+    pv_power_w: float  # total PV production (DC input)
+    battery_power_w: float  # positive = charging, negative = discharging
+    battery_soc_pct: float  # 0–100 %
     pv_forecast_remaining_kwh: float  # remaining PV kWh expected today
-    pv_forecast_tomorrow_kwh: float    # total PV forecast for tomorrow (kWh)
-    house_power_w: float           # current household consumption (W)
-    battery_capacity_kwh: float    # home battery usable capacity (kWh)
+    pv_forecast_tomorrow_kwh: float  # total PV forecast for tomorrow (kWh)
+    house_power_w: float  # current household consumption (W)
+    battery_capacity_kwh: float  # home battery usable capacity (kWh)
     battery_target_eod_soc_pct: float  # acceptable end-of-day battery SoC %
     full_by_morning: bool
     departure_time: time | None
-    target_energy_kwh: float   # manual fallback target (kWh to add)
+    target_energy_kwh: float  # manual fallback target (kWh to add)
     session_energy_kwh: float
-    ev_soc_pct: float | None           # EV battery SoC from car (None = unavailable)
-    ev_battery_capacity_kwh: float     # EV battery capacity (e.g. 77 kWh)
-    ev_target_soc_pct: float           # target SoC % (e.g. 80)
-    overnight_grid_kwh_charged: float  # kWh already charged from grid this overnight session
+    ev_soc_pct: float | None  # EV battery SoC from car (None = unavailable)
+    ev_battery_capacity_kwh: float  # EV battery capacity (e.g. 77 kWh)
+    ev_target_soc_pct: float  # target SoC % (e.g. 80)
+    overnight_grid_kwh_charged: (
+        float  # kWh already charged from grid this overnight session
+    )
     now: datetime
-    departure_passed: bool = False     # True when departure time is in the past
+    departure_passed: bool = False  # True when departure time is in the past
     # Manual Until mode targets
-    manual_target_kwh: float = 0.0    # manual target kWh to charge (Manual Until mode)
-    manual_target_soc: float = 0.0    # manual target SoC % (Manual Until mode)
+    manual_target_kwh: float = 0.0  # manual target kWh to charge (Manual Until mode)
+    manual_target_soc: float = 0.0  # manual target SoC % (Manual Until mode)
     # Forecast-based sensors (from ev-forecast service)
     forecast_needed_kwh: float = 0.0  # kWh needed to reach forecast target SoC
     forecast_needed_soc: float = 0.0  # SoC% needed according to forecast
@@ -91,9 +93,9 @@ class ChargingContext:
 class ChargingDecision:
     """Output: what the wallbox should do."""
 
-    target_power_w: int        # 0 = pause, >0 = charge at this power
-    reason: str                # human-readable explanation
-    skip_control: bool = False # True = don't touch wallbox (Manual mode)
+    target_power_w: int  # 0 = pause, >0 = charge at this power
+    reason: str  # human-readable explanation
+    skip_control: bool = False  # True = don't touch wallbox (Manual mode)
 
     # --- Detailed context for HA sensors ---
     pv_surplus_w: float = 0.0
@@ -104,6 +106,11 @@ class ChargingDecision:
     deadline_required_w: float = 0.0
     energy_remaining_kwh: float = 0.0
     kwh_tocharge_left: float = 0.0
+
+    # --- Solar defer (Phase 2) ---
+    solar_defer_active: bool = False  # True = deferring overnight grid charge to PV
+    solar_defer_pv_kwh: float = 0.0  # Forecast PV available before departure (kWh)
+    solar_defer_needed_kwh: float = 0.0  # Energy still needed (kWh)
 
 
 class ChargingStrategy:
@@ -128,10 +135,13 @@ class ChargingStrategy:
         pv_morning_fraction: float = 0.45,
         charger_efficiency: float = 0.90,
         morning_escalation_hour: int = 11,
-        min_charge_duration_s: int = 300,   # keep charging for at least 5 min
-        stop_cooldown_s: int = 300,         # wait at least 5 min before restarting
-        battery_hold_soc_pct: float = 70.0, # hold battery at this SoC while EV charges
-        battery_hold_margin: float = 1.3,   # 30% safety margin for refill forecast
+        min_charge_duration_s: int = 300,  # keep charging for at least 5 min
+        stop_cooldown_s: int = 300,  # wait at least 5 min before restarting
+        battery_hold_soc_pct: float = 70.0,  # hold battery at this SoC while EV charges
+        battery_hold_margin: float = 1.3,  # 30% safety margin for refill forecast
+        # Phase 2: Solar defer
+        pv_defer_confidence_factor: float = 1.3,  # PV must exceed need by this factor to defer
+        pv_defer_min_hours_before_departure: float = 1.5,  # abort defer if departure < N hours away
     ) -> None:
         self.max_power_w = max_power_w
         self.min_power_w = min_power_w
@@ -154,11 +164,13 @@ class ChargingStrategy:
         self.stop_cooldown_s = stop_cooldown_s
         self.battery_hold_soc_pct = battery_hold_soc_pct
         self.battery_hold_margin = battery_hold_margin
+        self.pv_defer_confidence_factor = pv_defer_confidence_factor
+        self.pv_defer_min_hours_before_departure = pv_defer_min_hours_before_departure
 
         self._was_pv_charging = False
         self._last_target_w: int = 0
-        self._charge_started_at: float | None = None   # monotonic timestamp
-        self._charge_stopped_at: float | None = None    # monotonic timestamp
+        self._charge_started_at: float | None = None  # monotonic timestamp
+        self._charge_stopped_at: float | None = None  # monotonic timestamp
 
     def decide(self, ctx: ChargingContext) -> ChargingDecision:
         """Calculate the target charging power for this cycle."""
@@ -170,7 +182,8 @@ class ChargingStrategy:
 
         if ctx.mode == ChargeMode.MANUAL:
             return ChargingDecision(
-                0, "Manual mode — service not controlling wallbox",
+                0,
+                "Manual mode — service not controlling wallbox",
                 skip_control=True,
             )
 
@@ -181,8 +194,14 @@ class ChargingStrategy:
 
         # --- Target SoC reached — continue topping up with PV surplus ---
         if ctx.target_reached:
-            if ctx.mode in (ChargeMode.PV_SURPLUS, ChargeMode.SMART) and ctx.pv_power_w > 100:
-                if ctx.ev_soc_pct is not None and ctx.ev_soc_pct < ctx.ev_target_soc_pct:
+            if (
+                ctx.mode in (ChargeMode.PV_SURPLUS, ChargeMode.SMART)
+                and ctx.pv_power_w > 100
+            ):
+                if (
+                    ctx.ev_soc_pct is not None
+                    and ctx.ev_soc_pct < ctx.ev_target_soc_pct
+                ):
                     surplus_decision = self._pv_surplus(ctx)
                     if surplus_decision.target_power_w > 0:
                         surplus_decision.reason = (
@@ -233,8 +252,14 @@ class ChargingStrategy:
         # --- Full-by-morning deadline escalation ---
         # BUG #4 FIX: Skip deadline escalation if departure has passed
         # BUG #1 FIX: Don't escalate with "waiting for tomorrow" when departure is today and imminent
-        if ctx.full_by_morning and not ctx.departure_passed and ctx.mode in (
-            ChargeMode.PV_SURPLUS, ChargeMode.SMART,
+        if (
+            ctx.full_by_morning
+            and not ctx.departure_passed
+            and ctx.mode
+            in (
+                ChargeMode.PV_SURPLUS,
+                ChargeMode.SMART,
+            )
         ):
             # Skip deadline escalation during morning PV-wait window
             is_pv_wait_window = (
@@ -288,12 +313,22 @@ class ChargingStrategy:
         # Stop condition
         if ctx.manual_until_target_reached:
             reason_parts = []
-            if ctx.manual_target_soc > 0 and ctx.ev_soc_pct is not None and ctx.ev_soc_pct >= ctx.manual_target_soc:
-                reason_parts.append(f"SoC target reached ({ctx.ev_soc_pct:.0f}% >= {ctx.manual_target_soc:.0f}%)")
+            if (
+                ctx.manual_target_soc > 0
+                and ctx.ev_soc_pct is not None
+                and ctx.ev_soc_pct >= ctx.manual_target_soc
+            ):
+                reason_parts.append(
+                    f"SoC target reached ({ctx.ev_soc_pct:.0f}% >= {ctx.manual_target_soc:.0f}%)"
+                )
             if ctx.kwh_tocharge_left <= 0 and ctx.manual_target_kwh > 0:
-                reason_parts.append(f"kWh target reached ({ctx.session_energy_kwh:.1f} kWh charged)")
+                reason_parts.append(
+                    f"kWh target reached ({ctx.session_energy_kwh:.1f} kWh charged)"
+                )
             self._reset()
-            return ChargingDecision(0, f"Manual Until: {' | '.join(reason_parts) or 'target reached'}")
+            return ChargingDecision(
+                0, f"Manual Until: {' | '.join(reason_parts) or 'target reached'}"
+            )
 
         # R6: Universal PV surplus rule — always use solar if available
         pv_only = self._calc_pv_only_available(ctx)
@@ -312,7 +347,9 @@ class ChargingStrategy:
         # No PV surplus — compute deadline-based minimum power
         hours_to_departure = None
         if ctx.departure_time:
-            hours_to_departure = self._hours_until_departure(ctx.departure_time, ctx.now)
+            hours_to_departure = self._hours_until_departure(
+                ctx.departure_time, ctx.now
+            )
 
         if hours_to_departure is not None and hours_to_departure > 0 and kwh_left > 0:
             required_w = (kwh_left / hours_to_departure) * 1000
@@ -369,7 +406,8 @@ class ChargingStrategy:
             "pv_surplus_w": round(pv_only, 1),
             "battery_assist_w": round(assist + hold_boost, 1),
             "battery_assist_reason": (
-                f"{assist_reason} | Hold: {hold_reason}" if hold_boost > 0
+                f"{assist_reason} | Hold: {hold_reason}"
+                if hold_boost > 0
                 else assist_reason
             ),
         }
@@ -386,7 +424,9 @@ class ChargingStrategy:
             if ev_soc_low:
                 parts.append("(low EV SoC — economic priority)")
             return ChargingDecision(
-                target, f"{' '.join(parts)} → {target} W", **base_fields,
+                target,
+                f"{' '.join(parts)} → {target} W",
+                **base_fields,
             )
 
         if self._was_pv_charging:
@@ -404,7 +444,9 @@ class ChargingStrategy:
                         f"PV dip bridged by battery ({available:.0f} W + {bridge_available:.0f} W "
                         f"battery bridge → {target} W, bat {ctx.battery_soc_pct:.0f}%)",
                         pv_surplus_w=round(pv_only, 1),
-                        battery_assist_w=round(assist + hold_boost + bridge_available, 1),
+                        battery_assist_w=round(
+                            assist + hold_boost + bridge_available, 1
+                        ),
                         battery_assist_reason=f"Bridge: {bridge_available:.0f} W to prevent stop",
                     )
 
@@ -492,19 +534,28 @@ class ChargingStrategy:
                         )
 
                 pv_today_remaining = ctx.pv_forecast_remaining_kwh
-                pv_morning_usable = (
-                    pv_today_remaining * self.charger_efficiency
-                )
+                pv_morning_usable = pv_today_remaining * self.charger_efficiency
                 # Use tomorrow forecast only at night; in morning use today's remaining
                 pv_tomorrow_total = ctx.pv_forecast_tomorrow_kwh
                 pv_morning_from_tomorrow = (
-                    pv_tomorrow_total * self.pv_morning_fraction * self.charger_efficiency
+                    pv_tomorrow_total
+                    * self.pv_morning_fraction
+                    * self.charger_efficiency
                 )
                 # Pick whichever is more relevant based on time
                 pv_usable = max(pv_morning_usable, pv_morning_from_tomorrow)
 
-                grid_portion_kwh = max(0.0, (energy_needed + ctx.overnight_grid_kwh_charged) - pv_usable) * 1.10
-                if pv_usable >= 3.0 and ctx.overnight_grid_kwh_charged >= grid_portion_kwh * 0.95:
+                grid_portion_kwh = (
+                    max(
+                        0.0,
+                        (energy_needed + ctx.overnight_grid_kwh_charged) - pv_usable,
+                    )
+                    * 1.10
+                )
+                if (
+                    pv_usable >= 3.0
+                    and ctx.overnight_grid_kwh_charged >= grid_portion_kwh * 0.95
+                ):
                     pv = self._pv_surplus(ctx)
                     if pv.target_power_w > 0:
                         return ChargingDecision(
@@ -530,7 +581,8 @@ class ChargingStrategy:
         pv = self._pv_surplus(ctx)
         if pv.target_power_w > 0:
             return ChargingDecision(
-                pv.target_power_w, f"Smart: {pv.reason}",
+                pv.target_power_w,
+                f"Smart: {pv.reason}",
                 pv_surplus_w=pv.pv_surplus_w,
                 battery_assist_w=pv.battery_assist_w,
                 battery_assist_reason=pv.battery_assist_reason,
@@ -556,14 +608,17 @@ class ChargingStrategy:
                 return fallback
 
         return ChargingDecision(
-            0, f"Smart: {pv.reason}",
+            0,
+            f"Smart: {pv.reason}",
             pv_surplus_w=pv.pv_surplus_w,
             battery_assist_w=pv.battery_assist_w,
             battery_assist_reason=pv.battery_assist_reason,
         )
 
     def _grid_export_prevention(
-        self, ctx: ChargingContext, pv_decision: ChargingDecision,
+        self,
+        ctx: ChargingContext,
+        pv_decision: ChargingDecision,
     ) -> ChargingDecision:
         """Prevent grid export by using battery + PV to charge the EV."""
         pv_only = self._calc_pv_only_available(ctx)
@@ -607,18 +662,124 @@ class ChargingStrategy:
             battery_assist_reason="Insufficient combined power for min charge rate",
         )
 
+    def _can_defer_to_solar(
+        self,
+        ctx: ChargingContext,
+    ) -> tuple[bool, float, str]:
+        """Evaluate whether overnight grid charging can be deferred entirely to tomorrow's PV.
+
+        Returns (can_defer, pv_usable_kwh, reason).
+
+        Deferral is safe when:
+        1. Tomorrow's PV forecast (adjusted for morning fraction, efficiency, and max
+           chargeable before departure) exceeds needed energy by pv_defer_confidence_factor.
+        2. Departure is more than pv_defer_min_hours_before_departure hours away
+           (so there's time to recover if the forecast was optimistic).
+        3. The energy needed is non-zero and departure time is known.
+        """
+        energy_needed = ctx.energy_needed_kwh
+        if energy_needed <= 0:
+            return False, 0.0, "target already reached"
+
+        if not ctx.departure_time:
+            return False, 0.0, "no departure time set"
+
+        hours_until_departure = self._hours_until_departure(ctx.departure_time, ctx.now)
+        if hours_until_departure is None or hours_until_departure <= 0:
+            return False, 0.0, "departure already passed"
+
+        # Require a minimum window before departure so we can recover if PV disappoints
+        if hours_until_departure <= self.pv_defer_min_hours_before_departure:
+            return (
+                False,
+                0.0,
+                f"departure in {hours_until_departure:.1f}h — too close to defer "
+                f"(min {self.pv_defer_min_hours_before_departure}h)",
+            )
+
+        pv_tomorrow_total = ctx.pv_forecast_tomorrow_kwh
+        if pv_tomorrow_total <= 0:
+            return False, 0.0, "no PV forecast for tomorrow"
+
+        departure_hour = ctx.departure_time.hour + ctx.departure_time.minute / 60.0
+        pv_start_hour = 8.0
+        pv_hours = max(0.0, departure_hour - pv_start_hour)
+        if pv_hours < 1.0:
+            return (
+                False,
+                0.0,
+                f"departure at {departure_hour:.1f}h — too early for solar",
+            )
+
+        # Max chargeble kWh from PV before departure (power-limited)
+        max_pv_charge_kw = (self.max_power_w / 1000.0) * pv_hours
+        # Fraction of total forecast available before departure * efficiency
+        pv_usable = min(
+            pv_tomorrow_total * self.pv_morning_fraction * self.charger_efficiency,
+            max_pv_charge_kw,
+        )
+
+        required_with_margin = energy_needed * self.pv_defer_confidence_factor
+        if pv_usable >= required_with_margin:
+            return (
+                True,
+                round(pv_usable, 1),
+                (
+                    f"PV forecast {pv_tomorrow_total:.1f} kWh → {pv_usable:.1f} kWh usable "
+                    f"before {departure_hour:.0f}:00 (need {energy_needed:.1f} kWh × "
+                    f"{self.pv_defer_confidence_factor:.0%} = {required_with_margin:.1f} kWh) "
+                    f"— defer to solar"
+                ),
+            )
+
+        return (
+            False,
+            round(pv_usable, 1),
+            (
+                f"PV forecast {pv_tomorrow_total:.1f} kWh → {pv_usable:.1f} kWh usable "
+                f"< {required_with_margin:.1f} kWh required with margin — use grid"
+            ),
+        )
+
     def _nighttime_smart(self, ctx: ChargingContext) -> ChargingDecision:
-        """Smart overnight charging: split between grid (overnight) and PV (morning)."""
+        """Smart overnight charging: split between grid (overnight) and PV (morning).
+
+        Phase 2: When tomorrow's PV forecast is strong enough to cover all energy
+        needed before departure (with a confidence margin), defers overnight grid
+        charging entirely.  The solar defer check runs first; the legacy PV/grid
+        split only activates when deferral is not safe.
+        """
         energy_needed = ctx.energy_needed_kwh
         if energy_needed <= 0:
             return ChargingDecision(0, "Nighttime: target already reached")
+
+        # --- Phase 2: Solar defer check ---
+        can_defer, pv_usable, defer_reason = self._can_defer_to_solar(ctx)
+        if can_defer:
+            logger.info(
+                "solar_defer_active",
+                energy_needed=round(energy_needed, 1),
+                pv_usable=pv_usable,
+                reason=defer_reason,
+            )
+            return ChargingDecision(
+                0,
+                f"Solar defer: {defer_reason}",
+                solar_defer_active=True,
+                solar_defer_pv_kwh=pv_usable,
+                solar_defer_needed_kwh=round(energy_needed, 1),
+            )
 
         pv_tomorrow_total = ctx.pv_forecast_tomorrow_kwh
         pv_morning_usable = (
             pv_tomorrow_total * self.pv_morning_fraction * self.charger_efficiency
         )
 
-        departure_hour = ctx.departure_time.hour + ctx.departure_time.minute / 60.0 if ctx.departure_time else 13.0
+        departure_hour = (
+            ctx.departure_time.hour + ctx.departure_time.minute / 60.0
+            if ctx.departure_time
+            else 13.0
+        )
         pv_start_hour = 8.0
         pv_hours = max(0.0, departure_hour - pv_start_hour)
         max_pv_charge = (self.max_power_w / 1000.0) * pv_hours
@@ -644,7 +805,8 @@ class ChargingStrategy:
             remaining_for_pv = energy_needed - ctx.overnight_grid_kwh_charged
             if remaining_for_pv <= 0:
                 return ChargingDecision(
-                    0, "Overnight grid charging complete — target reached",
+                    0,
+                    "Overnight grid charging complete — target reached",
                 )
             return ChargingDecision(
                 0,
@@ -662,7 +824,7 @@ class ChargingStrategy:
         # Use MINIMUM power to spread charging over maximum time
         charging_power_kw = self.min_power_w / 1000.0
         hours_for_grid = grid_remaining / charging_power_kw
-        
+
         grid_deadline_hour = min(6.0, departure_hour - pv_hours)
         hours_until_grid_deadline = self._hours_until_hour(grid_deadline_hour, ctx.now)
         effective_deadline = min(hours_until_departure, hours_until_grid_deadline)
@@ -738,7 +900,9 @@ class ChargingStrategy:
         )
 
         if grid_portion > 0:
-            hours_left = self._hours_until_departure(departure, ctx.now) if departure else 12.0
+            hours_left = (
+                self._hours_until_departure(departure, ctx.now) if departure else 12.0
+            )
             if hours_left is None:
                 hours_left = 12.0
             return ChargingDecision(
@@ -751,7 +915,9 @@ class ChargingStrategy:
             )
 
         # PV can cover everything tomorrow — wait
-        hours_left = self._hours_until_departure(departure, ctx.now) if departure else 12.0
+        hours_left = (
+            self._hours_until_departure(departure, ctx.now) if departure else 12.0
+        )
         if hours_left is None:
             hours_left = 12.0
         return ChargingDecision(
@@ -998,25 +1164,27 @@ class ChargingStrategy:
         if self._was_pv_charging and ev_power < 100 and self._last_target_w > 0:
             # Charger paused briefly — use last target as estimate
             ev_power = self._last_target_w
-        return (
-            ctx.grid_power_w
-            + ev_power
-            + ctx.battery_power_w
-            - self.grid_reserve_w
-        )
+        return ctx.grid_power_w + ev_power + ctx.battery_power_w - self.grid_reserve_w
 
     def _calc_battery_assist(
-        self, ctx: ChargingContext, pv_only_available: float,
+        self,
+        ctx: ChargingContext,
+        pv_only_available: float,
     ) -> float:
         assist, _ = self._calc_battery_assist_detailed(ctx, pv_only_available)
         return assist
 
     def _calc_battery_assist_detailed(
-        self, ctx: ChargingContext, pv_only_available: float,
+        self,
+        ctx: ChargingContext,
+        pv_only_available: float,
     ) -> tuple[float, str]:
         """Extra power the home battery can contribute for EV charging."""
         if ctx.battery_soc_pct <= self.battery_min_soc_pct:
-            return 0.0, f"SoC {ctx.battery_soc_pct:.0f}% <= floor {self.battery_min_soc_pct:.0f}%"
+            return (
+                0.0,
+                f"SoC {ctx.battery_soc_pct:.0f}% <= floor {self.battery_min_soc_pct:.0f}%",
+            )
 
         if pv_only_available >= self.min_power_w:
             return 0.0, "PV surplus sufficient (no assist needed)"
@@ -1024,9 +1192,8 @@ class ChargingStrategy:
         shortfall = self.min_power_w - max(0.0, pv_only_available)
         can_refill, refill_reason = self._can_battery_refill(ctx)
 
-        soc_headroom = (
-            (ctx.battery_soc_pct - self.battery_min_soc_pct)
-            / (100.0 - self.battery_min_soc_pct)
+        soc_headroom = (ctx.battery_soc_pct - self.battery_min_soc_pct) / (
+            100.0 - self.battery_min_soc_pct
         )
         soc_factor = min(1.0, max(0.0, soc_headroom))
 
@@ -1044,13 +1211,19 @@ class ChargingStrategy:
             strategy = f"SoC {ctx.battery_soc_pct:.0f}% > 80% (accept partial drain)"
         else:
             forecast_factor = min(
-                1.0, ctx.pv_forecast_remaining_kwh / self.pv_forecast_good_kwh,
+                1.0,
+                ctx.pv_forecast_remaining_kwh / self.pv_forecast_good_kwh,
             )
-            max_assist = self.battery_ev_assist_max_w * forecast_factor * soc_factor * 0.5
+            max_assist = (
+                self.battery_ev_assist_max_w * forecast_factor * soc_factor * 0.5
+            )
             strategy = f"conservative (forecast {forecast_factor:.0%})"
 
         if max_assist < 100:
-            return 0.0, f"Assist too small ({max_assist:.0f} W) — {strategy}, {refill_reason}"
+            return (
+                0.0,
+                f"Assist too small ({max_assist:.0f} W) — {strategy}, {refill_reason}",
+            )
 
         assist = min(shortfall, max_assist)
         reason = (
@@ -1060,7 +1233,8 @@ class ChargingStrategy:
         return assist, reason
 
     def _calc_battery_hold_boost(
-        self, ctx: ChargingContext,
+        self,
+        ctx: ChargingContext,
     ) -> tuple[float, str]:
         """Hold battery at ~70% SoC, redirecting charge power to EV.
 
@@ -1099,14 +1273,17 @@ class ChargingStrategy:
 
         # Energy needed to fill battery from CURRENT SoC to 100%
         energy_to_full = (
-            (100.0 - ctx.battery_soc_pct) / 100.0
+            (100.0 - ctx.battery_soc_pct)
+            / 100.0
             * ctx.battery_capacity_kwh  # use runtime context, not config default
         )
         hours_remaining = max(0.5, self._estimate_daylight_hours_remaining(ctx.now))
         household_kwh = (ctx.house_power_w / 1000.0) * hours_remaining
 
         # Can we physically charge the battery fast enough?
-        max_battery_charge_kwh = (self.battery_ev_assist_max_w / 1000.0) * hours_remaining
+        max_battery_charge_kwh = (
+            self.battery_ev_assist_max_w / 1000.0
+        ) * hours_remaining
         energy_to_full = min(energy_to_full, max_battery_charge_kwh)
 
         # PV energy surplus available after household consumption
@@ -1180,8 +1357,18 @@ class ChargingStrategy:
         """Rough estimate of productive PV hours remaining today."""
         month = now.month
         sunset_hours = {
-            1: 16.5, 2: 17.5, 3: 18.5, 4: 20.0, 5: 21.0, 6: 21.5,
-            7: 21.5, 8: 20.5, 9: 19.5, 10: 18.5, 11: 17.0, 12: 16.5,
+            1: 16.5,
+            2: 17.5,
+            3: 18.5,
+            4: 20.0,
+            5: 21.0,
+            6: 21.5,
+            7: 21.5,
+            8: 20.5,
+            9: 19.5,
+            10: 18.5,
+            11: 17.0,
+            12: 16.5,
         }
         effective_end = sunset_hours.get(month, 18.0) - 1.0
         current_hour = now.hour + now.minute / 60.0

@@ -43,8 +43,8 @@ class EVChargingSettings(BaseSettings):
     battery_ev_assist_max_w: float = 3500.0
     battery_capacity_kwh: float = 7.0
     battery_target_eod_soc_pct: float = 100.0  # Target 100% battery by end of day
-    battery_hold_soc_pct: float = 70.0         # Hold battery at this SoC while EV charges
-    battery_hold_margin: float = 1.3           # Safety margin for refill forecast (1.3 = 30%)
+    battery_hold_soc_pct: float = 70.0  # Hold battery at this SoC while EV charges
+    battery_hold_margin: float = 1.3  # Safety margin for refill forecast (1.3 = 30%)
 
     # --- PV forecast ---
     pv_forecast_remaining_entity: str = "sensor.pv_ai_forecast_today_remaining_kwh"
@@ -52,6 +52,15 @@ class EVChargingSettings(BaseSettings):
     pv_forecast_good_kwh: float = 15.0
     pv_morning_fraction: float = 0.45
     charger_efficiency: float = 0.90
+
+    # --- Phase 2: Solar defer ---
+    # When tomorrow's PV forecast × pv_morning_fraction × charger_efficiency exceeds
+    # energy_needed × pv_defer_confidence_factor, overnight grid charging is skipped
+    # and the car charges entirely from solar the next morning.
+    pv_defer_confidence_factor: float = 1.3  # require 30% PV headroom to defer
+    pv_defer_min_hours_before_departure: float = (
+        1.5  # abort defer if < 1.5h to departure
+    )
 
     # --- HA helper entity IDs ---
     charge_mode_entity: str = "input_select.ev_charge_mode"
@@ -68,11 +77,11 @@ class EVChargingSettings(BaseSettings):
     wallbox_max_power_w: int = 11000
     wallbox_min_power_w: int = 4200
     eco_charge_power_w: int = 5000
-    startup_ramp_power_w: int = 5000   # initial power for first N seconds after start
+    startup_ramp_power_w: int = 5000  # initial power for first N seconds after start
     startup_ramp_duration_s: int = 180  # hold startup power for 3 minutes
 
     # --- PV surplus control ---
-    grid_reserve_w: int = -100         # negative = prefer slight import over export
+    grid_reserve_w: int = -100  # negative = prefer slight import over export
     surplus_start_hysteresis_w: int = 300
     ramp_step_w: int = 500
 

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
 import time
 from datetime import datetime, time as dt_time, timedelta
 from pathlib import Path
@@ -56,7 +55,7 @@ class SmartEVChargingService(BaseService):
         self._last_vehicle_connected: bool = False
 
         # --- R3: Smart mode sync state ---
-        self._last_sync_vehicle_state: bool = False   # True = was connected last cycle
+        self._last_sync_vehicle_state: bool = False  # True = was connected last cycle
 
         # --- Forecast plan cache (from ev-forecast MQTT) ---
         self._forecast_needed_kwh: float = 0.0
@@ -109,6 +108,8 @@ class SmartEVChargingService(BaseService):
             charger_efficiency=self.settings.charger_efficiency,
             battery_hold_soc_pct=self.settings.battery_hold_soc_pct,
             battery_hold_margin=self.settings.battery_hold_margin,
+            pv_defer_confidence_factor=self.settings.pv_defer_confidence_factor,
+            pv_defer_min_hours_before_departure=self.settings.pv_defer_min_hours_before_departure,
         )
 
         self.logger.info(
@@ -159,7 +160,6 @@ class SmartEVChargingService(BaseService):
             except asyncio.TimeoutError:
                 pass
 
-
     # ------------------------------------------------------------------
     # Watchdog -- monitors control loop liveness
     # ------------------------------------------------------------------
@@ -197,13 +197,18 @@ class SmartEVChargingService(BaseService):
 
                 # Publish MQTT alert so HA / monitoring can pick it up
                 try:
-                    self.publish("watchdog", {
-                        "status": "frozen",
-                        "last_cycle_age_s": round(age, 1),
-                        "timeout_s": self.settings.watchdog_timeout_seconds,
-                        "consecutive_alerts": consecutive_alerts,
-                        "action": "restart" if self.settings.watchdog_restart_on_freeze else "alert_only",
-                    })
+                    self.publish(
+                        "watchdog",
+                        {
+                            "status": "frozen",
+                            "last_cycle_age_s": round(age, 1),
+                            "timeout_s": self.settings.watchdog_timeout_seconds,
+                            "consecutive_alerts": consecutive_alerts,
+                            "action": "restart"
+                            if self.settings.watchdog_restart_on_freeze
+                            else "alert_only",
+                        },
+                    )
                 except Exception:
                     self.logger.exception("watchdog_mqtt_publish_failed")
 
@@ -263,18 +268,22 @@ class SmartEVChargingService(BaseService):
             ev_soc = await self._read_float_optional(self.settings.ev_soc_entity)
 
         ev_battery_capacity = await self._read_float(
-            self.settings.ev_battery_capacity_entity, default=77.0,
+            self.settings.ev_battery_capacity_entity,
+            default=77.0,
         )
         ev_target_soc = await self._read_float(
-            self.settings.target_soc_entity, default=80.0,
+            self.settings.target_soc_entity,
+            default=80.0,
         )
 
         # --- Read manual override targets (R2) ---
         manual_target_kwh = await self._read_float(
-            self.settings.manual_target_kwh_entity, default=0.0,
+            self.settings.manual_target_kwh_entity,
+            default=0.0,
         )
         manual_target_soc = await self._read_float(
-            self.settings.manual_target_soc_entity, default=0.0,
+            self.settings.manual_target_soc_entity,
+            default=0.0,
         )
 
         now = datetime.now(self.tz)
@@ -297,14 +306,22 @@ class SmartEVChargingService(BaseService):
             if mode.value == "Smart" and not self._last_sync_vehicle_state:
                 if self._forecast_needed_kwh > 0:
                     try:
-                        await self.ha.call_service("input_number", "set_value", {
-                            "entity_id": self.settings.manual_target_kwh_entity,
-                            "value": round(self._forecast_needed_kwh, 1),
-                        })
-                        await self.ha.call_service("input_number", "set_value", {
-                            "entity_id": self.settings.manual_target_soc_entity,
-                            "value": round(self._forecast_needed_soc, 0),
-                        })
+                        await self.ha.call_service(
+                            "input_number",
+                            "set_value",
+                            {
+                                "entity_id": self.settings.manual_target_kwh_entity,
+                                "value": round(self._forecast_needed_kwh, 1),
+                            },
+                        )
+                        await self.ha.call_service(
+                            "input_number",
+                            "set_value",
+                            {
+                                "entity_id": self.settings.manual_target_soc_entity,
+                                "value": round(self._forecast_needed_soc, 0),
+                            },
+                        )
                         self._last_sync_vehicle_state = True
                         self.logger.info(
                             "smart_sync_forecast_to_manual",
@@ -317,7 +334,9 @@ class SmartEVChargingService(BaseService):
                     except Exception:
                         self.logger.exception("smart_sync_failed")
                 else:
-                    self.logger.info("smart_sync_skipped", reason="no forecast data available")
+                    self.logger.info(
+                        "smart_sync_skipped", reason="no forecast data available"
+                    )
 
         # Reset sync flag when vehicle disconnects
         if not wallbox.vehicle_connected:
@@ -442,7 +461,9 @@ class SmartEVChargingService(BaseService):
         estimated_completion: str | None = None
         if decision.target_power_w > 0 and kwh_remaining > 0:
             # Use actual current power for more accurate ETA
-            actual_power_kw = max(wallbox.current_power_w, decision.target_power_w) / 1000.0
+            actual_power_kw = (
+                max(wallbox.current_power_w, decision.target_power_w) / 1000.0
+            )
             if actual_power_kw > 0:
                 hours_to_complete = kwh_remaining / actual_power_kw
                 completion_dt = now + timedelta(hours=hours_to_complete)
@@ -452,14 +473,24 @@ class SmartEVChargingService(BaseService):
         kwh_tocharge_left_val = ctx.kwh_tocharge_left
 
         # Publish forecast sensors via MQTT
-        self.publish("forecast", {
-            "ev_forecast_needed_kwh": round(self._forecast_needed_kwh, 1),
-            "ev_forecast_needed_soc": round(self._forecast_needed_soc, 1),
-            "ev_kwh_to_charge_left": round(kwh_tocharge_left_val, 2),
-        })
+        self.publish(
+            "forecast",
+            {
+                "ev_forecast_needed_kwh": round(self._forecast_needed_kwh, 1),
+                "ev_forecast_needed_soc": round(self._forecast_needed_soc, 1),
+                "ev_kwh_to_charge_left": round(kwh_tocharge_left_val, 2),
+            },
+        )
 
         # 4) Publish status
-        self._publish_status(ctx, decision, house_power, kwh_remaining, estimated_completion, kwh_tocharge_left_val)
+        self._publish_status(
+            ctx,
+            decision,
+            house_power,
+            kwh_remaining,
+            estimated_completion,
+            kwh_tocharge_left_val,
+        )
         self._touch_healthcheck()
 
         self.logger.info(
@@ -486,7 +517,9 @@ class SmartEVChargingService(BaseService):
     # BUG #3: Car target SOC drift correction
     # ------------------------------------------------------------------
 
-    async def _check_car_target_soc(self, ctx, desired_soc: float, now: datetime) -> None:
+    async def _check_car_target_soc(
+        self, ctx, desired_soc: float, now: datetime
+    ) -> None:
         """Check if the car's target SOC matches our desired SOC, correct if not.
 
         R7: Mode-based target SoC logic:
@@ -528,9 +561,13 @@ class SmartEVChargingService(BaseService):
                 mode=ctx.mode.value,
             )
             try:
-                await self.ha.call_service("script", "turn_on", {
-                    "entity_id": self.settings.car_target_soc_script,
-                })
+                await self.ha.call_service(
+                    "script",
+                    "turn_on",
+                    {
+                        "entity_id": self.settings.car_target_soc_script,
+                    },
+                )
                 self._last_soc_push_time = time.monotonic()
             except Exception:
                 self.logger.exception("car_target_soc_push_failed")
@@ -638,7 +675,9 @@ class SmartEVChargingService(BaseService):
             "house_power_w": round(house_power),
             "battery_power_w": round(ctx.battery_power_w),
             "battery_soc_pct": round(ctx.battery_soc_pct, 1),
-            "ev_soc_pct": round(ctx.ev_soc_pct, 1) if ctx.ev_soc_pct is not None else None,
+            "ev_soc_pct": round(ctx.ev_soc_pct, 1)
+            if ctx.ev_soc_pct is not None
+            else None,
             "ev_target_soc_pct": round(ctx.ev_target_soc_pct),
             "pv_forecast_remaining_kwh": round(ctx.pv_forecast_remaining_kwh, 1),
             "pv_forecast_tomorrow_kwh": round(ctx.pv_forecast_tomorrow_kwh, 1),
@@ -667,7 +706,13 @@ class SmartEVChargingService(BaseService):
             "energy_remaining_kwh": decision.energy_remaining_kwh,
             "target_energy_kwh": ctx.target_energy_kwh,
             "plan_target_reached": ctx.target_reached,
-            "reasoning": self._compose_reasoning(ctx, decision, house_power, pv_available),
+            # --- Phase 2: Solar defer ---
+            "solar_defer_active": decision.solar_defer_active,
+            "solar_defer_pv_kwh": round(decision.solar_defer_pv_kwh, 1),
+            "solar_defer_needed_kwh": round(decision.solar_defer_needed_kwh, 1),
+            "reasoning": self._compose_reasoning(
+                ctx, decision, house_power, pv_available
+            ),
         }
         self.publish("status", payload)
 
@@ -681,10 +726,14 @@ class SmartEVChargingService(BaseService):
         """Compose detailed human-readable reasoning for the current decision."""
         lines: list[str] = []
 
-        lines.append(f"Mode: {ctx.mode.value} | Vehicle: {ctx.wallbox.vehicle_state_text}")
+        lines.append(
+            f"Mode: {ctx.mode.value} | Vehicle: {ctx.wallbox.vehicle_state_text}"
+        )
 
         if ctx.departure_passed:
-            lines.append("⚠️ Departure time has passed — deadline cleared, PV surplus mode")
+            lines.append(
+                "⚠️ Departure time has passed — deadline cleared, PV surplus mode"
+            )
 
         if not ctx.wallbox.vehicle_connected:
             lines.append("→ No vehicle connected, nothing to do.")
@@ -721,9 +770,15 @@ class SmartEVChargingService(BaseService):
             elif decision.battery_assist_reason:
                 lines.append(f"Battery assist: off — {decision.battery_assist_reason}")
 
-        lines.append(
-            f"PV forecast remaining: {ctx.pv_forecast_remaining_kwh:.1f} kWh"
-        )
+        lines.append(f"PV forecast remaining: {ctx.pv_forecast_remaining_kwh:.1f} kWh")
+        lines.append(f"PV forecast tomorrow: {ctx.pv_forecast_tomorrow_kwh:.1f} kWh")
+
+        if decision.solar_defer_active:
+            lines.append(
+                f"Solar defer: ON — waiting for tomorrow's PV "
+                f"({decision.solar_defer_pv_kwh:.1f} kWh forecast, "
+                f"{decision.solar_defer_needed_kwh:.1f} kWh needed)"
+            )
 
         if ctx.full_by_morning and not ctx.departure_passed:
             lines.append(
@@ -775,10 +830,16 @@ class SmartEVChargingService(BaseService):
             self._forecast_needed_kwh = float(day0.get("energy_needed_kwh", 0.0))
             # Compute forecast_needed_soc: current_soc + (forecast_kwh / battery_capacity * 100)
             current_soc = float(payload.get("current_soc_pct") or 0.0)
-            battery_capacity = self.settings.battery_capacity_kwh if hasattr(self.settings, 'battery_capacity_kwh') else 77.0
+            battery_capacity = (
+                self.settings.battery_capacity_kwh
+                if hasattr(self.settings, "battery_capacity_kwh")
+                else 77.0
+            )
             # Use ev_battery_capacity from settings (EV battery, not home battery)
             ev_capacity = 77.0  # default
-            self._forecast_needed_soc = min(100.0, current_soc + (self._forecast_needed_kwh / ev_capacity * 100.0))
+            self._forecast_needed_soc = min(
+                100.0, current_soc + (self._forecast_needed_kwh / ev_capacity * 100.0)
+            )
             self.logger.info(
                 "ev_forecast_plan_cached",
                 forecast_needed_kwh=round(self._forecast_needed_kwh, 1),
@@ -803,7 +864,10 @@ class SmartEVChargingService(BaseService):
 
         # --- Connectivity & uptime ---
         self.mqtt.publish_ha_discovery(
-            "binary_sensor", "service_status", node_id=node, config={
+            "binary_sensor",
+            "service_status",
+            node_id=node,
+            config={
                 "name": "Service Status",
                 "device": device,
                 "state_topic": heartbeat_topic,
@@ -817,7 +881,10 @@ class SmartEVChargingService(BaseService):
 
         # --- Core charging sensors ---
         self.mqtt.publish_ha_discovery(
-            "sensor", "charge_mode", node_id=node, config={
+            "sensor",
+            "charge_mode",
+            node_id=node,
+            config={
                 "name": "Charge Mode",
                 "device": device,
                 "state_topic": status_topic,
@@ -827,7 +894,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "target_power", node_id=node, config={
+            "sensor",
+            "target_power",
+            node_id=node,
+            config={
                 "name": "Target Power",
                 "device": device,
                 "state_topic": status_topic,
@@ -840,7 +910,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "actual_power", node_id=node, config={
+            "sensor",
+            "actual_power",
+            node_id=node,
+            config={
                 "name": "Actual Power",
                 "device": device,
                 "state_topic": status_topic,
@@ -852,7 +925,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "session_energy", node_id=node, config={
+            "sensor",
+            "session_energy",
+            node_id=node,
+            config={
                 "name": "Session Energy",
                 "device": device,
                 "state_topic": status_topic,
@@ -864,7 +940,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "pv_available", node_id=node, config={
+            "sensor",
+            "pv_available",
+            node_id=node,
+            config={
                 "name": "PV Available for EV",
                 "device": device,
                 "state_topic": status_topic,
@@ -877,7 +956,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "status_reason", node_id=node, config={
+            "sensor",
+            "status_reason",
+            node_id=node,
+            config={
                 "name": "Status",
                 "device": device,
                 "state_topic": status_topic,
@@ -887,7 +969,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "battery_power", node_id=node, config={
+            "sensor",
+            "battery_power",
+            node_id=node,
+            config={
                 "name": "Home Battery Power",
                 "device": device,
                 "state_topic": status_topic,
@@ -900,7 +985,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "battery_soc", node_id=node, config={
+            "sensor",
+            "battery_soc",
+            node_id=node,
+            config={
                 "name": "Home Battery SoC",
                 "device": device,
                 "state_topic": status_topic,
@@ -913,7 +1001,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "house_power", node_id=node, config={
+            "sensor",
+            "house_power",
+            node_id=node,
+            config={
                 "name": "House Power",
                 "device": device,
                 "state_topic": status_topic,
@@ -928,7 +1019,10 @@ class SmartEVChargingService(BaseService):
         # --- EV SoC sensors ---
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "ev_soc", node_id=node, config={
+            "sensor",
+            "ev_soc",
+            node_id=node,
+            config={
                 "name": "EV SoC",
                 "device": device,
                 "state_topic": status_topic,
@@ -945,7 +1039,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "energy_needed", node_id=node, config={
+            "sensor",
+            "energy_needed",
+            node_id=node,
+            config={
                 "name": "Energy Needed",
                 "device": device,
                 "state_topic": status_topic,
@@ -959,7 +1056,10 @@ class SmartEVChargingService(BaseService):
         # --- Enhanced decision context sensors ---
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "pv_surplus", node_id=node, config={
+            "sensor",
+            "pv_surplus",
+            node_id=node,
+            config={
                 "name": "PV Surplus (before assist)",
                 "device": device,
                 "state_topic": status_topic,
@@ -972,7 +1072,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "battery_assist", node_id=node, config={
+            "sensor",
+            "battery_assist",
+            node_id=node,
+            config={
                 "name": "Battery Assist Power",
                 "device": device,
                 "state_topic": status_topic,
@@ -985,7 +1088,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "battery_assist_reason", node_id=node, config={
+            "sensor",
+            "battery_assist_reason",
+            node_id=node,
+            config={
                 "name": "Battery Assist Reason",
                 "device": device,
                 "state_topic": status_topic,
@@ -996,7 +1102,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "pv_power", node_id=node, config={
+            "sensor",
+            "pv_power",
+            node_id=node,
+            config={
                 "name": "PV DC Power",
                 "device": device,
                 "state_topic": status_topic,
@@ -1009,7 +1118,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "grid_power", node_id=node, config={
+            "sensor",
+            "grid_power",
+            node_id=node,
+            config={
                 "name": "Grid Power",
                 "device": device,
                 "state_topic": status_topic,
@@ -1022,7 +1134,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "pv_forecast_remaining", node_id=node, config={
+            "sensor",
+            "pv_forecast_remaining",
+            node_id=node,
+            config={
                 "name": "PV Forecast Remaining",
                 "device": device,
                 "state_topic": status_topic,
@@ -1036,7 +1151,10 @@ class SmartEVChargingService(BaseService):
         # --- Deadline / Full-by-morning sensors ---
 
         self.mqtt.publish_ha_discovery(
-            "binary_sensor", "full_by_morning", node_id=node, config={
+            "binary_sensor",
+            "full_by_morning",
+            node_id=node,
+            config={
                 "name": "Full by Morning",
                 "device": device,
                 "state_topic": status_topic,
@@ -1048,7 +1166,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "binary_sensor", "vehicle_connected", node_id=node, config={
+            "binary_sensor",
+            "vehicle_connected",
+            node_id=node,
+            config={
                 "name": "Vehicle Connected",
                 "device": device,
                 "state_topic": status_topic,
@@ -1061,7 +1182,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "energy_remaining", node_id=node, config={
+            "sensor",
+            "energy_remaining",
+            node_id=node,
+            config={
                 "name": "Energy Remaining to Target",
                 "device": device,
                 "state_topic": status_topic,
@@ -1073,7 +1197,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "target_energy", node_id=node, config={
+            "sensor",
+            "target_energy",
+            node_id=node,
+            config={
                 "name": "Target Energy",
                 "device": device,
                 "state_topic": status_topic,
@@ -1085,7 +1212,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "deadline_hours_left", node_id=node, config={
+            "sensor",
+            "deadline_hours_left",
+            node_id=node,
+            config={
                 "name": "Deadline Hours Left",
                 "device": device,
                 "state_topic": status_topic,
@@ -1097,7 +1227,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "deadline_required_power", node_id=node, config={
+            "sensor",
+            "deadline_required_power",
+            node_id=node,
+            config={
                 "name": "Deadline Required Power",
                 "device": device,
                 "state_topic": status_topic,
@@ -1112,7 +1245,10 @@ class SmartEVChargingService(BaseService):
         # --- Feature #5: kWh remaining & estimated completion ---
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "kwh_remaining", node_id=node, config={
+            "sensor",
+            "kwh_remaining",
+            node_id=node,
+            config={
                 "name": "kWh Remaining",
                 "device": device,
                 "state_topic": status_topic,
@@ -1124,7 +1260,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "estimated_completion_time", node_id=node, config={
+            "sensor",
+            "estimated_completion_time",
+            node_id=node,
+            config={
                 "name": "Estimated Completion",
                 "device": device,
                 "state_topic": status_topic,
@@ -1140,7 +1279,10 @@ class SmartEVChargingService(BaseService):
         # --- Departure passed sensor ---
 
         self.mqtt.publish_ha_discovery(
-            "binary_sensor", "departure_passed", node_id=node, config={
+            "binary_sensor",
+            "departure_passed",
+            node_id=node,
+            config={
                 "name": "Departure Passed",
                 "device": device,
                 "state_topic": status_topic,
@@ -1152,10 +1294,46 @@ class SmartEVChargingService(BaseService):
             },
         )
 
+        # --- Phase 2: Solar defer sensors ---
+
+        self.mqtt.publish_ha_discovery(
+            "binary_sensor",
+            "solar_defer",
+            node_id=node,
+            config={
+                "name": "Solar Defer Active",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": (
+                    "{{ 'ON' if value_json.solar_defer_active else 'OFF' }}"
+                ),
+                "icon": "mdi:weather-sunny-off",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "solar_defer_pv_kwh",
+            node_id=node,
+            config={
+                "name": "Solar Defer PV Forecast",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.solar_defer_pv_kwh }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:solar-power",
+                "entity_category": "diagnostic",
+            },
+        )
+
         # --- Decision reasoning ---
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "decision_reasoning", node_id=node, config={
+            "sensor",
+            "decision_reasoning",
+            node_id=node,
+            config={
                 "name": "Decision Reasoning",
                 "device": device,
                 "state_topic": status_topic,
@@ -1173,17 +1351,22 @@ class SmartEVChargingService(BaseService):
                     '"energy_remaining_kwh": value_json.energy_remaining_kwh, '
                     '"departure_passed": value_json.departure_passed, '
                     '"kwh_remaining": value_json.kwh_remaining, '
-                    '"estimated_completion_time": value_json.estimated_completion_time} | tojson }}'
+                    '"estimated_completion_time": value_json.estimated_completion_time, '
+                    '"solar_defer_active": value_json.solar_defer_active, '
+                    '"solar_defer_pv_kwh": value_json.solar_defer_pv_kwh, '
+                    '"solar_defer_needed_kwh": value_json.solar_defer_needed_kwh} | tojson }}'
                 ),
                 "icon": "mdi:head-cog-outline",
             },
         )
 
-
         # --- Watchdog sensor ---
 
         self.mqtt.publish_ha_discovery(
-            "binary_sensor", "watchdog_status", node_id=node, config={
+            "binary_sensor",
+            "watchdog_status",
+            node_id=node,
+            config={
                 "name": "Watchdog Status",
                 "device": device,
                 "state_topic": f"homelab/{self.name}/watchdog",
@@ -1200,7 +1383,10 @@ class SmartEVChargingService(BaseService):
         forecast_topic = f"homelab/{self.name}/forecast"
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "ev_forecast_needed_kwh", node_id=node, config={
+            "sensor",
+            "ev_forecast_needed_kwh",
+            node_id=node,
+            config={
                 "name": "EV Forecast Needed kWh",
                 "device": device,
                 "state_topic": forecast_topic,
@@ -1212,7 +1398,10 @@ class SmartEVChargingService(BaseService):
         )
 
         self.mqtt.publish_ha_discovery(
-            "sensor", "ev_forecast_needed_soc", node_id=node, config={
+            "sensor",
+            "ev_forecast_needed_soc",
+            node_id=node,
+            config={
                 "name": "EV Forecast Needed SoC",
                 "device": device,
                 "state_topic": forecast_topic,
@@ -1225,7 +1414,10 @@ class SmartEVChargingService(BaseService):
 
         # --- R4: kWh to charge left sensor ---
         self.mqtt.publish_ha_discovery(
-            "sensor", "ev_kwh_to_charge_left", node_id=node, config={
+            "sensor",
+            "ev_kwh_to_charge_left",
+            node_id=node,
+            config={
                 "name": "EV kWh to Charge Left",
                 "device": device,
                 "state_topic": forecast_topic,
