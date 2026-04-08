@@ -39,7 +39,3 @@ server:
   port: 11434
   metrics_port: 9090
 
-prometheus:
-  enabled: true
-  port: 9090
-  path: /metrics
