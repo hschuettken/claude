@@ -1,6 +1,6 @@
 nodes:
   - name: ollama-gd90
-    url: http://192.168.0.92:11434
+    url: http://192.168.0.93:11434
     tags: [strong, cpu-only, primary]
     max_concurrent: 2
     default_models: ["mistral:7b", nomic-embed-text]
