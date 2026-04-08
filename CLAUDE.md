@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance for AI assistants working with this repository.
+Guidance for AI assistants working on this repository.
 
 ## Project Overview
 
@@ -11,135 +11,40 @@ This file provides guidance for AI assistants working with this repository.
 - **Orchestration**: Docker Compose (one container per service)
 - **Integrations**: Home Assistant (REST/WebSocket), InfluxDB v2 (Flux), MQTT (Mosquitto)
 
-## Repository Structure
+## Services
+
+Each service has its own `services/<name>/CLAUDE.md` with detailed documentation. **Read the per-service file before modifying a service.**
+
+| Service | Purpose | Port |
+|---------|---------|------|
+| [`orchestrator`](services/orchestrator/CLAUDE.md) | AI-powered home brain & coordinator (LLM + tools + Telegram + MCP) | 8100 (API) |
+| [`pv-forecast`](services/pv-forecast/CLAUDE.md) | AI solar production forecast (gradient boosting on Open-Meteo features) | — |
+| [`smart-ev-charging`](services/smart-ev-charging/CLAUDE.md) | Smart EV charging controller (Amtron wallbox via HEMS) | — |
+| [`ev-forecast`](services/ev-forecast/CLAUDE.md) | EV driving forecast & smart charging planner (Audi Connect + calendar) | — |
+| [`dashboard`](services/dashboard/CLAUDE.md) | NiceGUI web dashboard (energy, services, controls, chat) | 8085 |
+| [`ollama-router`](services/ollama-router/CLAUDE.md) | Multi-node Ollama load balancer + OpenAI-compat API | 11434 |
+| `hems` | Heating energy management (separate deployment, see service README) | 8210 |
+| `marketing-agent` | Content/Scout + Ghost + Neo4j agent (separate deployment) | 8211 |
+| `example-service` | Template for scaffolding new services | — |
+
+## Repository layout
 
 ```
 /
-├── CLAUDE.md                                # This file
-├── README.md                                # Project readme
-├── docker-compose.yml                       # Orchestrates all services
-├── docker-compose.override.example.yml      # Dev mode template (live code + debugger)
-├── .env.example                             # Template for secrets (copy to .env)
-├── .env.enc                                 # SOPS-encrypted secrets (safe to commit)
-├── .sops.yaml                               # SOPS config (age public key + rules)
-├── .gitignore
-├── .vscode/launch.json                      # VS Code debugger attach configs
-├── base/                                    # Shared Docker base image
-│   ├── Dockerfile                           #   Python 3.12-slim + common deps
-│   └── requirements.txt                     #   Pinned shared dependencies (incl. debugpy)
-├── shared/                                  # Shared Python library (mounted into every container)
-│   ├── __init__.py
-│   ├── config.py                            #   Pydantic settings from env vars
-│   ├── log.py                               #   Structured logging (structlog)
-│   ├── ha_client.py                         #   Home Assistant async REST client
-│   ├── influx_client.py                     #   InfluxDB v2 query wrapper
-│   ├── mqtt_client.py                       #   MQTT pub/sub wrapper
-│   ├── retry.py                             #   Exponential backoff utility for external API calls
-│   └── service.py                           #   BaseService class (heartbeat, debugger, shutdown)
-├── services/                                # One directory per microservice
-│   ├── orchestrator/                        #   AI-powered home brain & coordinator
-│   │   ├── Dockerfile
-│   │   ├── requirements.txt                 #   telegram-bot, google-generativeai, openai, anthropic
-│   │   ├── main.py                          #   Entry point (OrchestratorService)
-│   │   ├── config.py                        #   Orchestrator-specific settings
-│   │   ├── brain.py                         #   Core reasoning engine (LLM + tool loop)
-│   │   ├── tools.py                         #   LLM tool definitions & execution
-│   │   ├── memory.py                        #   Persistent conversations, profiles, preferences
-│   │   ├── semantic_memory.py               #   Vector-based long-term memory (embeddings + search)
-│   │   ├── knowledge.py                    #   Structured knowledge store + memory.md manager
-│   │   ├── gcal.py                          #   Google Calendar integration (read family, write own)
-│   │   ├── proactive.py                     #   Scheduled briefings, alerts, suggestions
-│   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
-│   │   ├── diagnose.py                      #   Step-by-step connectivity diagnostic
-│   │   ├── llm/                             #   Pluggable LLM backends
-│   │   │   ├── __init__.py                  #     Provider factory
-│   │   │   ├── base.py                      #     Abstract LLM interface
-│   │   │   ├── gemini.py                    #     Google Gemini (default)
-│   │   │   ├── openai_compat.py             #     OpenAI / Ollama
-│   │   │   └── anthropic_llm.py             #     Anthropic Claude
-│   │   ├── channels/                        #   Communication channels
-│   │   │   ├── __init__.py
-│   │   │   ├── base.py                      #     Abstract channel interface
-│   │   │   └── telegram.py                  #     Telegram bot
-│   │   └── api/                             #   REST API + MCP server
-│   │       ├── __init__.py                  #     Package marker
-│   │       ├── auth.py                      #     API key middleware (X-API-Key header)
-│   │       ├── models.py                    #     Pydantic request/response models
-│   │       ├── routes.py                    #     FastAPI REST routes (/api/v1/*)
-│   │       ├── mcp_server.py                #     MCP tool & resource registration
-│   │       └── server.py                    #     FastAPI app factory + uvicorn
-│   ├── pv-forecast/                         #   AI solar production forecast
-│   │   ├── Dockerfile
-│   │   ├── requirements.txt                 #   scikit-learn, pandas, numpy
-│   │   ├── main.py                          #   Entry point + scheduler
-│   │   ├── config.py                        #   PV-specific settings
-│   │   ├── weather.py                       #   Open-Meteo API client
-│   │   ├── data.py                          #   InfluxDB data collector
-│   │   ├── model.py                         #   Gradient Boosting ML model
-│   │   ├── forecast.py                      #   Forecast orchestrator
-│   │   ├── ha_sensors.py                    #   Push forecasts to HA sensors (REST API)
-│   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
-│   │   └── diagnose.py                      #   Step-by-step connectivity/data diagnostic
-│   ├── smart-ev-charging/                   #   Smart EV charging controller
-│   │   ├── Dockerfile
-│   │   ├── requirements.txt                 #   No extra deps (base image sufficient)
-│   │   ├── main.py                          #   Entry point + control loop
-│   │   ├── config.py                        #   EV-specific settings
-│   │   ├── charger.py                       #   Wallbox abstraction (read state, set power)
-│   │   ├── strategy.py                      #   Charging strategy logic
-│   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
-│   │   └── diagnose.py                      #   Step-by-step connectivity/data diagnostic
-│   ├── ev-forecast/                         #   EV driving forecast & charging planner
-│   │   ├── Dockerfile
-│   │   ├── requirements.txt                 #   google-api-python-client, google-auth
-│   │   ├── main.py                          #   Entry point + scheduler
-│   │   ├── config.py                        #   EV forecast settings
-│   │   ├── vehicle.py                       #   Dual Audi Connect account handling
-│   │   ├── trips.py                         #   Calendar-based trip prediction
-│   │   ├── planner.py                       #   Smart charging plan generator
-│   │   ├── learned_destinations.py          #   Local cache for learned destinations (from orchestrator)
-│   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
-│   │   └── diagnose.py                      #   Step-by-step connectivity/data diagnostic
-│   ├── health-monitor/                      #   Health monitoring & alerting
-│   │   ├── Dockerfile
-│   │   ├── requirements.txt                 #   No extra deps (uses httpx for Docker API)
-│   │   ├── main.py                          #   Entry point (HealthMonitorService)
-│   │   ├── config.py                        #   Health monitor settings
-│   │   ├── checks.py                        #   Infrastructure + Docker + diagnostic checks
-│   │   ├── alerts.py                        #   Telegram alerting with cooldown
-│   │   ├── healthcheck.py                   #   Docker HEALTHCHECK script
-│   │   └── diagnose.py                      #   Self-diagnostic
-│   ├── dashboard/                           #   NiceGUI web dashboard
-│   │   ├── Dockerfile
-│   │   ├── requirements.txt                 #   nicegui
-│   │   ├── main.py                          #   Entry point (NiceGUI app + MQTT/HA setup)
-│   │   ├── config.py                        #   Dashboard-specific settings
-│   │   ├── state.py                         #   Shared reactive state (MQTT + HA data)
-│   │   ├── layout.py                        #   Shared page layout, navigation, styling
-│   │   ├── page_home.py                     #   Energy overview page
-│   │   ├── page_services.py                 #   Service health monitoring page
-│   │   ├── page_controls.py                 #   HA entity controls page
-│   │   ├── page_chat.py                     #   Orchestrator chat page
-│   │   └── healthcheck.py                   #   Docker HEALTHCHECK script (HTTP-based)
-│   └── example-service/                     #   Template service
-│       ├── Dockerfile
-│       ├── requirements.txt                 #   Service-specific deps only
-│       ├── main.py                          #   Entry point
-│       └── healthcheck.py                   #   Docker HEALTHCHECK script
-├── HomeAssistant_config/                    # Reference HA configuration (read-only docs)
-│   ├── configuration.yaml                   #   Main HA config (entities, integrations, InfluxDB)
-│   ├── ev_audi_connect.yaml                 #   Dual Audi Connect combined sensors, scripts & automation (HA package)
-│   └── ...                                  #   KNX, sensor, climate, cover, light configs
-├── infrastructure/                          # Config for infra containers
-│   └── mosquitto/config/mosquitto.conf
-└── scripts/
-    ├── build-base.sh                        #   Build the shared base image
-    ├── new-service.sh                       #   Scaffold a new service
-    ├── ha-export.py                         #   Export all HA entities/services to Markdown
-    ├── secrets-encrypt.sh                   #   Encrypt .env → .env.enc
-    ├── secrets-decrypt.sh                   #   Decrypt .env.enc → .env
-    ├── secrets-edit.sh                      #   Edit encrypted secrets in-place
-    └── install-hooks.sh                     #   Install git pre-commit hooks
+├── docker-compose.yml                  # Orchestrates all services
+├── docker-compose.override.example.yml # Dev mode template (live code + debugger)
+├── .env.example / .env.enc / .sops.yaml # Secrets (see Secrets section)
+├── base/                               # Shared Docker base image (Python 3.12-slim + deps)
+├── shared/                             # Shared Python library mounted into every container
+│   ├── config.py                       #   Pydantic settings from env vars
+│   ├── log.py                          #   Structured logging (structlog)
+│   ├── ha_client.py                    #   Home Assistant async REST client
+│   ├── influx_client.py                #   InfluxDB v2 query wrapper
+│   ├── mqtt_client.py                  #   MQTT pub/sub wrapper
+│   ├── retry.py                        #   Exponential backoff utility
+│   └── service.py                      #   BaseService class (heartbeat, debugger, shutdown)
+├── services/<name>/                    # One directory per microservice, each with CLAUDE.md
+└── scripts/                            # new-service.sh, build-base.sh, secrets-*.sh, ha-export.py
 ```
 
 ## Development Workflow
@@ -147,18 +52,16 @@ This file provides guidance for AI assistants working with this repository.
 ### First-time setup
 
 ```bash
-# Secrets setup (SOPS + age)
 ./scripts/install-hooks.sh     # Install git pre-commit hooks
 ./scripts/secrets-decrypt.sh   # Decrypt .env.enc → .env (needs age key)
 # OR for first-time: cp .env.example .env and fill in values
-
 ./scripts/build-base.sh        # Build the shared base Docker image
 docker compose up --build      # Start everything
 ```
 
 ### Secrets management (SOPS + age)
 
-Secrets are stored encrypted in `.env.enc` using [SOPS](https://github.com/getsops/sops) with [age](https://github.com/FiloSottile/age) encryption. The plain `.env` is gitignored.
+Secrets are stored encrypted in `.env.enc` using [SOPS](https://github.com/getsops/sops) with [age](https://github.com/FiloSottile/age) encryption. Plain `.env` is gitignored.
 
 ```bash
 ./scripts/secrets-encrypt.sh   # Encrypt .env → .env.enc (commit this)
@@ -166,15 +69,11 @@ Secrets are stored encrypted in `.env.enc` using [SOPS](https://github.com/getso
 ./scripts/secrets-edit.sh      # Edit encrypted secrets in-place via $EDITOR
 ```
 
-**Setup on a new machine:**
-1. Install `sops` and `age`
-2. Copy your age key to `.sops/age-key.txt` (from your password manager)
-3. Run `./scripts/secrets-decrypt.sh`
-4. Run `./scripts/install-hooks.sh`
-
 **Age key**: stored at `.sops/age-key.txt` (gitignored). Back it up in a password manager — if lost, you cannot decrypt your secrets.
 
-### Dev mode (recommended for development)
+**Never hand-edit `.env.enc`** — it will destroy the ciphertext. Always use `secrets-edit.sh`. See the `homelab-secrets` skill for the full workflow.
+
+### Dev mode
 
 ```bash
 cp docker-compose.override.example.yml docker-compose.override.yml
@@ -191,40 +90,23 @@ docker compose logs -f pv-forecast       # watch output
 
 ### Diagnosing issues
 
+Every service has a `diagnose.py` that tests connectivity and config:
+
 ```bash
-docker compose run --rm orchestrator python diagnose.py              # test everything
-docker compose run --rm orchestrator python diagnose.py --step llm   # test just LLM provider
-
-docker compose run --rm pv-forecast python diagnose.py               # test everything
-docker compose run --rm pv-forecast python diagnose.py --step ha     # test just HA
-
-docker compose run --rm smart-ev-charging python diagnose.py         # test everything
-docker compose run --rm smart-ev-charging python diagnose.py --step wallbox  # test just wallbox
-
-docker compose run --rm ev-forecast python diagnose.py               # test everything
-docker compose run --rm ev-forecast python diagnose.py --step audi   # test just Audi Connect
-
-docker compose run --rm health-monitor python diagnose.py            # test everything
-docker compose run --rm health-monitor python diagnose.py --step docker  # test just Docker
+docker compose run --rm <service> python diagnose.py              # test everything
+docker compose run --rm <service> python diagnose.py --step ha    # test just HA
 ```
 
-orchestrator steps: `config`, `ha`, `mqtt`, `llm`, `telegram`, `calendar`, `memory`, `services`, `all`
-pv-forecast steps: `config`, `ha`, `influx`, `mqtt`, `weather`, `forecast`, `all`
-smart-ev-charging steps: `config`, `ha`, `wallbox`, `energy`, `mqtt`, `cycle`, `all`
-ev-forecast steps: `config`, `ha`, `audi`, `mqtt`, `calendar`, `geocoding`, `plan`, `all`
-health-monitor steps: `config`, `ha`, `mqtt`, `docker`, `telegram`, `all`
+Common steps: `config`, `ha`, `mqtt`, `influx`, `all`. Service-specific steps vary — run with no argument for the full list.
 
 ### Debugging with VS Code
 
-1. Ensure `DEBUG_SERVICE=pv-forecast` is set in `docker-compose.override.yml`
-2. `docker compose up pv-forecast` — service pauses, waiting for debugger
-3. In VS Code: press F5 → "Attach to pv-forecast"
+1. Ensure `DEBUG_SERVICE=<name>` is set in `docker-compose.override.yml`
+2. `docker compose up <name>` — service pauses, waiting for debugger
+3. In VS Code: press F5 → "Attach to \<name\>"
 4. Set breakpoints, inspect variables, step through code
 
-For quick debugging without VS Code, add `breakpoint()` anywhere in the code and run:
-```bash
-docker compose run --rm pv-forecast python main.py
-```
+For quick debugging without VS Code, add `breakpoint()` anywhere and run `docker compose run --rm <service> python main.py`.
 
 ### Creating a new service
 
@@ -236,23 +118,20 @@ docker compose run --rm pv-forecast python main.py
 ### Building and running
 
 ```bash
-./scripts/build-base.sh                          # Rebuild base image (after changing base/requirements.txt)
-docker compose up --build <service-name>          # Build and run a single service
-docker compose up --build                         # Build and run all services
-docker compose logs -f <service-name>             # Tail logs for a service
-docker compose down                               # Stop everything
+./scripts/build-base.sh                       # Rebuild base image (after changing base/requirements.txt)
+docker compose up --build <service-name>      # Build and run a single service
+docker compose up --build                     # Build and run all services
+docker compose logs -f <service-name>         # Tail logs for a service
+docker compose down                           # Stop everything
 ```
 
 ### Exporting Home Assistant data
 
-Export all entities, states, services, areas, and devices to a Markdown reference file:
-
 ```bash
-python scripts/ha-export.py                          # Output: HomeAssistant_config/ha_export.md
-python scripts/ha-export.py -o custom-path.md        # Custom output path
+python scripts/ha-export.py                   # Output: HomeAssistant_config/ha_export.md
 ```
 
-Requires `HA_URL` and `HA_TOKEN` in `.env`. Uses REST API for states/services and WebSocket API for area/device/entity registries. The generated file is useful as AI context — it gives a complete picture of what's available in the home.
+Requires `HA_URL` and `HA_TOKEN` in `.env`. Uses REST API for states/services and WebSocket API for area/device/entity registries. Useful as AI context — complete picture of available entities.
 
 ### Adding a Python dependency
 
@@ -264,6 +143,7 @@ Requires `HA_URL` and `HA_TOKEN` in `.env`. Uses REST API for states/services an
 ### BaseService pattern
 
 Every service inherits from `shared.service.BaseService`. This gives you:
+
 - `self.settings` — Pydantic config from env vars
 - `self.logger` — Structured logger
 - `self.ha` — Home Assistant async client
@@ -278,9 +158,11 @@ Every service inherits from `shared.service.BaseService`. This gives you:
 ### MQTT heartbeat
 
 All services automatically publish to `homelab/{service-name}/heartbeat` every 60s:
+
 ```json
 {"status": "online", "service": "pv-forecast", "uptime_seconds": 3661.2, "memory_mb": 42.3}
 ```
+
 Override `health_check()` to add custom status. Publishes `"offline"` on graceful shutdown. Configure interval via `HEARTBEAT_INTERVAL_SECONDS` (0 to disable).
 
 ### MQTT topic convention
@@ -289,21 +171,19 @@ Override `health_check()` to add custom status. Publishes `"offline"` on gracefu
 homelab/{service-name}/{event-type}
 ```
 
-Examples: `homelab/energy-monitor/price-changed`, `homelab/climate-control/setpoint-updated`
+Examples: `homelab/energy-monitor/price-changed`, `homelab/climate-control/setpoint-updated`.
 
 ### Inter-service commands via MQTT
 
-The orchestrator can send commands to other services via MQTT:
+The orchestrator can send commands to other services via:
 
 ```
 homelab/orchestrator/command/{service-name}
 ```
 
-Payload: `{"command": "refresh"}`, `{"command": "retrain"}`, `{"command": "refresh_vehicle"}`
+Payload: `{"command": "refresh"}`, `{"command": "retrain"}`, `{"command": "refresh_vehicle"}`.
 
-Every service subscribes to its command topic on startup and handles commands asynchronously.
-The orchestrator exposes this via the `request_service_refresh` LLM tool, so the AI can trigger
-on-demand updates when a user asks for fresh data.
+Every service subscribes to its command topic on startup. The orchestrator exposes this via the `request_service_refresh` LLM tool.
 
 | Service | Supported Commands |
 |---------|-------------------|
@@ -316,6 +196,7 @@ on-demand updates when a user asks for fresh data.
 Services register their entities in HA automatically via [MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery). On startup, each service publishes retained config messages to `homeassistant/{component}/{node_id}/{object_id}/config` — HA picks these up and creates entities without any manual configuration.
 
 Helper method on `MQTTClient`:
+
 ```python
 self.mqtt.publish_ha_discovery("sensor", "today_kwh", node_id="pv_forecast", config={
     "name": "PV Forecast Today",
@@ -331,12 +212,13 @@ self.mqtt.publish_ha_discovery("sensor", "today_kwh", node_id="pv_forecast", con
 
 ### Docker healthcheck
 
-Services use a file-based healthcheck pattern for Docker:
+Services use a file-based healthcheck pattern:
+
 1. The service writes a timestamp to `/app/data/healthcheck` after each successful operation
 2. A `healthcheck.py` script checks if the file was updated within the last 5 minutes
 3. The Dockerfile declares: `HEALTHCHECK --interval=60s --start-period=120s CMD ["python", "healthcheck.py"]`
 
-Check health status with `docker ps` (shows `healthy`/`unhealthy` in the STATUS column).
+Check with `docker ps` (shows `healthy`/`unhealthy` in the STATUS column).
 
 ### Configuration
 
@@ -353,23 +235,23 @@ Environment variables map to field names: `MY_CUSTOM_VAR` env var → `my_custom
 
 ### MQTT dead-letter error topics
 
-Services publish errors to `homelab/errors/{service-name}` when MQTT message processing fails. Payload includes the original topic, payload, error message, traceback, and timestamp. This provides centralized error visibility without losing the context of what failed.
+Services publish errors to `homelab/errors/{service-name}` when MQTT message processing fails. Payload includes the original topic, payload, error message, traceback, and timestamp.
 
 ### Global safe mode
 
-A global safe mode switch (`input_boolean.homelab_safe_mode`) blocks all write actions across all services when enabled. Services check the safe mode entity before calling HA services, writing to the wallbox, or setting HA input helpers. Useful during maintenance or when debugging unexpected behavior. Configure the entity ID via `SAFE_MODE_ENTITY` env var.
+A global safe mode switch (`input_boolean.homelab_safe_mode`) blocks all write actions across all services when enabled. Services check the safe mode entity before calling HA services, writing to the wallbox, or setting HA input helpers. Useful during maintenance or debugging. Configure the entity ID via `SAFE_MODE_ENTITY`.
 
 ### State persistence
 
-Services persist critical state to disk (`/app/data/state.json`) for faster restart recovery. On startup, the service loads persisted state instead of starting from scratch. This avoids re-querying slow external APIs (e.g., Audi Connect, weather) and preserves session energy counters, pending clarifications, and charging plans across container restarts.
+Services persist critical state to disk (`/app/data/state.json`) for faster restart recovery. Avoids re-querying slow external APIs (Audi Connect, weather) and preserves session energy counters, pending clarifications, and charging plans across container restarts.
 
 ### Cross-service correlation IDs
 
-Services propagate a `trace_id` through MQTT messages to correlate related events across services. For example, an ev-forecast plan includes a `trace_id` that appears in the smart-ev-charging status messages, making it easy to trace a charging decision back to the forecast that triggered it.
+Services propagate a `trace_id` through MQTT messages to correlate related events. E.g., an ev-forecast plan includes a `trace_id` that appears in smart-ev-charging status messages, making it easy to trace a charging decision back to the forecast that triggered it.
 
 ### Shared retry/backoff utility
 
-`shared/retry.py` provides an exponential backoff decorator for HA API calls and other external requests. Retries with configurable max attempts, base delay, and jitter. Used by `ha_client.py` and service-specific API calls to handle transient network failures gracefully.
+`shared/retry.py` provides an exponential backoff decorator for HA API calls and other external requests. Configurable max attempts, base delay, and jitter. Used by `ha_client.py` and service-specific API calls.
 
 ## Home Assistant Setup
 
@@ -392,430 +274,22 @@ Two PV arrays connected to a single inverter:
 
 - **Version**: v2 (Flux query language)
 - **Bucket**: `hass`
-- **Organization**: configured via org ID
 - **`_measurement`**: the unit of measurement (e.g., `kWh`, `W`, `°C`) — NOT a fixed value
-- **`entity_id` tag**: stored WITHOUT the `sensor.`/`binary_sensor.` domain prefix (e.g., `inverter_pv_east_energy`, not `sensor.inverter_pv_east_energy`). The domain is in a separate `domain` tag. The `shared/influx_client.py` handles this stripping automatically.
+- **`entity_id` tag**: stored WITHOUT the `sensor.`/`binary_sensor.` domain prefix. The domain is in a separate `domain` tag. `shared/influx_client.py` handles stripping automatically.
 - **`_field`**: `value` for the numeric state
 - **Recorder**: 3650-day retention (10 years)
 
 ### Other Relevant Entities
 
-- **Grid connection meter**: `sensor.power_meter_active_power` (W) — positive = exporting to grid, negative = importing from grid
+- **Grid connection meter**: `sensor.power_meter_active_power` (W) — positive = exporting, negative = importing
 - **Household consumption**: Shelly 3EM (three-phase) — `sensor.shelly3em_main_channel_total_power` (W, always positive, house only)
-- **PV DC input**: `sensor.inverter_input_power` (W) — raw solar panel output
-- **Inverter AC output**: `sensor.inverter_active_power` (W) — combined PV + battery AC output
+- **PV DC input**: `sensor.inverter_input_power` (W)
+- **Inverter AC output**: `sensor.inverter_active_power` (W)
 - **Home battery**: `sensor.batteries_charge_discharge_power` (W, positive = charging, negative = discharging), `sensor.batteries_state_of_capacity` (%, SoC) — 7 kWh / 3.5 kW max
-- **Energy pricing**: Fixed rates — grid import 25 ct/kWh, feed-in 7 ct/kWh, EV reimbursement 25 ct/kWh. No EPEX spot market used.
+- **Energy pricing**: Fixed rates — grid import 25 ct/kWh, feed-in 7 ct/kWh, EV reimbursement 25 ct/kWh. No EPEX spot market.
 - **EV charging**: Amtron wallbox via Modbus — `sensor.amtron_meter_total_power_w`, `sensor.amtron_meter_total_energy_kwh`
-- **EV battery**: Audi Connect — SoC sensor (`sensor.audi_a6_avant_e_tron_state_of_charge_comb`)
-- **Forecast.Solar**: Configured per array — `sensor.energy_production_today_east` / `west`, `sensor.energy_production_tomorrow_east` / `west`
-- **EV (Audi Connect)**: Dual-account setup with mileage-based active account detection. Combined `_comb` sensors merge both accounts (higher mileage = active driver): `sensor.audi_a6_avant_e_tron_state_of_charge_comb` (%), `sensor.audi_a6_avant_e_tron_range_comb` (km), `sensor.audi_a6_avant_e_tron_charging_state_comb`, `sensor.audi_a6_avant_e_tron_plug_state_comb`, `sensor.audi_a6_avant_e_tron_mileage_comb`, `sensor.audi_a6_avant_e_tron_climatisation_state_comb`, `binary_sensor.audi_a6_avant_e_tron_plugged_in_comb`, `binary_sensor.audi_a6_avant_e_tron_is_charging_comb`, `binary_sensor.audi_a6_avant_e_tron_climatisation_active_comb`. HA scripts for vehicle actions: `script.ev_refresh_cloud`, `script.ev_refresh_vehicle`, `script.ev_start_climate`, `script.ev_lock`, `script.ev_unlock`, etc. (see `HomeAssistant_config/ev_audi_connect.yaml`)
-
-## Services
-
-### orchestrator — AI-Powered Home Brain & Coordinator
-
-The central intelligence layer that coordinates all services, communicates with users via Telegram, and makes proactive suggestions. Uses an LLM (Gemini by default, swappable) with function-calling to reason about the home state and interact with Home Assistant.
-
-**Architecture**: Brain (LLM + tools) ↔ Telegram (user I/O) ↔ Proactive Engine (scheduled), all backed by Memory (persistent profiles/conversations) and connected to HA/InfluxDB/MQTT.
-
-**LLM Providers** (configured via `LLM_PROVIDER` env var):
-
-| Provider | Model Default | Env Var for API Key |
-|----------|--------------|---------------------|
-| `gemini` (default) | `gemini-2.0-flash` | `GEMINI_API_KEY` |
-| `openai` | `gpt-4o` | `OPENAI_API_KEY` |
-| `anthropic` | `claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY` |
-| `ollama` | `llama3` | — (uses `OLLAMA_URL`) |
-
-**LLM Tools** — functions the AI can call to interact with the home:
-- `get_entity_state` — Read any HA entity
-- `get_home_energy_summary` — Full energy snapshot (PV, grid, battery, EV, house)
-- `get_pv_forecast` — Today/tomorrow solar forecast with hourly breakdown
-- `get_ev_charging_status` — Current EV charge mode, power, session energy
-- `set_ev_charge_mode` — Change EV charge mode (with user confirmation)
-- `get_ev_forecast_plan` — EV driving forecast, predicted trips, and charging plan (from ev-forecast service via MQTT)
-- `respond_to_ev_trip_clarification` — Forward user's answer to ev-forecast trip question
-- `get_weather_forecast` — Current weather and short-term forecast
-- `query_energy_history` — Historical data from InfluxDB (trends/analysis)
-- `call_ha_service` — Control any HA device (with user confirmation)
-- `get_user_preferences` / `set_user_preference` — Persistent user preferences
-- `send_notification` — Send Telegram message to a specific user
-- `get_energy_prices` — Grid, feed-in, EPEX spot, oil prices
-- `get_calendar_events` — Read family or orchestrator Google Calendar events
-- `check_household_availability` — Check who is home/away (absences, business trips)
-- `create_calendar_event` — Create reminders/events on orchestrator's own calendar
-- `recall_memory` — Semantic search over long-term memory (past conversations, facts, decisions)
-- `store_fact` — Store knowledge/facts in long-term semantic memory for future recall
-- `store_learned_fact` — Store structured knowledge (destinations, patterns, preferences) in the knowledge store for cross-service use
-- `get_learned_facts` — Query structured knowledge store before asking the user
-- `update_memory_notes` — Update the orchestrator's persistent memory.md notebook
-- `read_memory_notes` — Read the current memory notes
-- `request_service_refresh` — Send a command to a service (refresh forecast, retrain model, etc.)
-
-**Communication**: Telegram bot with commands `/start`, `/status`, `/forecast`, `/clear`, `/whoami`, `/help` plus free-text LLM conversation.
-
-**Proactive Features**:
-- **Morning briefing** (configurable time) — weather, PV forecast, energy plan for the day
-- **Evening summary** — today's production, grid usage, savings
-- **Optimization alerts** — excess PV, idle EV, battery strategy opportunities
-- **EV charging calendar events** — auto-creates/updates all-day events on orchestrator calendar when ev-forecast reports charging needs. German summaries (e.g., "EV: 15 kWh laden bis 07:00 (Nicole → Lengerich)"). Events are deduplicated by tracking `{date: {event_id, summary}}` — only updated when the summary text changes. Stale events are deleted when a date no longer needs charging.
-- **EV trip clarification** — forwards ambiguous trip questions from ev-forecast to Telegram users. When users respond in natural language, the Brain LLM recognizes the context (pending clarifications are injected into the system prompt) and calls the `respond_to_ev_trip_clarification` tool to route the answer back via MQTT.
-- **Memory consolidation** — at 3 AM nightly, older conversation memories are grouped and merged by the LLM into denser entries
-
-**Memory** (persistent in `/app/data/memory/`):
-- Per-user conversation history (with configurable max length)
-- User profiles with learned preferences (sauna days, wake times, departure times)
-- Decision log (what the orchestrator decided and why)
-
-**Semantic Memory** (vector-based long-term recall, persistent in `/app/data/memory/semantic_store.json`):
-- Embeds conversation snippets, learned facts, and decisions as vectors for later semantic retrieval
-- Uses the configured LLM provider's embedding API: Gemini `text-embedding-004` (default), OpenAI `text-embedding-3-small`, or Ollama `nomic-embed-text`
-- Pure-Python cosine similarity — no heavy dependencies (ChromaDB, FAISS, PyTorch not needed)
-- **LLM summarization** — conversations are distilled into concise memory entries before storage (not raw text dumps), producing better search results and less noise
-- **Time-weighted scoring** — search results blend cosine similarity (85%) with recency (15%, 30-day half-life), so recent memories rank higher when equally relevant
-- **Nightly consolidation** — at 3 AM, older conversation memories are grouped and merged by the LLM into denser entries (e.g. 50 EV charging conversations → 2-3 consolidated knowledge entries), reducing bloat while preserving important patterns
-- LLM can explicitly store facts via `store_fact` tool and search via `recall_memory` tool
-- Relevant memories are automatically injected into the LLM context before each response (similarity ≥ 0.5)
-- Categories: `conversation` (auto-stored exchanges), `fact` (explicitly stored knowledge), `decision` (orchestrator decisions)
-- Scale: up to 5000 entries (~20 MB JSON file), searches in milliseconds
-- Enabled by default (`ENABLE_SEMANTIC_MEMORY=true`), disable if no embedding API key is available
-
-**Smart Conversation Memory** (structured knowledge + living memory document):
-- Two complementary layers on top of semantic memory that close the learning feedback loop:
-  - **Knowledge Store** (`knowledge.py`, persistent in `/app/data/memory/knowledge.json`): Typed, structured facts that services can query programmatically. Types: `destination` (place + distance), `person_pattern` (behavioral pattern), `preference`, `correction`, `general`. Published via MQTT (`homelab/orchestrator/knowledge-update`) so downstream services consume learned knowledge automatically.
-  - **Memory Document** (`memory.md`, persistent in `/app/data/memory/memory.md`): A living Markdown document the LLM reads and maintains — like CLAUDE.md but for the AI's own notes. Injected into the system prompt on every conversation. The LLM updates it via the `update_memory_notes` tool when it learns something worth remembering. Human-readable and editable. Capped at 4000 chars (configurable via `MEMORY_DOCUMENT_MAX_SIZE`).
-- **Auto-extraction**: After each conversation turn, the LLM extracts structured facts (destinations with distances, person patterns, preferences, corrections) and stores them in the knowledge store with confidence=0.7 (LLM-inferred). User-confirmed facts get confidence=1.0.
-- **Trip clarification auto-learning**: When a trip clarification is resolved (user confirms distance via Telegram), the destination+distance is automatically stored in the knowledge store AND published via MQTT to ev-forecast, so the same question never needs to be asked again.
-- **Cross-service knowledge distribution**: The ev-forecast service subscribes to `homelab/orchestrator/knowledge-update` and maintains a local `learned_destinations.json` cache. On distance lookup, it checks: config destinations → learned destinations → geocoding → default 50km.
-- **Smart disambiguation**: When learned destinations have multiple entries for the same name (e.g., "Sarah" → Bocholt 80km, "Sarah" → Ibbenbüren 10km), the ev-forecast generates disambiguation questions: "Fährst du zu Sarah in Bocholt (80 km) oder Sarah in Ibbenbüren (10 km)?"
-- **LLM tools**: `store_learned_fact` (structured), `get_learned_facts` (query), `update_memory_notes` (write notebook), `read_memory_notes` (read notebook)
-- **Config** (env vars): `ENABLE_KNOWLEDGE_STORE` (default true), `MEMORY_DOCUMENT_MAX_SIZE` (default 4000), `KNOWLEDGE_AUTO_EXTRACT` (default true)
-
-**Google Calendar** (optional, via Service Account):
-- Family calendar (read-only) — absences, business trips, appointments
-- Orchestrator calendar (read/write) — reminders, scheduled actions
-- Uses `google-api-python-client` with Service Account auth (no interactive OAuth)
-- Setup: create Service Account in Google Cloud Console, share calendars with its email
-
-**Google Calendar Setup** (step-by-step):
-
-1. **Google Cloud Console** — go to https://console.cloud.google.com
-   - Create a new project (or use an existing one)
-   - Go to **APIs & Services → Library** → search "Google Calendar API" → **Enable**
-   - Go to **APIs & Services → Credentials** → **Create Credentials → Service Account**
-   - Give it a name (e.g. "homelab-orchestrator"), click through, done
-   - Click the new service account → **Keys** tab → **Add Key → Create new key → JSON**
-   - Download the JSON key file — this is your `GOOGLE_CALENDAR_CREDENTIALS_FILE`
-   - Note the service account email (looks like `name@project.iam.gserviceaccount.com`)
-
-2. **Share the family calendar** (read-only)
-   - Open https://calendar.google.com → hover your family calendar on the left → three dots → **Settings and sharing**
-   - Under **Share with specific people or groups** → **+ Add people and groups**
-   - Paste the service account email → set permission to **See all event details** → Send
-   - Scroll to **Integrate calendar** → copy the **Calendar ID** (e.g. `abc123@group.calendar.google.com` or your email for the primary calendar)
-
-3. **Create the orchestrator calendar** (read/write)
-   - In Google Calendar, click **+** next to "Other calendars" → **Create new calendar**
-   - Name it "Home Orchestrator" → click **Create calendar**
-   - Open its settings → under **Share with specific people or groups**, add the service account email with **Make changes to events** permission
-   - Copy the **Calendar ID** from **Integrate calendar**
-
-4. **Deploy the credentials**
-   - Option A — file mount: copy the JSON key into the orchestrator data volume:
-     ```bash
-     docker compose up -d orchestrator
-     docker cp /path/to/key.json orchestrator:/app/data/google-credentials.json
-     ```
-   - Option B — base64 env var (no file needed): `base64 -w0 /path/to/key.json` and set `GOOGLE_CALENDAR_CREDENTIALS_JSON` in `.env`
-
-5. **Configure `.env`**:
-   ```
-   GOOGLE_CALENDAR_CREDENTIALS_FILE=/app/data/google-credentials.json
-   GOOGLE_CALENDAR_FAMILY_ID=<family calendar ID from step 2>
-   GOOGLE_CALENDAR_ORCHESTRATOR_ID=<orchestrator calendar ID from step 3>
-   ```
-
-6. **Verify**: `docker compose restart orchestrator && docker compose logs -f orchestrator` → look for `google_calendar_enabled  family_cal=True  orchestrator_cal=True`
-
-**MQTT**: Subscribes to `homelab/+/heartbeat` and `homelab/+/updated` to track all service states. Also subscribes to `homelab/ev-forecast/plan` (creates calendar events for charging needs) and `homelab/ev-forecast/clarification-needed` (forwards trip questions to users via Telegram).
-
-**HA entities** (via MQTT auto-discovery, "Home Orchestrator" device, 15 entities):
-- `binary_sensor` — Service online/offline, Proactive Suggestions enabled, Morning/Evening Briefing enabled
-- `sensor` — Uptime, LLM Provider, Messages Today, Tool Calls Today, Suggestions Sent Today, Last Tool Used, Last Decision, Last Suggestion, Services Online
-- `sensor` (reasoning) — Orchestrator Reasoning (with `full_reasoning`, `services_tracked`, `last_decision_time` as JSON attributes)
-
-**REST API + MCP Server** (optional, port 8100):
-
-The orchestrator exposes its full capabilities via HTTP for programmatic access and AI agent integration (e.g., OpenClaw):
-
-- **REST API** at `/api/v1/*` — standard HTTP endpoints for tools, chat, and status
-- **MCP server** at `/mcp` — Model Context Protocol (SSE transport) for AI agents
-
-Both require `X-API-Key` header authentication. The API server only starts when `ORCHESTRATOR_API_KEY` is configured.
-
-REST endpoints:
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/_health` | Healthcheck (no auth) |
-| `GET` | `/api/v1/status` | Service status + activity |
-| `GET` | `/api/v1/tools` | List all tools with schemas |
-| `POST` | `/api/v1/tools/execute` | Execute a tool directly (bypasses LLM) |
-| `POST` | `/api/v1/chat` | Full Brain reasoning loop |
-
-MCP tools: All 23 orchestrator tools + `chat_with_orchestrator` (full Brain reasoning).
-
-MCP resources: `homelab://status`, `homelab://energy`, `homelab://pv-forecast`, `homelab://ev-charging`, `homelab://ev-forecast`, `homelab://weather`, `homelab://energy-prices`, `homelab://tools`.
-
-**Access**: `http://<server-ip>:8100` directly, or via Traefik at `https://api.local.schuettken.net`.
-
-OpenClaw MCP config:
-```json
-{
-  "mcpServers": {
-    "homelab": {
-      "url": "http://orchestrator:8100/mcp/sse",
-      "headers": {"X-API-Key": "YOUR_KEY"}
-    }
-  }
-}
-```
-
-**Config** (env vars): `LLM_PROVIDER`, `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`, `MORNING_BRIEFING_TIME`, `ENABLE_PROACTIVE_SUGGESTIONS`, `ENABLE_SEMANTIC_MEMORY`, `ENABLE_KNOWLEDGE_STORE`, `MEMORY_DOCUMENT_MAX_SIZE`, `KNOWLEDGE_AUTO_EXTRACT`, `GRID_PRICE_CT`, `FEED_IN_TARIFF_CT`, `OIL_PRICE_PER_KWH_CT`, `HOUSEHOLD_USERS`, `GOOGLE_CALENDAR_CREDENTIALS_FILE`, `GOOGLE_CALENDAR_FAMILY_ID`, `GOOGLE_CALENDAR_ORCHESTRATOR_ID`, `ORCHESTRATOR_API_KEY`, `ORCHESTRATOR_API_PORT` (8100), `ORCHESTRATOR_API_HOST` (0.0.0.0). Most entity IDs have sensible defaults matching the existing HA setup.
-
-**Example use cases**:
-- "Do you need to charge your car tomorrow?" → checks PV forecast, EV battery, schedule
-- "Can you turn on the wood-firing oven tomorrow at 5 PM to save oil?" → weather check, heating demand analysis
-- "Do you need your sauna tomorrow, or can we use more PV for the IR panels?" → preference check, PV forecast comparison
-- "How much did PV save us this month?" → InfluxDB historical query + cost calculation
-
-### pv-forecast — AI Solar Production Forecast
-
-Predicts PV output (kWh) for east and west arrays using a Gradient Boosting model
-trained on historical production data (InfluxDB) correlated with weather features (Open-Meteo).
-
-**Data flow**: InfluxDB (actual production) + Open-Meteo (radiation/clouds/temp/sunrise/sunset) + Forecast.Solar (optional) → ML model → HA sensors
-
-**Important**: The input energy sensors (`sensor.inverter_pv_east_energy`, `sensor.inverter_pv_west_energy`) are `total_increasing` cumulative sensors. The data collector diffs consecutive hourly values to derive per-hour kWh — it does **not** assume midnight resets.
-
-**Daylight filtering**: Uses actual sunrise/sunset times from Open-Meteo (daily API) to filter training data and forecast hours. A physics constraint also zeros out any prediction where GHI < 5 W/m² (no sun = no power). This replaces an earlier hardcoded 5–21 UTC range that included many dark hours in winter at 52°N.
-
-**Model versioning**: Models are saved as `{"model": ..., "features": [...]}` dicts. On load, the feature list is validated against current `FEATURE_COLS`. If features have changed (e.g., new features added), the old model is automatically discarded and retrained.
-
-**Falls back** to radiation-based estimation when <14 days of training data exist.
-
-**Schedule**: Forecast every hour, model retrain at 1 AM UTC daily.
-
-**HA output sensors** — registered via two mechanisms:
-
-*Via REST API* (prefix configurable via `HA_SENSOR_PREFIX`):
-- `sensor.pv_ai_forecast_today_kwh` — total both arrays
-- `sensor.pv_ai_forecast_today_remaining_kwh` — remaining from current hour
-- `sensor.pv_ai_forecast_tomorrow_kwh`
-- `sensor.pv_ai_forecast_day_after_tomorrow_kwh`
-- `sensor.pv_ai_forecast_east_today_kwh` / `west_today_kwh`
-- `sensor.pv_ai_forecast_east_tomorrow_kwh` / `west_tomorrow_kwh`
-
-Each sensor includes an `hourly` attribute with per-hour breakdown.
-
-*Via MQTT auto-discovery* (grouped under "PV AI Forecast" device in HA, 23 entities):
-- `binary_sensor` — Service status (online/offline, 3-min expiry)
-- `sensor` — Uptime, Today/Tomorrow/Day-After kWh, Today Remaining kWh, East/West Today/Tomorrow kWh
-- `sensor` (diagnostic) — East/West Model Type (ml/fallback), East/West R², East/West MAE, Training Data Days (East/West), Last Model Training timestamp
-- `sensor` — Forecast.Solar Today (comparison), Forecast Reasoning (with full_reasoning attribute)
-
-**MQTT events**: `homelab/pv-forecast/updated`, `homelab/pv-forecast/model-trained`, `homelab/pv-forecast/heartbeat`
-
-**ML features** (19 total): `hour`, `day_of_year`, `month`, `shortwave_radiation` (GHI), `direct_radiation`, `diffuse_radiation`, `direct_normal_irradiance` (DNI), `cloud_cover` (total/low/mid/high), `temperature_2m`, `relative_humidity_2m`, `wind_speed_10m`, `sunshine_duration`, `capacity_kwp`, `forecast_solar_kwh`, `sunrise_hour`, `sunset_hour`
-
-**Config** (env vars): `PV_EAST_ENERGY_ENTITY_ID`, `PV_EAST_CAPACITY_KWP`, `PV_EAST_AZIMUTH`, `PV_EAST_TILT` (same for west). `FORECAST_SOLAR_EAST_ENTITY_ID` / `WEST` (optional — used as ML feature). Location auto-detected from HA if not set.
-
-### smart-ev-charging — Smart EV Charging Controller
-
-Controls the Amtron wallbox via HEMS power limit (Modbus register 1002) to optimize
-EV charging based on PV surplus, user preferences, and departure deadlines.
-
-**Charge modes** (selected via `input_select.ev_charge_mode`):
-
-| Mode | Behavior |
-|------|----------|
-| Off | Wallbox paused (HEMS = 0 W) |
-| PV Surplus | Dynamic tracking of solar surplus only |
-| Smart | PV surplus + grid fill by departure (with "Full by Morning") |
-| Eco | Fixed ~5 kW constant |
-| Fast | Fixed 11 kW maximum |
-| Manual | Service hands off — user controls wallbox directly via HA |
-
-**"Full by Morning"** modifier (`input_boolean.ev_full_by_morning`): When enabled with PV Surplus or Smart mode, the service calculates if the target energy can be reached by departure time. If not, it escalates to grid charging as the deadline approaches.
-
-**EV SoC integration** (Audi Connect): When `EV_SOC_ENTITY` is configured, the service reads the car's actual SoC and computes energy needed: `(target_soc% - current_soc%) × capacity`. Charging stops automatically when target SoC is reached (any mode). Falls back to manual `target_energy_kwh` vs session energy when SoC is unavailable.
-
-**PV surplus formula** (grid meter: positive = exporting, negative = importing):
-`pv_available = grid_power + ev_power + battery_power - reserve`. The grid meter sees the net of everything behind it. When the battery charges (battery_power > 0), the EV reclaims that power. When discharging (< 0), available is reduced to only count real PV surplus.
-
-**Battery assist**: On top of PV-only surplus, the strategy allows limited battery discharge for EV charging. This is gated by: SoC > floor (20%), PV forecast quality (good day → more aggressive), and a max discharge rate cap (2 kW default) to protect battery longevity. Battery assist only kicks in when PV is producing but surplus alone isn't enough for the wallbox minimum.
-
-**PV surplus continuation**: After the plan target (energy/SoC) is reached, the service continues PV surplus charging opportunistically. PV into the car is more valuable than feeding back to the grid (25 ct/kWh reimbursement vs 7 ct/kWh feed-in), so the car acts as a profitable energy sink.
-
-**Economics**: Grid import 25 ct/kWh (fixed), feed-in 7 ct/kWh, employer reimburses 25 ct/kWh. No EPEX spot market. PV charging = +18 ct/kWh profit, grid charging = cost-neutral.
-
-**Energy priority order**: Home consumption > Home battery charging > EV surplus charging > Grid feed-in. The PV surplus formula ensures the EV only gets power that would otherwise be exported to the grid, never stealing from household loads or the home battery.
-
-**Control loop**: Every 30 s — read HA state → calculate target power → write HEMS limit → publish MQTT status.
-
-**HA input helpers** (defined in `HomeAssistant_config/configuration.yaml`):
-- `input_select.ev_charge_mode` — Charge mode selector
-- `input_boolean.ev_full_by_morning` — Deadline mode
-- `input_datetime.ev_departure_time` — When the car leaves
-- `input_number.ev_target_soc_pct` — Target SoC % (default 80)
-- `input_number.ev_target_energy_kwh` — Fallback manual energy target
-- `input_number.ev_battery_capacity_kwh` — Total EV battery capacity
-
-**HA output sensors** (via MQTT auto-discovery, "Smart EV Charging" device, 24 entities):
-- `binary_sensor` — Service online/offline, Vehicle Connected, Full by Morning active
-- `sensor` (core) — Charge Mode, Target Power (W), Actual Power (W), Session Energy (kWh), PV Available (W), Status text, Home Battery Power (W), Home Battery SoC (%), House Power (W)
-- `sensor` (EV) — EV SoC (%), Energy Needed (kWh)
-- `sensor` (decision context) — PV Surplus before assist (W), Battery Assist Power (W), Battery Assist Reason, PV DC Power (W), Grid Power (W), PV Forecast Remaining (kWh), Energy Remaining to Target (kWh), Target Energy (kWh)
-- `sensor` (deadline) — Deadline Hours Left, Deadline Required Power (W)
-- `sensor` (reasoning) — Decision Reasoning (with full_reasoning, battery_assist_reason, deadline details as JSON attributes)
-
-**MQTT events**: `homelab/smart-ev-charging/status`, `homelab/smart-ev-charging/heartbeat`
-
-**Config** (env vars): `EV_SOC_ENTITY`, `EV_GRID_PRICE_CT`, `EV_FEED_IN_TARIFF_CT`, `EV_REIMBURSEMENT_CT`, `WALLBOX_MAX_POWER_W`, `WALLBOX_MIN_POWER_W`, `ECO_CHARGE_POWER_W`, `GRID_RESERVE_W`, `CONTROL_INTERVAL_SECONDS`, `BATTERY_MIN_SOC_PCT`, `BATTERY_EV_ASSIST_MAX_W`, `PV_FORECAST_GOOD_KWH`, `SAFE_MODE_ENTITY`. Entity IDs have sensible defaults matching the Amtron + Sungrow + Shelly setup.
-
-### ev-forecast — EV Driving Forecast & Smart Charging Planner
-
-Monitors the Audi A6 e-tron (83 kWh gross / 76 kWh net) via Audi Connect, predicts driving needs from the family calendar, and generates smart charging plans that maximize PV usage while ensuring the car is always ready.
-
-**Vehicle**: Audi A6 e-tron, consumption calculated dynamically from mileage + SoC changes (default 22 kWh/100 km until enough data is collected).
-
-**Audi Connect account modes** (`AUDI_SINGLE_ACCOUNT` env var):
-
-| Mode | Default | Description |
-|------|---------|-------------|
-| Single account (recommended) | `true` | Uses Henning's Audi Connect directly with standard sensor entities. No combined template sensors needed. |
-| Dual account (legacy) | `false` | Uses combined `_comb` HA template sensors merging Henning + Nicole accounts via mileage comparison. Requires `ev_audi_connect.yaml` HA package. |
-
-In single-account mode, the service reads direct Audi Connect entities (e.g. `sensor.audi_a6_avant_e_tron_state_of_charge`). The `active_account_entity` is left empty and only one VIN is used for cloud refresh.
-
-In dual-account mode (legacy), the service reads combined `_comb` entities and refreshes both accounts.
-
-**Dynamic consumption calculation**: The service tracks actual kWh/100km from mileage and SoC changes instead of using a fixed rate. When a driving segment is detected (mileage increased AND SoC decreased between readings), the consumption is calculated: `(soc_delta / 100 × battery_capacity) / km_delta × 100`. The rolling average of the last 10 measurements replaces the configured default. This adapts to seasonal changes (cold = higher consumption), driving style (highway vs city), and payload. Measurements are persisted across restarts. Only values in the 5–60 kWh/100km range pass the sanity check.
-
-**Calendar-based trip prediction**: Reads the shared family calendar. Events are parsed by prefix:
-- `H: <destination>` — Henning drives (e.g., "H: Aachen", "H: STR")
-- `N: <destination>` — Nicole drives (e.g., "N: Münster")
-- Henning: trips >350 km → takes the train (no EV impact); 100–350 km → asks via Telegram
-- Nicole: default commute Mon–Thu to Lengerich (22 km one way), departs 07:00, returns ~18:00
-- Known destinations are mapped to distances via a configurable lookup table
-
-**Geocoding** (for unknown destinations): Uses OpenStreetMap Nominatim (free, no API key) to estimate distances. Flow: destination name → geocode to coordinates → haversine straight-line distance → multiply by road factor (default 1.3) → estimated road km. Results are cached per session.
-
-**Known destinations** (configurable via `KNOWN_DESTINATIONS` JSON env var): Pre-mapped city→distance lookup for common trips (e.g., Münster 60 km, Aachen 80 km, STR 500 km). Falls back to geocoding for unknown destinations, then to a conservative 50 km default.
-
-**Trip clarification**: When the ev-forecast service can't determine if someone will use the EV (Henning for 100–350 km trips, unknown destinations), it publishes questions in German to `homelab/ev-forecast/clarification-needed`. Each clarification includes an `event_id` for tracking. The orchestrator forwards these to Telegram and routes user responses back via `homelab/ev-forecast/trip-response`.
-
-**Smart charging plan** (demand-focused): The planner expresses **demand** ("need X kWh by time Y"), not supply. PV optimization is left to the smart-ev-charging service. For the next 3 days, the planner:
-1. Calculates energy needed for each day's trips (distance × dynamic consumption rate)
-2. Adds safety buffer (min SoC 20% + buffer 10% + min arrival SoC 15%)
-3. Compares required SoC to current SoC, tracks running SoC across days
-4. Assigns urgency: none → low → medium → high → critical (based on time-to-deadline)
-5. Chooses the best charge mode:
-   - **PV Surplus** — no trips or SoC already sufficient
-   - **Smart** — PV surplus + grid fill by departure deadline
-   - **Fast/Eco** — urgent, departure imminent (<2 hours)
-6. Automatically sets the HA input helpers (`ev_charge_mode`, `ev_target_energy_kwh`, `ev_departure_time`, `ev_full_by_morning`) for the smart-ev-charging service
-
-**Urgency parameters** (configurable via env vars):
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `CRITICAL_URGENCY_HOURS` | 2.0 | Departure within 2h — switches to Fast or Eco mode |
-| `HIGH_URGENCY_HOURS` | 6.0 | Departure within 6h — switches to Smart mode |
-| `FAST_MODE_THRESHOLD_KWH` | 15.0 | In critical urgency, deficit >15 kWh → Fast instead of Eco |
-| `EARLY_DEPARTURE_HOUR` | 10 | Tomorrow departure before 10 AM → charge overnight (Smart + Full by Morning) |
-
-**Data flow**: Audi Connect (SoC/range) + Google Calendar (trips) + PV Forecast (solar) → Charging Plan → HA Helpers → smart-ev-charging (wallbox control)
-
-**Schedule**: Vehicle state check every 15 min, plan update every 30 min.
-
-**HA output sensors** (via MQTT auto-discovery, "EV Forecast" device, 14 entities):
-- `binary_sensor` — Service online/offline
-- `sensor` — EV SoC (%), EV Range (km), Active Account, Charging State, Plug State, Energy Needed Today (kWh), Recommended Charge Mode, Next Trip, Next Departure, Plan Status, Uptime
-- `sensor` — EV Consumption (kWh/100km, with `source` and `measurements` attributes — "measured" or "default")
-- `sensor` (reasoning) — Plan Reasoning (with `full_reasoning`, `current_soc_pct`, `total_energy_needed_kwh`, `today_urgency` as JSON attributes)
-
-**MQTT events**: `homelab/ev-forecast/vehicle`, `homelab/ev-forecast/plan`, `homelab/ev-forecast/clarification-needed`, `homelab/ev-forecast/heartbeat`
-
-**MQTT integration with orchestrator**: When a trip needs clarification (unknown distance or Henning's ambiguous trips), publishes to `homelab/ev-forecast/clarification-needed`. The orchestrator can ask via Telegram and respond on `homelab/ev-forecast/trip-response`.
-
-**HA YAML** (`HomeAssistant_config/ev_audi_connect.yaml`): HA package for vehicle scripts and automation. In **single-account mode** (default), only the vehicle action scripts (`ev_refresh_cloud`, `ev_refresh_vehicle`, `ev_start_climate`, etc.) and periodic cloud refresh automation are needed — the combined `_comb` template sensors are not required. In **dual-account mode** (legacy), the package additionally provides combined `_comb` entities via mileage-based active account detection. Include as HA package: `homeassistant: packages: ev_audi: !include ev_audi_connect.yaml`. Scripts: `script.ev_refresh_cloud`, `script.ev_refresh_vehicle`, `script.ev_start_climate`, `script.ev_stop_climate`, `script.ev_start_window_heating`, `script.ev_lock`, `script.ev_unlock`, `script.ev_start_charger`, `script.ev_stop_charger`, `script.ev_set_target_soc`.
-
-**Config** (env vars): `AUDI_SINGLE_ACCOUNT` (true = single account, false = dual), `EV_BATTERY_CAPACITY_GROSS_KWH`, `EV_BATTERY_CAPACITY_NET_KWH`, `EV_CONSUMPTION_KWH_PER_100KM` (default fallback until dynamic data is available), `EV_SOC_ENTITY`, `EV_RANGE_ENTITY`, `EV_CHARGING_ENTITY`, `EV_PLUG_ENTITY`, `EV_MILEAGE_ENTITY`, `EV_CLIMATISATION_ENTITY`, `EV_ACTIVE_ACCOUNT_ENTITY` (only for dual-account mode), `AUDI_ACCOUNT1_NAME` / `AUDI_ACCOUNT1_VIN`, `AUDI_ACCOUNT2_NAME` / `AUDI_ACCOUNT2_VIN` (only for dual-account mode), `AUDI_REFRESH_INTERVAL_MINUTES`, `AUDI_STALE_THRESHOLD_MINUTES`, `CALENDAR_PREFIX_HENNING`, `CALENDAR_PREFIX_NICOLE`, `NICOLE_COMMUTE_KM`, `NICOLE_COMMUTE_DAYS`, `HENNING_TRAIN_THRESHOLD_KM`, `KNOWN_DESTINATIONS` (JSON), `MIN_SOC_PCT`, `BUFFER_SOC_PCT`, `PLANNING_HORIZON_DAYS`, `CRITICAL_URGENCY_HOURS`, `HIGH_URGENCY_HOURS`, `FAST_MODE_THRESHOLD_KWH`, `EARLY_DEPARTURE_HOUR`, `PLAN_UPDATE_MINUTES`, `VEHICLE_CHECK_MINUTES`, `SAFE_MODE_ENTITY`. Uses same `GOOGLE_CALENDAR_*` credentials as the orchestrator.
-
-### health-monitor — Health Monitoring & Telegram Alerting
-
-Continuously monitors all homelab services and infrastructure. Sends Telegram alerts when issues are detected and daily health summaries.
-
-**Monitoring capabilities:**
-- **MQTT heartbeats** — tracks all services via `homelab/+/heartbeat`, detects offline transitions (no heartbeat for 5 min)
-- **Docker container health** — checks container status (healthy/unhealthy/restarting) and restart counts via Docker socket
-- **Infrastructure connectivity** — periodically tests HA API and InfluxDB health endpoint
-- **HA entity staleness** — monitors key entities for `unavailable`/`unknown` states
-- **Diagnostic execution** — runs `diagnose.py --step all` inside each service's container via `docker exec`
-
-**Alert behaviour:**
-- Per-issue cooldown (default 30 min) to avoid spam
-- Recovery notifications when issues resolve
-- Daily health summary at configurable hour (default 08:00)
-- Severity levels: critical (service down, HA unreachable), warning (unhealthy container, stale entity), info (startup)
-
-**Docker socket**: Requires `/var/run/docker.sock` mounted read-only. Used to check container health status and exec diagnose.py inside running containers. Without the socket, heartbeat and infrastructure monitoring still work.
-
-**HA entities** (via MQTT auto-discovery, "Health Monitor" device, 8 entities):
-- `binary_sensor` — Service online/offline, HA Connectivity, InfluxDB Connectivity
-- `sensor` — Services Online, Services Monitored, Active Issues, Uptime, Last Health Check
-
-**MQTT events**: `homelab/health-monitor/status`, `homelab/health-monitor/heartbeat`
-
-**Config** (env vars): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALERT_CHAT_IDS` (comma-separated chat IDs), `MONITORED_SERVICES` (comma-separated, default: all 4 services), `HEARTBEAT_TIMEOUT_SECONDS` (5 min), `INFRASTRUCTURE_CHECK_MINUTES` (5), `DIAGNOSTIC_RUN_MINUTES` (30), `DOCKER_CHECK_MINUTES` (2), `ALERT_COOLDOWN_MINUTES` (30), `DAILY_SUMMARY_HOUR` (8, -1 to disable), `WATCHED_ENTITIES` (comma-separated HA entity IDs to check for staleness).
-
-### dashboard — NiceGUI Web Dashboard
-
-A modern dark-themed web dashboard built with [NiceGUI](https://nicegui.io/) (Python, Quasar/Vue under the hood). Provides real-time monitoring, Home Assistant controls, and a chat interface to the orchestrator — all in the browser.
-
-**Tech stack**: NiceGUI 2.x (FastAPI + uvicorn + Quasar + Vue + Tailwind). Pure Python, no separate frontend build step.
-
-**Pages**:
-
-| Page | Path | Description |
-|------|------|-------------|
-| Dashboard | `/` | Energy overview (PV, grid, battery, house, EV), PV forecast, EV charging status, service health mini-view |
-| Services | `/services` | Service health grid with status, uptime, memory, last heartbeat. Orchestrator activity section. |
-| Controls | `/controls` | EV charging controls (charge mode, target SoC, departure time, full-by-morning), quick actions (refresh/retrain), safe mode toggle |
-| Chat | `/chat` | Chat with the orchestrator AI via MQTT. Quick prompts, markdown rendering, typing indicator. |
-
-**Architecture**: The dashboard does NOT use BaseService. It creates MQTT, HA, and InfluxDB clients manually and integrates with NiceGUI's lifecycle via `app.on_startup` / `app.on_shutdown`. MQTT callbacks update a thread-safe `DashboardState` object; NiceGUI pages poll the state with `ui.timer` for live updates (~3s refresh).
-
-**Chat integration**: The dashboard sends chat messages to the orchestrator via MQTT:
-1. Dashboard publishes to `homelab/orchestrator/command/dashboard` with `{"command": "chat", "message": "...", "request_id": "...", "user_name": "Dashboard"}`
-2. Orchestrator processes through Brain (same LLM + tools as Telegram)
-3. Orchestrator publishes response to `homelab/dashboard/chat-response` with `{"request_id": "...", "response": "..."}`
-
-**HA entities** (via MQTT auto-discovery, "Homelab Dashboard" device, 2 entities):
-- `binary_sensor` — Service online/offline
-- `sensor` — Uptime
-
-**MQTT subscriptions**: `homelab/+/heartbeat`, `homelab/pv-forecast/updated`, `homelab/smart-ev-charging/status`, `homelab/ev-forecast/plan`, `homelab/ev-forecast/vehicle`, `homelab/orchestrator/activity`, `homelab/health-monitor/status`, `homelab/dashboard/chat-response`
-
-**MQTT events**: `homelab/dashboard/heartbeat`
-
-**HA polling**: Periodically reads energy sensors, EV entities, PV forecast entities, and control entities (input_select, input_number, input_boolean, input_datetime) via the REST API. Default interval: 10 seconds.
-
-**Config** (env vars): `DASHBOARD_PORT` (8085), `DASHBOARD_TITLE`, `DASHBOARD_USER_NAME` (name shown in chat), `HA_POLL_INTERVAL` (10), `UI_REFRESH_INTERVAL` (3). All entity IDs are configurable with sensible defaults matching the existing HA setup. Uses the same `HA_URL`, `HA_TOKEN`, `MQTT_*` settings as other services.
-
-**Access**: `http://<server-ip>:8085` directly, or via Traefik reverse proxy at `https://cockpit.local.schuettken.net` (configurable via `TRAEFIK_DASHBOARD_HOST`). No authentication (intended for local network / VPN use only).
+- **EV battery**: Audi Connect — `sensor.audi_a6_avant_e_tron_state_of_charge` (single-account) or `..._comb` (dual-account legacy)
+- **Forecast.Solar**: `sensor.energy_production_today_east` / `west`, `sensor.energy_production_tomorrow_east` / `west`
 
 ## Inter-Service Integration Patterns
 
@@ -827,27 +301,32 @@ Example: ev-forecast publishes "need 15 kWh by 07:00" via MQTT. The orchestrator
 
 ### MQTT Thread → Asyncio Bridge
 
-MQTT callbacks (paho) run on a background thread, but services use asyncio. The orchestrator bridges this with:
+MQTT callbacks (paho) run on a background thread, but services use asyncio. Services bridge this with:
+
 ```python
 asyncio.run_coroutine_threadsafe(coro, self._loop)
 ```
-This safely schedules async work (e.g., calendar API calls, Telegram messages) from synchronous MQTT handlers.
+
+Safely schedules async work (e.g., calendar API calls, Telegram messages) from synchronous MQTT handlers.
 
 ### Shared State Dict
 
 Cross-component state within a service is shared via reference to a mutable dict:
+
 ```python
 self._ev_state = {"plan": None, "pending_clarifications": []}
 ```
-This dict is passed to Brain, ToolExecutor, and ProactiveEngine — all read/write the same object. MQTT handlers update it, LLM tools read it, and the proactive engine reacts to changes.
+
+Passed to Brain, ToolExecutor, and ProactiveEngine — all read/write the same object.
 
 ### Service Chain: ev-forecast → smart-ev-charging
 
-The ev-forecast service writes HA input helpers (`ev_charge_mode`, `ev_target_energy_kwh`, `ev_departure_time`, `ev_full_by_morning`), which the smart-ev-charging service reads on its 30-second control loop. This decouples planning from execution — no direct MQTT dependency between the two.
+ev-forecast writes HA input helpers (`ev_charge_mode`, `ev_target_energy_kwh`, `ev_departure_time`, `ev_full_by_morning`), which smart-ev-charging reads on its 30-second control loop. This decouples planning from execution — no direct MQTT dependency between the two.
 
 ### EV Trip Clarification Flow
 
 Full lifecycle for ambiguous trip resolution:
+
 1. **ev-forecast** parses calendar, finds ambiguous trip (e.g., Henning 100–350 km)
 2. **ev-forecast** publishes to `homelab/ev-forecast/clarification-needed` with question in German
 3. **orchestrator** receives via MQTT, stores in `ev_state["pending_clarifications"]`
@@ -868,60 +347,15 @@ Full lifecycle for ambiguous trip resolution:
 
 ## Key Notes for AI Assistants
 
-1. **Read before modifying** — Always read a file before proposing changes to it.
-2. **Minimal changes** — Only make changes that are directly requested. Avoid over-engineering.
+1. **Read before modifying** — Always read a file before proposing changes. For service-specific work, read the service's own `CLAUDE.md` first.
+2. **Minimal changes** — Only make changes directly requested. Avoid over-engineering.
 3. **Service template** — When creating new services, use `./scripts/new-service.sh` or copy `services/example-service/`.
 4. **Base image** — If you add a dependency to `base/requirements.txt`, remind the user to rebuild with `./scripts/build-base.sh`.
 5. **docker-compose.yml** — When adding a new service, add it to `docker-compose.yml` following the existing pattern.
-6. **Update this file** — When adding significant components, update this CLAUDE.md.
-7. **Security** — Never commit plain `.env`. Secrets go in `.env.enc` (encrypted via SOPS). Be cautious with InfluxDB Flux queries (injection risk if building queries from user input).
-8. **InfluxDB** — Currently configured for **v2** (Flux query language). If the user has v1, the client wrapper needs changing.
-9. **Server Python packages** — The server runs Debian/Ubuntu with PEP 668 (`externally-managed-environment`). Always use `python3 -m venv` for standalone scripts instead of `pip install` system-wide. A shared venv exists at `scripts/.venv/`.
-10. **InfluxDB query gotchas** (learned from Shelly outlier fix):
+6. **Security** — Never commit plain `.env`. Secrets go in `.env.enc` (encrypted via SOPS). Be cautious with InfluxDB Flux queries (injection risk if building queries from user input).
+7. **InfluxDB** — Currently configured for **v2** (Flux query language). If the user has v1, the client wrapper needs changing.
+8. **Server Python packages** — The server runs Debian/Ubuntu with PEP 668 (`externally-managed-environment`). Always use `python3 -m venv` for standalone scripts instead of `pip install` system-wide. A shared venv exists at `scripts/.venv/`.
+9. **InfluxDB query gotchas** (learned from Shelly outlier fix):
     - Flux returns **separate tables per `_measurement`/series** — records from different tables are NOT sorted together. Always sort in Python after collecting from all tables.
     - The Shelly 3EM stores **triplicate records** per timestamp (one per phase series) with sub-millisecond timestamp differences. Deduplicate by truncating to the second before comparing.
     - The InfluxDB v2 **delete API only supports tag predicates** (e.g., `entity_id="..."`). Filtering by `_field` returns `501 Not Implemented`. Use a tight time window + tag filter instead.
-
-### ollama-router — Multi-Node Ollama Load Balancer
-
-Routes Ollama-compatible LLM requests across multiple local Ollama nodes, providing load balancing, model affinity routing, and idle model unloading. Exposes both Ollama-native and OpenAI-compatible APIs.
-
-**Architecture**: FastAPI service that proxies requests to backend Ollama nodes. No BaseService — standalone FastAPI app with `asynccontextmanager` lifespan.
-
-**Key components** (under `services/ollama-router/router/`):
-- `main.py` — FastAPI app factory, lifespan, router registration
-- `node_manager.py` — Health tracking for each Ollama node
-- `model_manager.py` — Model lifecycle (preload on startup, idle unload)
-- `balancer.py` — Load balancer with pluggable strategies
-- `task_classifier.py` — Classifies request task type (fast/deep/code/embedding/reasoning)
-- `api_ollama.py` — Ollama-native API (`/api/generate`, `/api/chat`, `/api/tags`, etc.)
-- `api_openai.py` — OpenAI-compatible API (`/v1/chat/completions`, `/v1/models`, etc.)
-- `api_admin.py` — Admin endpoints (`/admin/nodes`, `/admin/models`, `/admin/reload`)
-- `config.py` — Pydantic settings loaded from `config.yaml`
-- `metrics.py` — Prometheus metrics endpoint
-
-**Routing strategies** (configured in `config.yaml`):
-- `model_affinity` (default) — route to the node that has the model already loaded; fall back to least-busy
-- `round_robin` — cycle through healthy nodes
-- `least_busy` — pick node with fewest in-flight requests
-
-**Task-to-model mapping** (`routing.task_model_map` in `config.yaml`):
-
-| Task | Purpose |
-|------|---------|
-| `fast` | Quick queries — small models (e.g. `qwen2.5:7b-q4_K_M`) |
-| `deep` | Complex reasoning — large models (e.g. `qwen2.5:32b-q4_K_M`) |
-| `code` | Code generation — coder-tuned models |
-| `embedding` | Vector embeddings — `nomic-embed-text`, `mxbai-embed-large` |
-| `reasoning` | Chain-of-thought — `deepseek-r1:14b`, `qwen2.5:32b` |
-
-**Lifecycle**:
-- On startup: preloads configured default models on each node (when `preload_on_startup: true`)
-- Idle unload: models unused for `idle_unload_minutes` (default 15) are unloaded to free VRAM/RAM
-- `auto_pull: false` — models must be pre-installed on nodes; the router will NOT pull missing models
-
-**Port**: 11434 (same as native Ollama — drop-in replacement for any client configured to talk to Ollama)
-
-**Config**: `services/ollama-router/config.yaml` (mounted read-only at `/app/config.yaml`). Edit on the host and restart the container — no rebuild needed. Use `GET /admin/reload` for hot config reload without restart.
-
-**No HA/MQTT integration** — this is a pure LLM infrastructure service.
