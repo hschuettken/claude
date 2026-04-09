@@ -13,6 +13,6 @@ COPY shared/ /app/shared/
 COPY shared/ /app/shared/shared/
 
 HEALTHCHECK --interval=60s --timeout=5s --start-period=120s --retries=3 \
-    CMD ["python", "-c", "import requests; requests.get('http://localhost:8210/health').raise_for_status()"]
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
 
 CMD ["python", "main.py"]
