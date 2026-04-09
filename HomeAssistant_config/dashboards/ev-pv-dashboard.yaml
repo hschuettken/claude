@@ -72,6 +72,9 @@ views:
               - entity: input_boolean.ev_full_by_morning
                 name: "Full by Morning"
                 icon: mdi:weather-night
+              - entity: input_boolean.ev_drain_pv_battery
+                name: "Drain PV Battery"
+                icon: mdi:battery-arrow-down
               - entity: input_datetime.ev_departure_time
                 name: "Departure Time"
                 icon: mdi:clock-outline

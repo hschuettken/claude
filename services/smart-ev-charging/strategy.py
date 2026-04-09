@@ -57,6 +57,8 @@ class ChargingContext:
     # Forecast-based sensors (from ev-forecast service)
     forecast_needed_kwh: float = 0.0  # kWh needed to reach forecast target SoC
     forecast_needed_soc: float = 0.0  # SoC% needed according to forecast
+    # Drain PV battery mode
+    drain_pv_battery: bool = False  # True = intentionally discharge PV battery into EV
 
     @property
     def energy_needed_kwh(self) -> float:
@@ -111,6 +113,9 @@ class ChargingDecision:
     solar_defer_active: bool = False  # True = deferring overnight grid charge to PV
     solar_defer_pv_kwh: float = 0.0  # Forecast PV available before departure (kWh)
     solar_defer_needed_kwh: float = 0.0  # Energy still needed (kWh)
+    # --- Drain PV battery ---
+    drain_boost_w: float = 0.0  # Extra power from intentional battery drain
+    drain_boost_reason: str = ""  # Explanation for drain boost
 
 
 class ChargingStrategy:
@@ -381,7 +386,14 @@ class ChargingStrategy:
         # redirect battery charging power to EV instead.  Released in the evening
         # so the battery can top off to 100% for overnight use.
         hold_boost, hold_reason = self._calc_battery_hold_boost(ctx)
-        available = pv_only + assist + hold_boost
+
+        # Drain PV battery boost: when drain_pv_battery is ON, add intentional
+        # battery discharge power on top of PV surplus.
+        drain_boost, drain_reason = 0.0, ""
+        if ctx.drain_pv_battery:
+            drain_boost, drain_reason = self._calc_drain_boost(ctx)
+
+        available = pv_only + assist + hold_boost + drain_boost
 
         ev_soc_low = ctx.ev_soc_pct is not None and ctx.ev_soc_pct < 50
         battery_high = ctx.battery_soc_pct >= 80
@@ -402,14 +414,22 @@ class ChargingStrategy:
             else self.min_power_w + self.start_hysteresis_w - hysteresis_reduction
         )
 
+        assist_reason_full = assist_reason
+        if hold_boost > 0:
+            assist_reason_full = f"{assist_reason} | Hold: {hold_reason}"
+        if drain_boost > 0:
+            assist_reason_full = (
+                f"{assist_reason_full} | Drain: {drain_reason}"
+                if assist_reason_full
+                else f"Drain: {drain_reason}"
+            )
+
         base_fields = {
             "pv_surplus_w": round(pv_only, 1),
-            "battery_assist_w": round(assist + hold_boost, 1),
-            "battery_assist_reason": (
-                f"{assist_reason} | Hold: {hold_reason}"
-                if hold_boost > 0
-                else assist_reason
-            ),
+            "battery_assist_w": round(assist + hold_boost + drain_boost, 1),
+            "battery_assist_reason": assist_reason_full,
+            "drain_boost_w": round(drain_boost, 1),
+            "drain_boost_reason": drain_reason,
         }
 
         if available >= threshold:
@@ -419,6 +439,8 @@ class ChargingStrategy:
                 parts.append(f"+ {assist:.0f} W battery assist")
             if hold_boost > 0:
                 parts.append(f"+ {hold_boost:.0f} W battery hold boost")
+            if drain_boost > 0:
+                parts.append(f"+ {drain_boost:.0f} W drain PV battery")
             if ctx.battery_soc_pct > 80 and ctx.battery_power_w > 0:
                 parts.append("(prioritize EV over battery)")
             if ev_soc_low:
@@ -1156,6 +1178,47 @@ class ChargingStrategy:
     # ------------------------------------------------------------------
     # PV surplus & battery assist
     # ------------------------------------------------------------------
+
+    def _calc_drain_boost(self, ctx: ChargingContext) -> tuple[float, str]:
+        """Extra power from intentional PV battery drain into EV.
+
+        Active when drain_pv_battery=ON in PV Surplus mode.
+        Adds battery discharge power on top of PV surplus, subject to:
+        - Battery SoC must be above min_soc + 5% (safety floor)
+        - Smart limit: only drain what remaining PV today can refill
+        """
+        drain_floor_soc = self.battery_min_soc_pct + 5.0
+        if ctx.battery_soc_pct <= drain_floor_soc:
+            return (
+                0.0,
+                f"SoC {ctx.battery_soc_pct:.0f}% <= drain floor {drain_floor_soc:.0f}% — stopping",
+            )
+
+        drain_available_kwh = (
+            (ctx.battery_soc_pct - drain_floor_soc) / 100.0 * ctx.battery_capacity_kwh
+        )
+
+        hours_remaining = max(0.5, self._estimate_daylight_hours_remaining(ctx.now))
+        house_kwh_remaining = (ctx.house_power_w / 1000.0) * hours_remaining
+        pv_net_for_battery = max(
+            0.0, ctx.pv_forecast_remaining_kwh - house_kwh_remaining
+        )
+
+        # Only drain what PV can safely refill
+        safe_drain_kwh = min(drain_available_kwh, pv_net_for_battery * 0.85)
+
+        if safe_drain_kwh < 0.1:
+            return (
+                0.0,
+                f"Smart limit: PV net {pv_net_for_battery:.1f} kWh — holding battery",
+            )
+
+        drain_power_w = min(self.battery_ev_assist_max_w, 3500.0)
+        reason = (
+            f"Drain: {drain_available_kwh:.1f} kWh avail, "
+            f"PV refill {pv_net_for_battery:.1f} kWh → {drain_power_w:.0f} W"
+        )
+        return drain_power_w, reason
 
     def _calc_pv_only_available(self, ctx: ChargingContext) -> float:
         """Power available from PV surplus only (no battery discharge).

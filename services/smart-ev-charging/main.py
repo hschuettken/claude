@@ -253,6 +253,7 @@ class SmartEVChargingService(BaseService):
 
         battery_power = await self._read_float(self.settings.battery_power_entity)
         battery_soc = await self._read_float(self.settings.battery_soc_entity)
+        drain_pv_battery = await self._read_bool(self.settings.drain_pv_battery_entity)
 
         pv_forecast_remaining = await self._read_float(
             self.settings.pv_forecast_remaining_entity,
@@ -420,6 +421,7 @@ class SmartEVChargingService(BaseService):
             manual_target_soc=manual_target_soc,
             forecast_needed_kwh=self._forecast_needed_kwh,
             forecast_needed_soc=self._forecast_needed_soc,
+            drain_pv_battery=drain_pv_battery,
         )
 
         # 2) Decide target power
@@ -710,6 +712,10 @@ class SmartEVChargingService(BaseService):
             "solar_defer_active": decision.solar_defer_active,
             "solar_defer_pv_kwh": round(decision.solar_defer_pv_kwh, 1),
             "solar_defer_needed_kwh": round(decision.solar_defer_needed_kwh, 1),
+            # --- Drain PV battery ---
+            "drain_pv_battery": ctx.drain_pv_battery,
+            "drain_boost_w": round(decision.drain_boost_w),
+            "drain_boost_reason": decision.drain_boost_reason,
             "reasoning": self._compose_reasoning(
                 ctx, decision, house_power, pv_available
             ),
@@ -1162,6 +1168,37 @@ class SmartEVChargingService(BaseService):
                     "{{ 'ON' if value_json.full_by_morning else 'OFF' }}"
                 ),
                 "icon": "mdi:clock-alert-outline",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "binary_sensor",
+            "drain_pv_battery",
+            node_id=node,
+            config={
+                "name": "Drain PV Battery",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": (
+                    "{{ 'ON' if value_json.drain_pv_battery else 'OFF' }}"
+                ),
+                "icon": "mdi:battery-arrow-down",
+            },
+        )
+
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "drain_boost_w",
+            node_id=node,
+            config={
+                "name": "Drain Battery Boost",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.drain_boost_w | default(0) }}",
+                "unit_of_measurement": "W",
+                "device_class": "power",
+                "state_class": "measurement",
+                "icon": "mdi:battery-arrow-down-outline",
             },
         )
 
