@@ -16,6 +16,7 @@ import torch
 import numpy as np
 
 from .thermal_nn import ThermalPINN, physics_informed_loss, FEATURE_NAMES
+from .nn_persistence import load_latest_weights
 
 logger = logging.getLogger(__name__)
 
