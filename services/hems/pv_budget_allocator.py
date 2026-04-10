@@ -27,6 +27,12 @@ DB_URL = os.getenv(
     "postgresql://homelab:homelab@192.168.0.80:5432/homelab",
 )
 
+# Battery configuration — environment-agnostic
+# Set BATTERY_CAPACITY_KWH=19.2 for the planned battery upgrade
+BATTERY_CAPACITY_KWH = float(os.getenv("BATTERY_CAPACITY_KWH", "7.0"))
+BATTERY_MAX_CHARGE_W = float(os.getenv("BATTERY_MAX_CHARGE_W", "3300.0"))
+BATTERY_MAX_DISCHARGE_W = float(os.getenv("BATTERY_MAX_DISCHARGE_W", "3300.0"))
+
 
 @dataclass
 class Consumer:
@@ -42,9 +48,15 @@ class PVBudgetAllocator:
     """Allocates PV power to consumers in priority order.
 
     Any unallocated power is considered grid export.
+
+    Set BATTERY_CAPACITY_KWH=19.2 for the planned battery upgrade. Use the
+    battery_capacity_kwh parameter to override per instance.
     """
 
-    def __init__(self):
+    def __init__(self, battery_capacity_kwh: float | None = None):
+        self.battery_capacity_kwh = battery_capacity_kwh or BATTERY_CAPACITY_KWH
+        self.battery_max_charge_w = BATTERY_MAX_CHARGE_W
+        self.battery_max_discharge_w = BATTERY_MAX_DISCHARGE_W
         self.consumers: list[Consumer] = [
             Consumer("house_base", priority=1, min_power_w=200, max_power_w=2000),
             Consumer("dhw_heating", priority=2, min_power_w=800, max_power_w=2000),
@@ -52,9 +64,35 @@ class PVBudgetAllocator:
             Consumer("supplemental", priority=4, min_power_w=500, max_power_w=3000),
         ]
 
-    def allocate(self, available_pv_w: float) -> dict:
-        """Allocate PV power. Returns allocation dict + grid_export."""
+    def allocate(self, available_pv_w: float, grid_import_w: float = 0.0) -> dict:
+        """Allocate PV power. Returns allocation dict + grid_export.
+
+        Args:
+            available_pv_w: Available PV power in watts.
+            grid_import_w: Current grid import power (W). If > 0, heating is zeroed.
+
+        Returns:
+            Dictionary with allocations, grid_export, etc.
+        """
         remaining = available_pv_w
+
+        # Anti-grid-heat rule: never use grid power for electric heating
+        if grid_import_w > 0.0:
+            # Disable supplemental and DHW heating when importing from grid
+            dhw_consumer = next(
+                (c for c in self.consumers if c.name == "dhw_heating"), None
+            )
+            supp_consumer = next(
+                (c for c in self.consumers if c.name == "supplemental"), None
+            )
+            if dhw_consumer:
+                dhw_consumer.enabled = False
+            if supp_consumer:
+                supp_consumer.enabled = False
+            logger.info(
+                "grid_to_heat_blocked: grid_import=%.0fW, zeroed heating allocation",
+                grid_import_w,
+            )
 
         # Sort by priority
         for consumer in sorted(self.consumers, key=lambda c: c.priority):
