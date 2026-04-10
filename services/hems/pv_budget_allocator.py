@@ -206,3 +206,59 @@ class PVBudgetAllocator:
             c.name: {"enabled": c.enabled, "allocated_w": c.allocated_w}
             for c in self.consumers
         }
+
+    def should_overheat(
+        self,
+        room_id: str,
+        current_temp: float,
+        setpoint: float,
+        available_surplus_w: float,
+    ) -> bool:
+        """Decide if a room should overheat to store thermal energy on PV surplus.
+
+        Strategic overheating: when PV surplus > 500W, allow rooms to reach up to 2°C
+        above normal setpoint to store thermal energy as a "thermal battery".
+
+        Args:
+            room_id: Room identifier.
+            current_temp: Current room temperature (°C).
+            setpoint: Normal setpoint temperature (°C).
+            available_surplus_w: Available PV surplus power (W).
+
+        Returns:
+            True if overheating is beneficial, False otherwise.
+        """
+        if available_surplus_w > 500 and current_temp < setpoint + 2.0:
+            logger.debug(
+                "overheat_eligible: room=%s, current=%.1f°C, setpoint=%.1f°C, surplus=%.0fW",
+                room_id,
+                current_temp,
+                setpoint,
+                available_surplus_w,
+            )
+            return True
+        return False
+
+    def calculate_overheat_setpoint(self, setpoint: float, surplus_w: float) -> float:
+        """Calculate elevated setpoint for thermal battery charging.
+
+        Returns:
+            Setpoint + min(2.0, surplus_w / 1000) — up to 2°C bonus per kW of surplus.
+
+        Args:
+            setpoint: Normal setpoint temperature (°C).
+            surplus_w: Available surplus PV power (W).
+
+        Returns:
+            Elevated setpoint temperature (°C).
+        """
+        bonus = min(2.0, surplus_w / 1000.0)
+        overheat_setpoint = setpoint + bonus
+        logger.debug(
+            "overheat_setpoint: base=%.1f°C, surplus=%.0fW, bonus=%.2f°C, result=%.1f°C",
+            setpoint,
+            surplus_w,
+            bonus,
+            overheat_setpoint,
+        )
+        return overheat_setpoint

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -17,6 +18,10 @@ import numpy as np
 from .thermal_nn import ThermalPINN, physics_informed_loss, FEATURE_NAMES
 
 logger = logging.getLogger(__name__)
+
+DB_URL = os.getenv(
+    "DATABASE_URL", "postgresql://homelab:homelab@192.168.0.80:5432/homelab"
+)
 
 
 class ThermalNNTrainer:
@@ -141,7 +146,11 @@ from(bucket: "hems")
         if features is None or len(features) < 30:
             logger.warning("Not enough data for incremental training")
             return
-        await self._train(features, epochs=epochs, lr=lr, label="incremental")
+        final_loss = await self._train(
+            features, epochs=epochs, lr=lr, label="incremental"
+        )
+        if final_loss is not None:
+            await self._check_and_rollback(final_loss)
         self._last_incremental = datetime.now(timezone.utc)
 
     async def full_retrain(self, epochs: int = 50, lr: float = 1e-3):
@@ -151,7 +160,9 @@ from(bucket: "hems")
         if features is None or len(features) < 100:
             logger.warning("Not enough data for full retrain")
             return
-        await self._train(features, epochs=epochs, lr=lr, label="full")
+        final_loss = await self._train(features, epochs=epochs, lr=lr, label="full")
+        if final_loss is not None:
+            await self._check_and_rollback(final_loss)
         self._last_full_train = datetime.now(timezone.utc)
 
     async def _train(self, features: np.ndarray, epochs: int, lr: float, label: str):
@@ -179,7 +190,99 @@ from(bucket: "hems")
                 )
 
         self.model.eval()
-        logger.info("[%s] training complete, final loss=%.4f", label, loss.item())
+        final_loss = loss.item()
+        logger.info("[%s] training complete, final loss=%.4f", label, final_loss)
+        return final_loss
+
+    async def _check_and_rollback(self, new_mae: float) -> bool:
+        """Auto-rollback model if new MAE is significantly worse than previous best.
+
+        Checks the previous best MAE from nn_models table and rolls back if:
+        new_mae > previous_mae * 1.15 (15% worse).
+
+        Args:
+            new_mae: MAE loss metric from the newly trained model.
+
+        Returns:
+            True if model was rolled back, False if new model was kept.
+        """
+        try:
+            import asyncpg
+
+            conn = await asyncpg.connect(
+                DB_URL.replace("postgresql+asyncpg://", "postgresql://").replace(
+                    "postgresql+psycopg2://", "postgresql://"
+                )
+            )
+            try:
+                # Get the previous best MAE (from latest active model)
+                row = await conn.fetchrow(
+                    """
+                    SELECT metrics
+                    FROM hems.nn_models
+                    WHERE model_type = 'thermal_lstm'
+                      AND is_active = TRUE
+                      AND metrics IS NOT NULL
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                )
+            finally:
+                await conn.close()
+
+            if not row or not row["metrics"]:
+                logger.info("No previous model found; keeping new model")
+                return False
+
+            import json
+
+            metrics = json.loads(row["metrics"])
+            previous_mae = metrics.get("mae_score", float("inf"))
+
+            threshold = previous_mae * 1.15
+            if new_mae > threshold:
+                logger.warning(
+                    "nn_rollback_triggered: new_mae=%.4f > threshold=%.4f",
+                    new_mae,
+                    threshold,
+                )
+
+                # Mark new model as inactive (it's already been saved in full_retrain/incremental_train)
+                conn = await asyncpg.connect(
+                    DB_URL.replace("postgresql+asyncpg://", "postgresql://").replace(
+                        "postgresql+psycopg2://", "postgresql://"
+                    )
+                )
+                try:
+                    await conn.execute(
+                        """
+                        UPDATE hems.nn_models
+                        SET is_active = FALSE
+                        WHERE model_type = 'thermal_lstm'
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """
+                    )
+                finally:
+                    await conn.close()
+
+                # Load previous best model weights
+                success = await load_latest_weights(self.model, "thermal_lstm")
+                if success:
+                    logger.info("Rolled back to previous model")
+                    return True
+                else:
+                    logger.error("Rollback failed; keeping new model")
+                    return False
+
+            logger.info(
+                "Model quality acceptable: new_mae=%.4f <= %.4f", new_mae, threshold
+            )
+            return False
+
+        except Exception as e:
+            logger.error("Rollback check failed: %s", e)
+            return False
 
     async def run_schedule(self):
         """Run training schedule: 6h incremental + Sunday 02:00 full retrain (#1029 #1030)."""
