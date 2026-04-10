@@ -1,0 +1,89 @@
+# HEMS Room Configuration — KNX Entity Mapping
+rooms:
+  - id: wohnzimmer
+    name: Wohnzimmer
+    knx_heating_actuator: "1/0/1"
+    ha_thermostat: "climate.wohnzimmer"
+    ha_temperature: "sensor.wohnzimmer_temperature"
+    ha_humidity: "sensor.wohnzimmer_humidity"
+    floor_area_m2: 42
+    comfort_setpoint: 21.0
+    eco_setpoint: 18.0
+    away_setpoint: 16.0
+
+  - id: schlafzimmer
+    name: Schlafzimmer
+    knx_heating_actuator: "1/0/2"
+    ha_thermostat: "climate.schlafzimmer"
+    ha_temperature: "sensor.schlafzimmer_temperature"
+    ha_humidity: "sensor.schlafzimmer_humidity"
+    floor_area_m2: 18
+    comfort_setpoint: 19.0
+    eco_setpoint: 17.0
+    away_setpoint: 16.0
+
+  - id: kinderzimmer
+    name: Kinderzimmer
+    knx_heating_actuator: "1/0/3"
+    ha_thermostat: "climate.kinderzimmer"
+    ha_temperature: "sensor.kinderzimmer_temperature"
+    ha_humidity: "sensor.kinderzimmer_humidity"
+    floor_area_m2: 12
+    comfort_setpoint: 20.0
+    eco_setpoint: 18.0
+    away_setpoint: 16.0
+
+  - id: buero
+    name: Büro
+    knx_heating_actuator: "1/0/4"
+    ha_thermostat: "climate.buero"
+    ha_temperature: "sensor.buero_temperature"
+    ha_humidity: "sensor.buero_humidity"
+    floor_area_m2: 14
+    comfort_setpoint: 21.0
+    eco_setpoint: 18.0
+    away_setpoint: 16.0
+
+  - id: kueche
+    name: Küche
+    knx_heating_actuator: "1/0/5"
+    ha_thermostat: "climate.kueche"
+    ha_temperature: "sensor.kueche_temperature"
+    ha_humidity: "sensor.kueche_humidity"
+    floor_area_m2: 16
+    comfort_setpoint: 20.0
+    eco_setpoint: 17.0
+    away_setpoint: 16.0
+
+  - id: esszimmer
+    name: Esszimmer
+    knx_heating_actuator: "1/0/6"
+    ha_thermostat: "climate.esszimmer"
+    ha_temperature: "sensor.esszimmer_temperature"
+    ha_humidity: "sensor.esszimmer_humidity"
+    floor_area_m2: 18
+    comfort_setpoint: 20.0
+    eco_setpoint: 17.0
+    away_setpoint: 16.0
+
+  - id: bad
+    name: Bad
+    knx_heating_actuator: "1/0/7"
+    ha_thermostat: "climate.bad"
+    ha_temperature: "sensor.bad_temperature"
+    ha_humidity: "sensor.bad_humidity"
+    floor_area_m2: 8
+    comfort_setpoint: 23.0
+    eco_setpoint: 20.0
+    away_setpoint: 18.0
+
+  - id: flur
+    name: Flur
+    knx_heating_actuator: "1/0/8"
+    ha_thermostat: "climate.flur"
+    ha_temperature: "sensor.flur_temperature"
+    ha_humidity: null
+    floor_area_m2: 12
+    comfort_setpoint: 19.0
+    eco_setpoint: 17.0
+    away_setpoint: 15.0

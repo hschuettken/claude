@@ -1,0 +1,45 @@
+# HEMS Default Configuration
+version: "1.0"
+
+# Energy pricing
+energy:
+  electricity_price_eur_kwh: 0.32
+  gas_price_eur_kwh: 0.12
+  oil_price_eur_liter: 1.20
+  oil_kwh_per_liter: 10.0
+  oil_boiler_efficiency: 0.85
+  feed_in_tariff_eur_kwh: 0.08
+
+# Battery configuration
+battery:
+  capacity_kwh: 7.0          # Update to 19.2 after upgrade
+  max_charge_w: 3300
+  max_discharge_w: 3300
+  min_soc_pct: 10
+  max_soc_pct: 95
+
+# PV system
+pv:
+  peak_power_kwp: 9.9
+  orientation_deg: 180       # South
+  tilt_deg: 30
+
+# Heating control
+heating:
+  decision_interval_s: 300
+  min_pv_surplus_for_dhw_w: 500
+  strategic_overheat_max_delta: 2.0
+  dhw_normal_setpoint: 55
+  dhw_pv_setpoint: 65
+  legionella_setpoint: 70
+  legionella_day: sunday
+  legionella_hour: 2
+
+# Control limits
+control:
+  min_flow_temp: 25
+  max_flow_temp: 70
+  boiler_power_kw: 24.0
+  mixer_deadband_k: 0.5
+  min_on_minutes: 10
+  min_off_minutes: 5

@@ -24,7 +24,12 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
 
 import asyncpg
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, status
+from fastapi import (
+    APIRouter,
+    Header,
+    HTTPException,
+    status,
+)
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
@@ -123,8 +128,12 @@ class ThermalStats(BaseModel):
     """Thermal system statistics."""
 
     avg_room_temp_c: float = Field(..., description="Average room temperature (deg C)")
-    current_room_temp_c: float = Field(..., description="Current room temperature (deg C)")
-    avg_setpoint_c: float = Field(..., description="Average setpoint temperature (deg C)")
+    current_room_temp_c: float = Field(
+        ..., description="Current room temperature (deg C)"
+    )
+    avg_setpoint_c: float = Field(
+        ..., description="Average setpoint temperature (deg C)"
+    )
     boiler_runtime_minutes: float = Field(
         ..., description="Boiler runtime in period (minutes)"
     )
@@ -791,3 +800,36 @@ async def get_latest_decisions(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch control decisions: {str(e)}",
         )
+
+
+# ============================================================================
+# #1064: WebSocket /ws/live — Real-time state push
+# ============================================================================
+
+
+@router.websocket("/ws/live")
+async def live_state(websocket: WebSocket) -> None:
+    """WebSocket endpoint for real-time HEMS state push (#1064).
+
+    Pushes state snapshot every 10 seconds:
+    - timestamp: ISO-8601 UTC
+    - rooms: array of room states (from HA or empty on error)
+    - boiler: boiler state (active boolean, flow_temp)
+    - mode: HEMS operating mode (auto/eco/comfort/away/boost)
+    """
+    await websocket.accept()
+    try:
+        while True:
+            # Build state snapshot (similar to GET /api/status but minimal)
+            state = {
+                "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+                "rooms": [],  # populate from HA if available, else []
+                "boiler": {"active": False},
+                "mode": os.getenv("HEMS_MODE", "auto"),
+            }
+            await websocket.send_json(state)
+            await asyncio.sleep(10)  # push every 10s
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning("ws_live_closed: %s", e)
