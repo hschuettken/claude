@@ -26,7 +26,7 @@ class HEMSSettings(BaseSettings):
     # InfluxDB v2
     influxdb_url: str = "http://192.168.0.50:8086"
     influxdb_token: str = ""
-    influxdb_org: str = "homelab"
+    influxdb_org: str = "nb9"
     influxdb_bucket: str = "hems"
 
     # API
