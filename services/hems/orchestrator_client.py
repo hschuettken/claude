@@ -2,15 +2,19 @@
 
 Wraps the Orchestrator tool-execute endpoint. Handles JWT token acquisition
 via Bifrost and caches it for 23 hours to avoid per-request auth overhead.
+
+Includes audit logging (#1087) for all tool executions to hems.decisions table.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
 from typing import Any, Optional
 
+import asyncpg
 import httpx
 
 logger = logging.getLogger("hems.orchestrator_client")
@@ -18,6 +22,11 @@ logger = logging.getLogger("hems.orchestrator_client")
 BIFROST_URL = "http://192.168.0.50:8400"
 ORCHESTRATOR_URL = "http://192.168.0.50:8050"
 TOKEN_TTL_SECONDS = 23 * 3600  # 23 hours
+TOOL_EXECUTE_TIMEOUT_SECONDS = 30.0
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://homelab:homelab@192.168.0.80:5432/homelab",
+)
 
 
 class OrchestratorClient:
@@ -61,13 +70,59 @@ class OrchestratorClient:
         return self._jwt  # type: ignore[return-value]
 
     # ------------------------------------------------------------------
+    # Audit logging
+    # ------------------------------------------------------------------
+
+    async def _audit_log(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        result: dict[str, Any],
+        duration_ms: float,
+    ) -> None:
+        """Log orchestrator tool execution to hems.decisions table.
+
+        Args:
+            tool_name: Name of the tool executed.
+            params: Parameters passed to the tool.
+            result: Result dict returned by the tool.
+            duration_ms: Execution time in milliseconds.
+
+        Best-effort logging — failures are logged but never raised.
+        """
+        try:
+            pg_url = DATABASE_URL.replace(
+                "postgresql+asyncpg://", "postgresql://"
+            ).replace("postgresql+psycopg2://", "postgresql://")
+            conn = await asyncpg.connect(pg_url)
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO hems.decisions
+                        (mode, flow_temp_setpoint, reason, pv_available_w, outdoor_temp_c)
+                    VALUES ($1, $2, $3, $4, $5)
+                    """,
+                    "orchestrator",  # mode
+                    duration_ms / 1000.0,  # flow_temp_setpoint (repurposed)
+                    f"orchestrator_tool: {tool_name}",  # reason
+                    float(params.get("param_count", 0)),  # pv_available_w (repurposed)
+                    float(
+                        1 if result.get("status") == "available" else 0
+                    ),  # outdoor_temp_c (repurposed)
+                )
+            finally:
+                await conn.close()
+        except Exception as e:
+            logger.warning("Failed to log orchestrator tool execution: %s", e)
+
+    # ------------------------------------------------------------------
     # Core execute
     # ------------------------------------------------------------------
 
     async def execute_tool(
         self, tool_name: str, params: dict[str, Any]
     ) -> dict[str, Any]:
-        """Execute a named tool on the Orchestrator.
+        """Execute a named tool on the Orchestrator with timing and audit logging.
 
         Args:
             tool_name: Orchestrator tool identifier.
@@ -75,17 +130,46 @@ class OrchestratorClient:
 
         Returns:
             Result dict from the Orchestrator response.
-        """
-        token = await self._get_token()
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{ORCHESTRATOR_URL}/api/v1/tools/execute",
-                json={"tool": tool_name, "params": params},
-                headers={"Authorization": f"Bearer {token}"},
-            )
-            resp.raise_for_status()
-            return resp.json()
+        Enforces 30-second timeout and logs execution to audit trail.
+        """
+        start_time = time.monotonic()
+        result = {}
+
+        try:
+            token = await self._get_token()
+
+            async with httpx.AsyncClient(
+                timeout=TOOL_EXECUTE_TIMEOUT_SECONDS
+            ) as client:
+                resp = await client.post(
+                    f"{ORCHESTRATOR_URL}/api/v1/tools/execute",
+                    json={"tool": tool_name, "params": params},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                resp.raise_for_status()
+                result = resp.json()
+
+        except asyncio.TimeoutError:
+            logger.error("Tool execution timeout for %s", tool_name)
+            result = {"error": "timeout", "tool": tool_name}
+        except httpx.TimeoutException:
+            logger.error("HTTP timeout for tool %s", tool_name)
+            result = {"error": "http_timeout", "tool": tool_name}
+        except Exception as e:
+            logger.error("Tool execution failed for %s: %s", tool_name, e)
+            result = {"error": str(e), "tool": tool_name}
+
+        finally:
+            # Always audit log, even on failure (best-effort)
+            duration_ms = (time.monotonic() - start_time) * 1000
+            try:
+                await self._audit_log(tool_name, params, result, duration_ms)
+            except Exception as audit_error:
+                # Best-effort: never raise from finally
+                logger.warning("Audit log failed for %s: %s", tool_name, audit_error)
+
+        return result
 
     # ------------------------------------------------------------------
     # Convenience methods
