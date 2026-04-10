@@ -29,6 +29,7 @@ MIGRATIONS: list[str] = [
     "004_pv_allocation.sql",
     "005_hems_public_tables.sql",
     "006_boiler_state_mixer_training.sql",
+    "007_nn_models_weights.sql",
 ]
 
 
