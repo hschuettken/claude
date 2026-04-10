@@ -7,6 +7,7 @@ This module provides internal API endpoints for:
 4. Boiler state queries
 5. Control decision history
 6. Manual flow temp overrides
+7. Health/status/room-target/mode/retrain/flow-override (#1057-#1063)
 
 All endpoints are async and optimized for InfluxDB + PostgreSQL.
 """
@@ -16,33 +17,93 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
 from enum import Enum
+from typing import TYPE_CHECKING, Any, Optional
 
-from fastapi import APIRouter, HTTPException, status, BackgroundTasks
-from pydantic import BaseModel, Field
 import asyncpg
-from typing import TYPE_CHECKING
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, status
+from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from influxdb_client.client.query_api import QueryApi
+
+# ---------------------------------------------------------------------------
+# Module-level config (read from env at import time)
+# ---------------------------------------------------------------------------
+
+_HEMS_API_KEY = os.getenv("HEMS_API_KEY", "hems_internal_key")
+_executor = ThreadPoolExecutor(max_workers=4)
+
+MQTT_HOST = os.getenv("MQTT_HOST", "192.168.0.73")
+MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
+HA_URL = os.getenv("HA_URL", "http://homeassistant:8123")
+HA_TOKEN = os.getenv("HA_TOKEN", os.getenv("HEMS_HA_TOKEN", ""))
+HEMS_BOILER_ENTITY = os.getenv("HEMS_BOILER_ENTITY", "sensor.boiler_temperature")
+HEMS_ROOM_ENTITIES_RAW = os.getenv("HEMS_ROOM_ENTITIES", "")
+HEMS_DRY_RUN = os.getenv("HEMS_DRY_RUN", "false").lower() in ("1", "true", "yes")
+INFLUXDB_URL = os.getenv("INFLUXDB_URL", "http://192.168.0.66:8086")
+INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN", "")
+INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "nb9")
+INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "hems")
 
 logger = logging.getLogger("hems.api")
 
 router = APIRouter(prefix="/api", tags=["internal"])
 
 
+# ---------------------------------------------------------------------------
+# Auth + MQTT helpers
+# ---------------------------------------------------------------------------
+
+
+def _require_auth(x_api_key: Optional[str]) -> None:
+    """Raise 401 if API key is missing or wrong."""
+    if x_api_key != _HEMS_API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-API-Key header",
+        )
+
+
+def _mqtt_publish_sync(topic: str, payload: dict) -> None:
+    """Publish a JSON payload to an MQTT topic (synchronous, for executor use)."""
+    try:
+        import paho.mqtt.publish as publish
+
+        publish.single(
+            topic,
+            payload=json.dumps(payload),
+            hostname=MQTT_HOST,
+            port=MQTT_PORT,
+            qos=1,
+            retain=False,
+        )
+    except Exception as exc:
+        logger.warning("MQTT publish to %s failed: %s", topic, exc)
+
+
+async def _mqtt_publish(topic: str, payload: dict) -> None:
+    """Async wrapper around synchronous MQTT publish."""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(_executor, _mqtt_publish_sync, topic, payload)
+
+
 # ============================================================================
 # Pydantic Models
 # ============================================================================
+
 
 class EnergyBreakdown(BaseModel):
     """Energy consumption breakdown by source."""
 
     boiler: float = Field(..., description="Boiler energy (kWh)")
     circulation_pump: float = Field(..., description="Circulation pump energy (kWh)")
-    supplemental_heat: float = Field(..., description="Supplemental heating energy (kWh)")
+    supplemental_heat: float = Field(
+        ..., description="Supplemental heating energy (kWh)"
+    )
     pv_exported: float = Field(..., description="PV energy exported to grid (kWh)")
     pv_used: float = Field(..., description="PV energy used directly (kWh)")
 
@@ -61,13 +122,19 @@ class EnergyResponse(BaseModel):
 class ThermalStats(BaseModel):
     """Thermal system statistics."""
 
-    avg_room_temp_c: float = Field(..., description="Average room temperature (°C)")
-    current_room_temp_c: float = Field(..., description="Current room temperature (°C)")
-    avg_setpoint_c: float = Field(..., description="Average setpoint temperature (°C)")
-    boiler_runtime_minutes: float = Field(..., description="Boiler runtime in period (minutes)")
-    boiler_on_duty_cycle: float = Field(..., description="Boiler on-time as % of period (0-100)")
+    avg_room_temp_c: float = Field(..., description="Average room temperature (deg C)")
+    current_room_temp_c: float = Field(..., description="Current room temperature (deg C)")
+    avg_setpoint_c: float = Field(..., description="Average setpoint temperature (deg C)")
+    boiler_runtime_minutes: float = Field(
+        ..., description="Boiler runtime in period (minutes)"
+    )
+    boiler_on_duty_cycle: float = Field(
+        ..., description="Boiler on-time as % of period (0-100)"
+    )
     pv_utilization_percent: float = Field(..., description="PV utilization % (0-100)")
-    mixing_valve_avg_position: float = Field(..., description="Mixing valve avg position (0-100)")
+    mixing_valve_avg_position: float = Field(
+        ..., description="Mixing valve avg position (0-100)"
+    )
 
 
 class AnalyticsResponse(BaseModel):
@@ -98,7 +165,9 @@ class ModelStatusResponse(BaseModel):
     last_trained: str = Field(..., description="ISO-8601 last training timestamp")
     training_loss: Optional[float] = Field(None, description="Last training loss value")
     accuracy: Optional[float] = Field(None, description="Model accuracy (0-1)")
-    retraining_progress: Optional[float] = Field(None, description="Retraining progress (0-1)")
+    retraining_progress: Optional[float] = Field(
+        None, description="Retraining progress (0-1)"
+    )
     timestamp: str = Field(..., description="Response timestamp (ISO-8601)")
 
 
@@ -135,11 +204,15 @@ class BoilerResponse(BaseModel):
 
     state: BoilerState = Field(..., description="Boiler state")
     power_kw: float = Field(..., description="Current power output (kW)")
-    flow_temp_c: float = Field(..., description="Flow temperature setpoint (°C)")
-    return_temp_c: float = Field(..., description="Return temperature (°C)")
-    runtime_minutes: float = Field(..., description="Total runtime in current cycle (minutes)")
+    flow_temp_c: float = Field(..., description="Flow temperature setpoint (deg C)")
+    return_temp_c: float = Field(..., description="Return temperature (deg C)")
+    runtime_minutes: float = Field(
+        ..., description="Total runtime in current cycle (minutes)"
+    )
     last_state_change: str = Field(..., description="ISO-8601 last state change")
-    modulation_percent: Optional[float] = Field(None, description="Modulation % (0-100)")
+    modulation_percent: Optional[float] = Field(
+        None, description="Modulation % (0-100)"
+    )
     error_code: Optional[str] = Field(None, description="Error code if state == ERROR")
     timestamp: str = Field(..., description="Response timestamp (ISO-8601)")
 
@@ -149,8 +222,12 @@ class ControlDecision(BaseModel):
 
     id: str = Field(..., description="Decision ID (UUID)")
     timestamp: str = Field(..., description="Decision timestamp (ISO-8601)")
-    decision_type: str = Field(..., description="Type: boiler_setpoint, flow_temp, mixer_position, pump_on_off")
-    target_value: float = Field(..., description="Target value (temp in °C, position 0-100, etc)")
+    decision_type: str = Field(
+        ..., description="Type: boiler_setpoint, flow_temp, mixer_position, pump_on_off"
+    )
+    target_value: float = Field(
+        ..., description="Target value (temp in deg C, position 0-100, etc)"
+    )
     device: str = Field(..., description="Target device (boiler, mixer, pump, etc)")
     reason: str = Field(..., description="Why decision was made")
     actual_value: Optional[float] = Field(None, description="Actual applied value")
@@ -159,33 +236,47 @@ class ControlDecision(BaseModel):
 class DecisionsResponse(BaseModel):
     """Last N control decisions."""
 
-    decisions: list[ControlDecision] = Field(..., description="Last decisions (newest first)")
+    decisions: list[ControlDecision] = Field(
+        ..., description="Last decisions (newest first)"
+    )
     count: int = Field(..., description="Number of decisions returned")
     timestamp: str = Field(..., description="Response timestamp (ISO-8601)")
 
 
 class OverrideFlowTempRequest(BaseModel):
-    """Request to override flow temperature."""
+    """Request to override flow temperature (#1063)."""
 
-    flow_temp_c: float = Field(..., ge=20, le=80, description="Target flow temperature (20-80°C)")
-    duration_minutes: int = Field(default=30, ge=5, le=1440, description="Override duration (5min-24h)")
-    reason: str = Field(..., description="Reason for manual override")
+    flow_temp: float = Field(
+        ..., ge=20.0, le=80.0, description="Target flow temperature (20-80 deg C)"
+    )
+    duration_minutes: int = Field(
+        default=30, ge=1, le=480, description="Override duration (1-480 min)"
+    )
 
 
 class OverrideResponse(BaseModel):
     """Response to override request."""
 
     override_id: str = Field(..., description="Override session ID")
-    flow_temp_c: float = Field(..., description="Override temperature (°C)")
+    flow_temp_c: float = Field(..., description="Override temperature (deg C)")
     duration_minutes: int = Field(..., description="Override duration (minutes)")
     expires_at: str = Field(..., description="ISO-8601 expiration time")
     message: str
     timestamp: str = Field(..., description="Response timestamp (ISO-8601)")
 
 
+class RoomTargetRequest(BaseModel):
+    """Body for PUT /api/rooms/{room_id}/target (#1059)."""
+
+    target_temp: float = Field(
+        ..., ge=10.0, le=30.0, description="Target temperature (10-30 deg C)"
+    )
+
+
 # ============================================================================
 # Helper Functions
 # ============================================================================
+
 
 def get_timestamp() -> str:
     """Get current timestamp in ISO-8601 format."""
@@ -196,55 +287,40 @@ async def query_influxdb(
     query_api: "QueryApi",
     flux_query: str,
 ) -> list[dict]:
-    """Execute InfluxDB Flux query and return results as dicts.
-    
-    Args:
-        query_api: InfluxDB QueryApi instance
-        flux_query: Flux query string
-        
-    Returns:
-        List of result dicts
-    """
+    """Execute InfluxDB Flux query and return results as dicts."""
     try:
         tables = query_api.query(flux_query)
         results = []
         for table in tables:
             for record in table.records:
-                results.append({
-                    "time": record.get_time(),
-                    "measurement": record.get_measurement(),
-                    "field": record.get_field(),
-                    "value": record.get_value(),
-                    "tags": record.tags,
-                })
+                results.append(
+                    {
+                        "time": record.get_time(),
+                        "measurement": record.get_measurement(),
+                        "field": record.get_field(),
+                        "value": record.get_value(),
+                        "tags": record.tags,
+                    }
+                )
         return results
     except Exception as e:
         logger.error("InfluxDB query failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"InfluxDB query failed: {str(e)}"
+            detail=f"InfluxDB query failed: {str(e)}",
         )
 
 
 async def query_postgres(
     db_pool: asyncpg.Pool,
     query: str,
-    *args,
+    *args: Any,
 ) -> list[dict]:
-    """Execute PostgreSQL query and return results as dicts.
-    
-    Args:
-        db_pool: AsyncPG connection pool
-        query: SQL query string
-        args: Query parameters
-        
-    Returns:
-        List of result dicts
-    """
+    """Execute PostgreSQL query and return results as dicts."""
     if not db_pool:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database not initialized"
+            detail="Database not initialized",
         )
     try:
         async with db_pool.acquire() as conn:
@@ -254,57 +330,342 @@ async def query_postgres(
         logger.error("PostgreSQL query failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Database query failed: {str(e)}"
+            detail=f"Database query failed: {str(e)}",
         )
 
 
 # ============================================================================
-# Endpoint 1: GET /api/energy — Energy Consumption
+# #1057: GET /api/health — Health check (no auth required)
 # ============================================================================
+
+
+@router.get(
+    "/health",
+    summary="Health check (#1057)",
+    description="Returns service health with feature flags. No auth required.",
+)
+async def get_health() -> dict[str, Any]:
+    """Return service health and feature flags."""
+    return {
+        "status": "ok",
+        "version": "1.0",
+        "features": {
+            "nn_enabled": True,
+            "pv_budget": True,
+            "dry_run": HEMS_DRY_RUN,
+            "decision_loop": True,
+        },
+    }
+
+
+# ============================================================================
+# #1058: GET /api/status — Aggregated snapshot from HA
+# ============================================================================
+
+
+async def _ha_get_state(entity_id: str) -> Optional[dict]:
+    """Fetch a single HA entity state via REST API."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                f"{HA_URL}/api/states/{entity_id}",
+                headers={"Authorization": f"Bearer {HA_TOKEN}"},
+            )
+            if resp.status_code == 200:
+                return resp.json()
+    except Exception as exc:
+        logger.warning("HA get_state(%s) failed: %s", entity_id, exc)
+    return None
+
+
+@router.get(
+    "/status",
+    summary="Aggregated HEMS snapshot (#1058)",
+    description="Reads boiler/room/PV state from HA. Returns partial data on HA failure.",
+)
+async def get_status(
+    x_api_key: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    """Return aggregated HEMS status snapshot."""
+    _require_auth(x_api_key)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    ha_error: Optional[str] = None
+
+    # --- boiler ---
+    boiler_entity = await _ha_get_state(HEMS_BOILER_ENTITY)
+    boiler: dict[str, Any]
+    if boiler_entity is None:
+        ha_error = "HA unavailable"
+        boiler = {"active": False, "flow_temp": 0.0}
+    else:
+        try:
+            flow_temp = float(boiler_entity.get("state", "0"))
+        except (ValueError, TypeError):
+            flow_temp = 0.0
+        boiler = {"active": flow_temp > 30.0, "flow_temp": flow_temp}
+
+    # --- rooms ---
+    rooms: list[dict[str, Any]] = []
+    room_entity_ids = [
+        e.strip() for e in HEMS_ROOM_ENTITIES_RAW.split(",") if e.strip()
+    ]
+    for entity_id in room_entity_ids:
+        state_data = await _ha_get_state(entity_id)
+        if state_data is None:
+            ha_error = ha_error or "HA unavailable"
+            continue
+        attrs = state_data.get("attributes", {})
+        try:
+            temp = float(state_data.get("state", "0"))
+        except (ValueError, TypeError):
+            temp = 0.0
+        rooms.append(
+            {
+                "id": entity_id,
+                "name": attrs.get("friendly_name", entity_id),
+                "temp": temp,
+                "setpoint": float(attrs.get("temperature", 0.0)),
+                "mode": attrs.get("hvac_mode", "unknown"),
+            }
+        )
+
+    result: dict[str, Any] = {
+        "timestamp": now_iso,
+        "boiler": boiler,
+        "rooms": rooms,
+        "pv": {"available_w": 0.0},
+        "mode": "auto",
+    }
+    if ha_error:
+        result["error"] = ha_error
+    return result
+
+
+# ============================================================================
+# #1059: PUT /api/rooms/{room_id}/target
+# ============================================================================
+
+
+@router.put(
+    "/rooms/{room_id}/target",
+    summary="Set room target temperature (#1059)",
+    description="Publishes MQTT override for a room. Expires after 1 hour.",
+)
+async def set_room_target(
+    room_id: str,
+    body: RoomTargetRequest,
+    x_api_key: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    """Publish MQTT target_override for a room."""
+    _require_auth(x_api_key)
+
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(hours=1)
+
+    topic = f"homelab/hems/rooms/{room_id}/target_override"
+    payload: dict[str, Any] = {
+        "target": body.target_temp,
+        "expires_at": expires_at.isoformat(),
+    }
+    await _mqtt_publish(topic, payload)
+
+    return {
+        "room_id": room_id,
+        "target_temp": body.target_temp,
+        "expires_at": expires_at.isoformat(),
+    }
+
+
+# ============================================================================
+# #1060: PUT /api/modes/{mode}
+# ============================================================================
+
+_VALID_MODES = {"eco", "comfort", "away", "boost", "auto"}
+
+
+@router.put(
+    "/modes/{mode}",
+    summary="Set HEMS operating mode (#1060)",
+    description="Valid modes: eco, comfort, away, boost, auto.",
+)
+async def set_mode(
+    mode: str,
+    x_api_key: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    """Publish HEMS mode change to MQTT."""
+    _require_auth(x_api_key)
+
+    if mode not in _VALID_MODES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid mode '{mode}'. Valid: {sorted(_VALID_MODES)}",
+        )
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await _mqtt_publish("homelab/hems/mode", {"mode": mode, "set_at": now_iso})
+
+    return {"mode": mode, "active": True}
+
+
+# ============================================================================
+# #1061: GET /api/analytics/{period}
+# ============================================================================
+
+
+@router.get(
+    "/analytics/{period}",
+    summary="Get HEMS decision analytics (#1061)",
+    description="Queries InfluxDB hems_decisions. Returns counts or error on failure.",
+)
+async def get_analytics(
+    period: str,
+    x_api_key: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    """Return HEMS decision analytics for the given period."""
+    _require_auth(x_api_key)
+
+    if period not in ("day", "week", "month"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="period must be 'day', 'week', or 'month'",
+        )
+
+    range_map = {"day": "-1d", "week": "-7d", "month": "-30d"}
+    range_str = range_map[period]
+
+    flux = (
+        f'from(bucket: "{INFLUXDB_BUCKET}")'
+        f" |> range(start: {range_str})"
+        f' |> filter(fn: (r) => r["_measurement"] == "hems_decisions")'
+        " |> count()"
+    )
+
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{INFLUXDB_URL}/api/v2/query",
+                headers={
+                    "Authorization": f"Token {INFLUXDB_TOKEN}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/csv",
+                },
+                json={"query": flux, "type": "flux", "org": INFLUXDB_ORG},
+            )
+
+        decisions_count = 0
+        if resp.status_code == 200:
+            for line in resp.text.splitlines():
+                if line.startswith("#") or not line.strip():
+                    continue
+                parts = line.split(",")
+                try:
+                    decisions_count += int(float(parts[-1].strip()))
+                except (ValueError, IndexError):
+                    pass
+        else:
+            logger.warning("InfluxDB analytics query returned %s", resp.status_code)
+
+        return {
+            "period": period,
+            "decisions_count": decisions_count,
+            "rooms": {},
+            "avg_delta": 0.0,
+        }
+
+    except Exception as exc:
+        logger.warning("InfluxDB analytics query failed: %s", exc)
+        return {"period": period, "error": "metrics unavailable"}
+
+
+# ============================================================================
+# #1062: POST /api/model/retrain
+# ============================================================================
+
+
+@router.post(
+    "/model/retrain",
+    summary="Trigger NN retrain (#1062)",
+    description="Publishes MQTT retrain command. Returns triggered/timestamp.",
+)
+async def retrain_model(
+    x_api_key: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    """Trigger NN model retraining via MQTT."""
+    _require_auth(x_api_key)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await _mqtt_publish("homelab/hems/commands/retrain", {"full": False})
+    return {"triggered": True, "timestamp": now_iso}
+
+
+# ============================================================================
+# #1063: POST /api/override/flow_temp
+# ============================================================================
+
+
+@router.post(
+    "/override/flow_temp",
+    summary="Flow temperature override (#1063)",
+    description="Publishes MQTT flow_override. flow_temp 20-80 deg C, duration 1-480 min.",
+)
+async def override_flow_temp(
+    body: OverrideFlowTempRequest,
+    x_api_key: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    """Set manual flow temperature override via MQTT."""
+    _require_auth(x_api_key)
+
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(minutes=body.duration_minutes)
+
+    mqtt_payload: dict[str, Any] = {
+        "flow_temp": body.flow_temp,
+        "duration_minutes": body.duration_minutes,
+        "expires_at": expires_at.isoformat(),
+    }
+    await _mqtt_publish("homelab/hems/boiler/flow_override", mqtt_payload)
+
+    return {
+        "flow_temp": body.flow_temp,
+        "duration_minutes": body.duration_minutes,
+        "expires_at": expires_at.isoformat(),
+        "active": True,
+    }
+
+
+# ============================================================================
+# Legacy Phase 2 endpoints (kept for backward compat, no auth)
+# ============================================================================
+
 
 @router.get(
     "/energy",
     response_model=EnergyResponse,
-    summary="Get energy consumption by period",
-    description="Fetch total energy consumed and breakdown by source (boiler, pump, PV, etc)"
+    summary="Get energy consumption by period (legacy synthetic stub)",
 )
 async def get_energy(
     period: str = "day",
 ) -> EnergyResponse:
-    """Get energy consumption with breakdown.
-    
-    Periods:
-    - "hour": Last 60 minutes
-    - "day": Last 24 hours
-    - "month": Last 30 days
-    
-    Query InfluxDB for measurements:
-    - energy.boiler (kWh)
-    - energy.pump (kWh)
-    - energy.supplemental (kWh)
-    - energy.pv_exported (kWh)
-    - energy.pv_used (kWh)
-    """
+    """Get energy consumption with breakdown (legacy synthetic stub)."""
     if period not in ["hour", "day", "month"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="period must be 'hour', 'day', or 'month'"
+            detail="period must be 'hour', 'day', or 'month'",
         )
 
-    # Calculate time window
     now = datetime.now(timezone.utc)
     if period == "hour":
         start = now - timedelta(hours=1)
-        window = "60m"
     elif period == "day":
         start = now - timedelta(days=1)
-        window = "24h"
-    else:  # month
+    else:
         start = now - timedelta(days=30)
-        window = "30d"
 
-    # For demo: return synthetic data
-    # In production, query InfluxDB here
     breakdown = EnergyBreakdown(
         boiler=15.4,
         circulation_pump=2.8,
@@ -314,11 +675,9 @@ async def get_energy(
     )
 
     return EnergyResponse(
-        total_consumed_kwh=sum([
-            breakdown.boiler,
-            breakdown.circulation_pump,
-            breakdown.supplemental_heat,
-        ]),
+        total_consumed_kwh=sum(
+            [breakdown.boiler, breakdown.circulation_pump, breakdown.supplemental_heat]
+        ),
         period=period,
         period_start=start.isoformat(),
         period_end=now.isoformat(),
@@ -327,96 +686,14 @@ async def get_energy(
     )
 
 
-# ============================================================================
-# Endpoint 2: GET /api/analytics/{period} — Thermal Analytics
-# ============================================================================
-
-@router.get(
-    "/analytics/{period}",
-    response_model=AnalyticsResponse,
-    summary="Get thermal system analytics",
-    description="Fetch room temperature, setpoint, boiler runtime, PV utilization stats"
-)
-async def get_analytics(
-    period: str,
-) -> AnalyticsResponse:
-    """Get thermal system analytics for a period.
-    
-    Periods:
-    - "hour": Last 60 minutes
-    - "day": Last 24 hours
-    - "week": Last 7 days
-    - "month": Last 30 days
-    
-    Aggregates from InfluxDB:
-    - thermal.room_temp (°C)
-    - thermal.setpoint (°C)
-    - thermal.boiler_runtime (minutes)
-    - thermal.mixing_valve_position (0-100)
-    - energy.pv_utilization (%)
-    """
-    if period not in ["hour", "day", "week", "month"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="period must be 'hour', 'day', 'week', or 'month'"
-        )
-
-    # Calculate time window
-    now = datetime.now(timezone.utc)
-    if period == "hour":
-        start = now - timedelta(hours=1)
-    elif period == "day":
-        start = now - timedelta(days=1)
-    elif period == "week":
-        start = now - timedelta(days=7)
-    else:  # month
-        start = now - timedelta(days=30)
-
-    # For demo: return synthetic data
-    # In production, query InfluxDB here
-    thermal_stats = ThermalStats(
-        avg_room_temp_c=21.2,
-        current_room_temp_c=21.5,
-        avg_setpoint_c=21.0,
-        boiler_runtime_minutes=45.0,
-        boiler_on_duty_cycle=3.1,
-        pv_utilization_percent=68.5,
-        mixing_valve_avg_position=65.0,
-    )
-
-    return AnalyticsResponse(
-        period=period,
-        period_start=start.isoformat(),
-        period_end=now.isoformat(),
-        thermal_stats=thermal_stats,
-        timestamp=get_timestamp(),
-    )
-
-
-# ============================================================================
-# Endpoint 3: GET /api/model/status — NN Model Status
-# ============================================================================
-
 @router.get(
     "/model/status",
     response_model=ModelStatusResponse,
-    summary="Get neural network model status",
-    description="Check NN model readiness, training progress, and accuracy"
+    summary="Get neural network model status (legacy)",
 )
 async def get_model_status() -> ModelStatusResponse:
-    """Get NN model status from database.
-    
-    Queries hems.model_metadata table for:
-    - status (idle, training, ready, error)
-    - last_trained timestamp
-    - training_loss
-    - accuracy
-    - retraining_progress (if training)
-    """
+    """Get NN model status (legacy synthetic stub)."""
     try:
-        # For demo: return synthetic status
-        # In production, query PostgreSQL: 
-        # SELECT * FROM hems.model_metadata WHERE id = 'primary_model' LIMIT 1
         now = datetime.now(timezone.utc)
         last_trained = now - timedelta(hours=12)
 
@@ -433,91 +710,18 @@ async def get_model_status() -> ModelStatusResponse:
         logger.error("Failed to fetch model status: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch model status: {str(e)}"
+            detail=f"Failed to fetch model status: {str(e)}",
         )
 
-
-# ============================================================================
-# Endpoint 4: POST /api/model/retrain — Trigger Async Retraining
-# ============================================================================
-
-@router.post(
-    "/model/retrain",
-    response_model=RetrainResponse,
-    summary="Trigger neural network retraining",
-    description="Queue async model retraining with recent data"
-)
-async def retrain_model(
-    request: RetrainRequest,
-    background_tasks: BackgroundTasks,
-) -> RetrainResponse:
-    """Trigger async NN model retraining.
-    
-    - Validates request parameters
-    - Creates job record in PostgreSQL
-    - Queues background task
-    - Returns job_id for polling
-    
-    Job table: hems.training_jobs (id, status, started_at, completed_at, error)
-    """
-    try:
-        # For demo: create a mock job ID
-        from uuid import uuid4
-        job_id = str(uuid4())
-        
-        # In production:
-        # 1. Insert job record: INSERT INTO hems.training_jobs (id, status, epochs, batch_size, ...) VALUES (...)
-        # 2. Queue background task: background_tasks.add_task(retrain_worker, job_id, ...)
-        
-        # Mock background task
-        async def mock_retrain(job_id: str):
-            logger.info("Mock retraining job %s started", job_id)
-            await asyncio.sleep(2)  # Simulate work
-            logger.info("Mock retraining job %s completed", job_id)
-
-        background_tasks.add_task(mock_retrain, job_id)
-
-        return RetrainResponse(
-            job_id=job_id,
-            status="queued",
-            message=f"Retraining job {job_id} queued successfully",
-            estimated_duration_seconds=180,
-            timestamp=get_timestamp(),
-        )
-    except Exception as e:
-        logger.error("Failed to queue retraining: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to queue retraining: {str(e)}"
-        )
-
-
-# ============================================================================
-# Endpoint 5: GET /api/boiler — Current Boiler State
-# ============================================================================
 
 @router.get(
     "/boiler",
     response_model=BoilerResponse,
-    summary="Get current boiler state",
-    description="Fetch boiler status, power, flow/return temps, runtime"
+    summary="Get current boiler state (legacy synthetic stub)",
 )
-async def get_boiler_state(
-) -> BoilerResponse:
-    """Get current boiler operational state.
-    
-    Queries InfluxDB for latest values:
-    - boiler.state (off, ignition, on, modulating, error)
-    - boiler.power_kw
-    - boiler.flow_temp
-    - boiler.return_temp
-    - boiler.runtime_minutes
-    - boiler.modulation_percent
-    - boiler.error_code
-    """
+async def get_boiler_state() -> BoilerResponse:
+    """Get current boiler operational state (legacy synthetic stub)."""
     try:
-        # For demo: return synthetic boiler state
-        # In production, query InfluxDB for latest boiler values
         now = datetime.now(timezone.utc)
         last_change = now - timedelta(minutes=12)
 
@@ -536,38 +740,23 @@ async def get_boiler_state(
         logger.error("Failed to fetch boiler state: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch boiler state: {str(e)}"
+            detail=f"Failed to fetch boiler state: {str(e)}",
         )
 
-
-# ============================================================================
-# Endpoint 6: GET /api/decisions/latest — Last Control Decisions
-# ============================================================================
 
 @router.get(
     "/decisions/latest",
     response_model=DecisionsResponse,
-    summary="Get last control decisions",
-    description="Fetch the last 5 control decisions made by HEMS"
+    summary="Get last control decisions (legacy synthetic stub)",
 )
 async def get_latest_decisions(
     limit: int = 5,
 ) -> DecisionsResponse:
-    """Get the last N control decisions.
-    
-    Queries hems.control_decisions table:
-    - id, timestamp, decision_type, target_value, device, reason, actual_value
-    
-    Returns newest decisions first.
-    """
+    """Get the last N control decisions (legacy synthetic stub)."""
     try:
         if limit < 1 or limit > 50:
             limit = 5
 
-        # For demo: return synthetic decisions
-        # In production, query PostgreSQL:
-        # SELECT * FROM hems.control_decisions 
-        # ORDER BY timestamp DESC LIMIT $1
         now = datetime.now(timezone.utc)
 
         decisions = [
@@ -600,53 +789,5 @@ async def get_latest_decisions(
         logger.error("Failed to fetch control decisions: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch control decisions: {str(e)}"
-        )
-
-
-# ============================================================================
-# Endpoint 7: POST /api/override/flow_temp — Manual Flow Temp Override
-# ============================================================================
-
-@router.post(
-    "/override/flow_temp",
-    response_model=OverrideResponse,
-    summary="Set manual flow temperature override",
-    description="Temporarily override boiler flow temp setpoint"
-)
-async def override_flow_temp(
-    request: OverrideFlowTempRequest,
-) -> OverrideResponse:
-    """Set manual flow temperature override.
-    
-    - Validates temperature (20-80°C) and duration (5min-24h)
-    - Creates override record in PostgreSQL
-    - Signals boiler controller to apply override
-    - Returns override_id for tracking
-    
-    Override table: hems.flow_temp_overrides (id, flow_temp, duration, reason, created_at, expires_at)
-    """
-    try:
-        from uuid import uuid4
-        override_id = str(uuid4())
-        now = datetime.now(timezone.utc)
-        expires_at = now + timedelta(minutes=request.duration_minutes)
-
-        # In production:
-        # 1. INSERT INTO hems.flow_temp_overrides (id, flow_temp_c, duration_minutes, reason, expires_at) VALUES (...)
-        # 2. Signal boiler controller via Redis or direct call
-
-        return OverrideResponse(
-            override_id=override_id,
-            flow_temp_c=request.flow_temp_c,
-            duration_minutes=request.duration_minutes,
-            expires_at=expires_at.isoformat(),
-            message=f"Flow temp override {override_id} active until {expires_at.isoformat()}",
-            timestamp=get_timestamp(),
-        )
-    except Exception as e:
-        logger.error("Failed to create flow temp override: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create override: {str(e)}"
+            detail=f"Failed to fetch control decisions: {str(e)}",
         )
