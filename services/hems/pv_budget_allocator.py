@@ -16,10 +16,16 @@ quick rule-based allocation without external dependencies.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
+import os
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+DB_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://homelab:homelab@192.168.0.80:5432/homelab",
+)
 
 
 @dataclass
@@ -76,6 +82,79 @@ class PVBudgetAllocator:
             "grid_export_w": grid_export,
             "total_allocated_w": available_pv_w - grid_export,
         }
+
+    async def log_allocation(self, result: dict) -> None:
+        """Write allocation decision to InfluxDB and Postgres (best-effort).
+
+        Call this after allocate() from an async context:
+
+            result = allocator.allocate(pv_w)
+            await allocator.log_allocation(result)
+        """
+        allocations = result["allocations"]
+        available_pv_w = result["available_pv_w"]
+        grid_export_w = result["grid_export_w"]
+
+        # InfluxDB (best-effort)
+        try:
+            from influxdb_setup import write_hems_point
+
+            await write_hems_point(
+                measurement="pv_budget_allocation",
+                fields={
+                    "available_pv_w": float(available_pv_w),
+                    "house_base_w": float(allocations.get("house_base", 0.0)),
+                    "dhw_heating_w": float(allocations.get("dhw_heating", 0.0)),
+                    "ev_charging_w": float(allocations.get("ev_charging", 0.0)),
+                    "supplemental_heating_w": float(
+                        allocations.get("supplemental", 0.0)
+                    ),
+                    "grid_export_w": float(grid_export_w),
+                },
+                tags={"mode": "auto"},
+            )
+        except Exception as e:
+            logger.warning("InfluxDB pv_budget_allocation write failed: %s", e)
+
+        # Postgres — single row in hems.energy_allocation
+        # Columns: ts (DEFAULT), pv_total_w, house_w, dhw_w, ev_w,
+        #          supplemental_w, grid_export_w, self_consumption_pct
+        try:
+            import asyncpg
+
+            pg_url = DB_URL.replace("postgresql+asyncpg://", "postgresql://").replace(
+                "postgresql+psycopg2://", "postgresql://"
+            )
+            house_w = float(allocations.get("house_base", 0.0))
+            dhw_w = float(allocations.get("dhw_heating", 0.0))
+            ev_w = float(allocations.get("ev_charging", 0.0))
+            supplemental_w = float(allocations.get("supplemental", 0.0))
+            pv_total_w = float(available_pv_w)
+            grid_w = float(grid_export_w)
+            consumed_w = house_w + dhw_w + ev_w + supplemental_w
+            self_pct = (consumed_w / pv_total_w * 100.0) if pv_total_w > 0 else 0.0
+
+            conn = await asyncpg.connect(pg_url)
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO hems.energy_allocation
+                        (pv_total_w, house_w, dhw_w, ev_w, supplemental_w,
+                         grid_export_w, self_consumption_pct)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    """,
+                    pv_total_w,
+                    house_w,
+                    dhw_w,
+                    ev_w,
+                    supplemental_w,
+                    grid_w,
+                    round(self_pct, 2),
+                )
+            finally:
+                await conn.close()
+        except Exception as e:
+            logger.warning("Postgres pv_budget_allocation write failed: %s", e)
 
     def set_consumer_enabled(self, name: str, enabled: bool):
         for c in self.consumers:
