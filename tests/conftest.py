@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import pytest
-from datetime import datetime, time
+from datetime import datetime
 from unittest.mock import MagicMock
 
 
 # ---------------------------------------------------------------------------
 # WallboxState mock factory
 # ---------------------------------------------------------------------------
+
 
 def make_wallbox(
     vehicle_connected: bool = True,
@@ -30,6 +31,7 @@ def make_wallbox(
 # ChargingContext factory (all fields with sensible defaults)
 # ---------------------------------------------------------------------------
 
+
 def make_ctx(**overrides) -> MagicMock:
     """
     Return a MagicMock that quacks like ChargingContext.
@@ -37,11 +39,10 @@ def make_ctx(**overrides) -> MagicMock:
     All numeric defaults represent a mid-day, partial-PV scenario with a
     77 kWh EV battery at 50% SoC, target 80%, departure at 17:00.
     """
-    from datetime import date
 
     # Base defaults
     defaults = dict(
-        mode=None,                          # caller must set
+        mode=None,  # caller must set
         wallbox=make_wallbox(),
         grid_power_w=0.0,
         pv_power_w=5000.0,
@@ -62,6 +63,9 @@ def make_ctx(**overrides) -> MagicMock:
         overnight_grid_kwh_charged=0.0,
         now=datetime(2024, 6, 15, 12, 0, 0),
         departure_passed=False,
+        drain_pv_battery=False,
+        drain_budget_kwh=0.0,
+        drain_used_kwh=0.0,
     )
     defaults.update(overrides)
 
@@ -96,4 +100,5 @@ def wallbox():
 def default_ctx():
     """A default ChargingContext with PV surplus mode and vehicle connected."""
     from strategy import ChargeMode  # available after sys.path is patched
+
     return make_ctx(mode=ChargeMode.PV_SURPLUS)

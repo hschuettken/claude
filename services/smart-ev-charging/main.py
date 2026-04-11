@@ -21,6 +21,7 @@ from datetime import datetime, time as dt_time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from shared.nats_client import NatsPublisher
 from shared.service import BaseService
 
 from charger import WallboxController
@@ -65,9 +66,40 @@ class SmartEVChargingService(BaseService):
         self._last_cycle_completed_at: float = time.monotonic()
         self._watchdog_task: asyncio.Task | None = None
 
+        # --- NATS publisher ---
+        self.nats: NatsPublisher | None = None
+
+        # --- Session tracking for NATS events ---
+        self._session_start_time: float | None = None
+        self._session_start_energy: float = 0.0
+        self._session_battery_assist_kwh: float = 0.0
+        self._current_mode: str = ""
+
+        # --- Drain mode tracking ---
+        self._drain_budget_kwh: float = 0.0
+        self._drain_used_kwh: float = 0.0
+        self._drain_mode_active: bool = False
+        self._drain_budget_exhausted_fired: bool = False
+        self._drain_session_start_energy: float = 0.0
+        self._drain_session_start_soc: float = 0.0
+        self._drain_session_start_time: float | None = None
+
+        # --- Sunset hour for drain budget calculation ---
+        self._sunset_hour: int = 21
+        self._sunset_hhmm: str = "21:00"
+
+        # --- Counters ---
+        self._surplus_publish_counter: int = 0
+        self._influx_cycle_count: int = 0
+
     async def run(self) -> None:
         self.mqtt.connect_background()
         self._register_ha_discovery()
+
+        # Connect NATS publisher
+        if self.settings.nats_enabled:
+            self.nats = NatsPublisher(url=self.settings.nats_url)
+            await self.nats.connect()
 
         # Subscribe to orchestrator commands
         self._force_cycle = asyncio.Event()
@@ -80,6 +112,12 @@ class SmartEVChargingService(BaseService):
         self.mqtt.subscribe(
             "homelab/ev-forecast/plan",
             self._on_ev_forecast_plan,
+        )
+
+        # Subscribe to pv-forecast updates to track sunset hour
+        self.mqtt.subscribe(
+            "homelab/pv-forecast/updated",
+            self._on_pv_forecast_updated,
         )
 
         charger = WallboxController(
@@ -159,6 +197,12 @@ class SmartEVChargingService(BaseService):
                     self.logger.info("forced_cycle_triggered")
             except asyncio.TimeoutError:
                 pass
+
+    async def shutdown(self) -> None:
+        """Clean up resources including NATS."""
+        if self.nats:
+            await self.nats.close()
+        await super().shutdown()
 
     # ------------------------------------------------------------------
     # Watchdog -- monitors control loop liveness
@@ -395,6 +439,22 @@ class SmartEVChargingService(BaseService):
         # Compute kwh_tocharge_left for this cycle (R4)
         kwh_tocharge_left_val = max(0.0, manual_target_kwh - wallbox.session_energy_kwh)
 
+        # --- Track charging state transition for NATS events ---
+        was_charging = wallbox.vehicle_charging
+        old_mode = self._current_mode
+        new_mode_str = mode.value
+
+        # --- Compute drain budget ---
+        drain_budget = 0.0
+        if drain_pv_battery:
+            drain_budget = self._compute_drain_budget(
+                pv_remaining_kwh=pv_forecast_remaining,
+                battery_soc_pct=battery_soc,
+                house_power_w=house_power,
+                battery_capacity_kwh=self.settings.battery_capacity_kwh,
+            )
+            self._drain_budget_kwh = drain_budget
+
         ctx = ChargingContext(
             mode=mode,
             wallbox=wallbox,
@@ -422,6 +482,8 @@ class SmartEVChargingService(BaseService):
             forecast_needed_kwh=self._forecast_needed_kwh,
             forecast_needed_soc=self._forecast_needed_soc,
             drain_pv_battery=drain_pv_battery,
+            drain_budget_kwh=drain_budget,
+            drain_used_kwh=self._drain_used_kwh,
         )
 
         # 2) Decide target power
@@ -436,6 +498,166 @@ class SmartEVChargingService(BaseService):
             and "pv surplus" not in decision.reason.lower()
             and "pv resume" not in decision.reason.lower()
         )
+
+        # --- NATS: Mode changed ---
+        self._current_mode = new_mode_str
+        if old_mode and old_mode != new_mode_str:
+            await self._nats_publish(
+                "energy.ev.mode_changed",
+                {
+                    "old_mode": old_mode,
+                    "new_mode": new_mode_str,
+                    "reason": decision.reason[:200] if decision else "",
+                    "timestamp": now.isoformat(),
+                },
+            )
+
+        # --- Determine vehicle_charging state (post-decision for accuracy) ---
+        is_now_charging = decision.target_power_w > 0 and wallbox.vehicle_connected
+
+        # --- NATS: Charging started ---
+        if not was_charging and is_now_charging:
+            self._session_start_time = time.monotonic()
+            self._session_start_energy = wallbox.session_energy_kwh
+            self._session_battery_assist_kwh = 0.0
+            await self._nats_publish(
+                "energy.ev.charging_started",
+                {
+                    "mode": self._current_mode,
+                    "target_kwh": float(ctx.target_energy_kwh),
+                    "target_soc": float(ctx.ev_target_soc_pct)
+                    if ctx.ev_soc_pct is not None
+                    else None,
+                    "timestamp": now.isoformat(),
+                },
+            )
+
+        # --- NATS: Charging completed ---
+        if was_charging and not is_now_charging and self._session_start_time:
+            session_kwh = wallbox.session_energy_kwh - self._session_start_energy
+            if session_kwh > 0.1:
+                duration_min = (time.monotonic() - self._session_start_time) / 60
+                cost = session_kwh * self.settings.grid_price_ct / 100
+                await self._nats_publish(
+                    "energy.ev.charging_completed",
+                    {
+                        "session_kwh": round(session_kwh, 2),
+                        "duration_minutes": round(duration_min, 1),
+                        "pv_fraction": 0.0,
+                        "grid_fraction": 1.0,
+                        "battery_assist_kwh": round(
+                            self._session_battery_assist_kwh, 3
+                        ),
+                        "cost_estimate_eur": round(cost, 2),
+                        "timestamp": now.isoformat(),
+                    },
+                )
+                self._write_charging_session_influx(
+                    session_kwh=session_kwh,
+                    duration_min=duration_min,
+                    mode=old_mode or self._current_mode,
+                    battery_assist_kwh=self._session_battery_assist_kwh,
+                )
+            self._session_start_time = None
+            self._session_battery_assist_kwh = 0.0
+
+        # Accumulate battery assist kWh for the session
+        if is_now_charging and decision.battery_assist_w > 0:
+            assist_kwh_this_cycle = (decision.battery_assist_w / 1000.0) * (
+                self.settings.control_interval_seconds / 3600.0
+            )
+            self._session_battery_assist_kwh += assist_kwh_this_cycle
+
+        # --- NATS: PV surplus available (every 10 cycles ~5 min) ---
+        self._surplus_publish_counter += 1
+        if self._surplus_publish_counter >= 10:
+            self._surplus_publish_counter = 0
+            if decision.pv_surplus_w > 0 and wallbox.vehicle_connected:
+                await self._nats_publish(
+                    "energy.ev.surplus_available",
+                    {
+                        "pv_w": round(pv_power, 0),
+                        "battery_soc": round(battery_soc, 1),
+                        "ev_soc": round(ev_soc, 1) if ev_soc is not None else None,
+                        "surplus_w": round(decision.pv_surplus_w, 0),
+                        "timestamp": now.isoformat(),
+                    },
+                )
+
+        # --- Drain mode tracking ---
+        # Drain started: toggle went from off to on
+        if drain_pv_battery and not self._drain_mode_active:
+            self._drain_mode_active = True
+            self._drain_budget_exhausted_fired = False
+            self._drain_used_kwh = 0.0
+            self._drain_session_start_energy = wallbox.session_energy_kwh
+            self._drain_session_start_soc = battery_soc
+            self._drain_session_start_time = time.monotonic()
+            await self._nats_publish(
+                "energy.ev.drain_started",
+                {
+                    "drain_budget_kwh": round(self._drain_budget_kwh, 2),
+                    "battery_soc_pct": round(battery_soc, 1),
+                    "pv_remaining_kwh": round(pv_forecast_remaining, 2),
+                    "timestamp": now.isoformat(),
+                },
+            )
+
+        # Accumulate drain usage
+        if decision.drain_boost_w > 0:
+            drain_kwh_this_cycle = (decision.drain_boost_w / 1000.0) * (
+                self.settings.control_interval_seconds / 3600.0
+            )
+            self._drain_used_kwh += drain_kwh_this_cycle
+
+        # Fire drain budget exhausted (once per drain session)
+        if (
+            self._drain_mode_active
+            and not self._drain_budget_exhausted_fired
+            and self._drain_budget_kwh > 0
+            and self._drain_used_kwh >= self._drain_budget_kwh
+        ):
+            self._drain_budget_exhausted_fired = True
+            await self._nats_publish(
+                "energy.ev.drain_budget_exhausted",
+                {
+                    "kwh_drained": round(self._drain_used_kwh, 3),
+                    "budget_kwh": round(self._drain_budget_kwh, 2),
+                    "battery_soc_pct": round(battery_soc, 1),
+                    "timestamp": now.isoformat(),
+                },
+            )
+
+        # Reset drain mode when toggle goes off
+        if not drain_pv_battery and self._drain_mode_active:
+            self._drain_mode_active = False
+
+        # --- Publish drain status MQTT ---
+        drain_remaining = max(0.0, self._drain_budget_kwh - self._drain_used_kwh)
+        self.mqtt.publish(
+            "homelab/smart-ev-charging/drain-status",
+            {
+                "drain_mode_active": self._drain_mode_active,
+                "drain_budget_kwh": round(self._drain_budget_kwh, 2),
+                "drain_used_kwh": round(self._drain_used_kwh, 3),
+                "drain_remaining_kwh": round(drain_remaining, 2),
+                "drain_reason": decision.drain_boost_reason
+                if decision.drain_boost_w > 0
+                else "",
+                "battery_refill_eta": self._sunset_hhmm,
+            },
+        )
+
+        # --- InfluxDB: control decision (every 10 cycles ~5 min) ---
+        self._influx_cycle_count += 1
+        if self._influx_cycle_count >= 10:
+            self._influx_cycle_count = 0
+            self._write_control_decision_influx(
+                target_power_w=float(decision.target_power_w),
+                actual_power_w=float(wallbox.current_power_w),
+                mode=self._current_mode,
+                reason_code=decision.reason[:50],
+            )
 
         # 3) Apply to wallbox
         if not decision.skip_control:
@@ -851,6 +1073,117 @@ class SmartEVChargingService(BaseService):
                 forecast_needed_kwh=round(self._forecast_needed_kwh, 1),
                 forecast_needed_soc=round(self._forecast_needed_soc, 1),
             )
+
+    def _on_pv_forecast_updated(self, topic: str, payload: dict) -> None:
+        """Extract sunset time from pv-forecast MQTT update."""
+        sunset = payload.get("sunset")
+        if sunset and isinstance(sunset, str) and ":" in sunset:
+            try:
+                parts = sunset.split(":")
+                self._sunset_hour = int(parts[0])
+                self._sunset_hhmm = sunset[:5]
+            except (ValueError, IndexError):
+                pass
+
+    # ------------------------------------------------------------------
+    # NATS helpers
+    # ------------------------------------------------------------------
+
+    async def _nats_publish(self, subject: str, data: dict) -> None:
+        """Fire-and-forget NATS publish — never raises."""
+        if self.nats and self.nats.connected:
+            try:
+                await self.nats.publish(subject, data)
+            except Exception:
+                self.logger.debug("nats_publish_failed", subject=subject)
+
+    # ------------------------------------------------------------------
+    # Drain budget calculation
+    # ------------------------------------------------------------------
+
+    def _compute_drain_budget(
+        self,
+        pv_remaining_kwh: float,
+        battery_soc_pct: float,
+        house_power_w: float,
+        battery_capacity_kwh: float,
+    ) -> float:
+        """Calculate how many kWh we can safely drain from battery.
+
+        Budget = min(available_battery_kwh, pv_net_remaining_kwh)
+        Only drain what PV can refill by sunset.
+        Safety: floor 10% SoC (hardcoded), minimum budget 0.5 kWh.
+        """
+        drain_floor_soc = (
+            max(self.settings.battery_min_soc_pct, 10.0) + 5.0
+        )  # 5% safety margin
+        available_kwh = max(
+            0.0, (battery_soc_pct - drain_floor_soc) / 100.0 * battery_capacity_kwh
+        )
+
+        # Estimate hours until sunset
+        now_hour = datetime.now(self.tz).hour
+        hours_to_sunset = max(0.5, self._sunset_hour - now_hour)
+        house_kwh_remaining = (house_power_w / 1000.0) * hours_to_sunset
+        pv_net = max(0.0, pv_remaining_kwh - house_kwh_remaining)
+
+        budget = min(available_kwh, pv_net * 0.85)
+
+        if budget < 0.5:
+            return 0.0  # Not worth enabling drain
+        return round(budget, 2)
+
+    # ------------------------------------------------------------------
+    # InfluxDB analytics writers
+    # ------------------------------------------------------------------
+
+    def _write_charging_session_influx(
+        self,
+        session_kwh: float,
+        duration_min: float,
+        mode: str,
+        battery_assist_kwh: float,
+    ) -> None:
+        """Write EV charging session to InfluxDB for analytics."""
+        try:
+            self.influx.write_point(
+                bucket="ev_analytics",
+                measurement="ev_charging_session",
+                fields={
+                    "energy_kwh": round(session_kwh, 3),
+                    "duration_minutes": round(duration_min, 1),
+                    "battery_assist_kwh": round(battery_assist_kwh, 3),
+                    "pv_kwh": 0.0,  # TODO: track
+                    "grid_kwh": round(session_kwh, 3),
+                    "cost_estimate": round(
+                        session_kwh * self.settings.grid_price_ct / 100, 2
+                    ),
+                },
+                tags={"mode": mode},
+            )
+        except Exception:
+            self.logger.debug("influx_session_write_failed")
+
+    def _write_control_decision_influx(
+        self,
+        target_power_w: float,
+        actual_power_w: float,
+        mode: str,
+        reason_code: str,
+    ) -> None:
+        """Write control decision to InfluxDB (every ~5 min)."""
+        try:
+            self.influx.write_point(
+                bucket="ev_analytics",
+                measurement="ev_control_decision",
+                fields={
+                    "target_power_w": round(target_power_w, 0),
+                    "actual_power_w": round(actual_power_w, 0),
+                },
+                tags={"mode": mode, "reason_code": reason_code[:50]},
+            )
+        except Exception:
+            self.logger.debug("influx_decision_write_failed")
 
     # ------------------------------------------------------------------
     # MQTT auto-discovery
@@ -1465,7 +1798,91 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.logger.info("ha_discovery_registered", entity_count=32)
+        # --- Drain mode status sensors ---
+        drain_state_topic = "homelab/smart-ev-charging/drain-status"
+
+        self.mqtt.publish_ha_discovery(
+            "binary_sensor",
+            "drain_mode_active",
+            node_id=node,
+            config={
+                "name": "EV Drain PV Battery Active",
+                "device": device,
+                "state_topic": drain_state_topic,
+                "value_template": "{{ 'ON' if value_json.drain_mode_active else 'OFF' }}",
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "icon": "mdi:battery-arrow-down",
+            },
+        )
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "drain_budget_kwh",
+            node_id=node,
+            config={
+                "name": "EV Drain Budget",
+                "device": device,
+                "state_topic": drain_state_topic,
+                "value_template": "{{ value_json.drain_budget_kwh }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:battery-arrow-down-outline",
+            },
+        )
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "drain_used_kwh",
+            node_id=node,
+            config={
+                "name": "EV Drain Used",
+                "device": device,
+                "state_topic": drain_state_topic,
+                "value_template": "{{ value_json.drain_used_kwh }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:battery-minus",
+            },
+        )
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "drain_remaining_kwh",
+            node_id=node,
+            config={
+                "name": "EV Drain Remaining",
+                "device": device,
+                "state_topic": drain_state_topic,
+                "value_template": "{{ value_json.drain_remaining_kwh }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:battery-charging-low",
+            },
+        )
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "drain_reason",
+            node_id=node,
+            config={
+                "name": "EV Drain Reason",
+                "device": device,
+                "state_topic": drain_state_topic,
+                "value_template": "{{ value_json.drain_reason }}",
+                "icon": "mdi:information-outline",
+            },
+        )
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "battery_refill_eta",
+            node_id=node,
+            config={
+                "name": "Battery Refill ETA",
+                "device": device,
+                "state_topic": drain_state_topic,
+                "value_template": "{{ value_json.battery_refill_eta }}",
+                "icon": "mdi:battery-clock",
+            },
+        )
+
+        self.logger.info("ha_discovery_registered", entity_count=38)
 
     # ------------------------------------------------------------------
     # Healthcheck

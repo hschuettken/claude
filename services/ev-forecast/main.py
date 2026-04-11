@@ -39,12 +39,19 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from shared.ha_client import HomeAssistantClient
 from shared.log import get_logger
 from shared.mqtt_client import MQTTClient
+from shared.nats_client import NatsPublisher
 
 from config import EVForecastSettings
 from learned_destinations import LearnedDestinations
 from planner import ChargingPlan, ChargingPlanner
 from trips import GeoDistance, TripPredictor
-from vehicle import ConsumptionTracker, RefreshConfig, VehicleConfig, VehicleMonitor, VehicleState
+from vehicle import (
+    ConsumptionTracker,
+    RefreshConfig,
+    VehicleConfig,
+    VehicleMonitor,
+    VehicleState,
+)
 
 HEALTHCHECK_FILE = Path("/app/data/healthcheck")
 STATE_FILE = Path("/app/data/state.json")
@@ -55,6 +62,7 @@ logger = get_logger("ev-forecast")
 try:
     from google.oauth2.service_account import Credentials
     from googleapiclient.discovery import build
+
     HAS_GOOGLE = True
 except ImportError:
     HAS_GOOGLE = False
@@ -92,11 +100,17 @@ class EVForecastService:
 
         # Build refresh configs based on account mode
         refresh_configs = [
-            RefreshConfig(name=self.settings.audi_account1_name, vin=self.settings.audi_account1_vin),
+            RefreshConfig(
+                name=self.settings.audi_account1_name,
+                vin=self.settings.audi_account1_vin,
+            ),
         ]
         if not self.settings.audi_single_account and self.settings.audi_account2_vin:
             refresh_configs.append(
-                RefreshConfig(name=self.settings.audi_account2_name, vin=self.settings.audi_account2_vin),
+                RefreshConfig(
+                    name=self.settings.audi_account2_name,
+                    vin=self.settings.audi_account2_vin,
+                ),
             )
         self.vehicle = VehicleMonitor(
             ha=self.ha,
@@ -139,6 +153,9 @@ class EVForecastService:
             early_departure_hour=self.settings.early_departure_hour,
         )
 
+        # NATS publisher (initialized in start() if nats_enabled)
+        self.nats: NatsPublisher | None = None
+
         # Google Calendar
         self._gcal_service: Any = None
 
@@ -157,11 +174,15 @@ class EVForecastService:
         await self._resolve_home_location()
 
         # Initialize trip predictor (needs home location for geocoding)
-        geo = GeoDistance(
-            home_lat=self._home_lat,
-            home_lon=self._home_lon,
-            road_factor=self.settings.geocoding_road_factor,
-        ) if self._home_lat and self._home_lon else None
+        geo = (
+            GeoDistance(
+                home_lat=self._home_lat,
+                home_lon=self._home_lon,
+                road_factor=self.settings.geocoding_road_factor,
+            )
+            if self._home_lat and self._home_lon
+            else None
+        )
 
         known_destinations = json.loads(self.settings.known_destinations)
         commute_days = [d.strip() for d in self.settings.nicole_commute_days.split(",")]
@@ -186,6 +207,11 @@ class EVForecastService:
 
         # Connect MQTT
         self.mqtt.connect_background()
+
+        # Connect NATS (if enabled)
+        if self.settings.nats_enabled:
+            self.nats = NatsPublisher(url=self.settings.nats_url)
+            await self.nats.connect()
 
         # Register HA auto-discovery entities
         self._register_ha_discovery()
@@ -235,7 +261,8 @@ class EVForecastService:
         # blocked by long-running scheduler jobs (HA API, Google Calendar).
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread = threading.Thread(
-            target=self._heartbeat_thread_loop, daemon=True,
+            target=self._heartbeat_thread_loop,
+            daemon=True,
         )
         self._heartbeat_thread.start()
 
@@ -282,7 +309,9 @@ class EVForecastService:
                 "active_account": state.active_account,
                 "is_valid": state.is_valid,
                 "consumption_kwh_100km": self.consumption_tracker.consumption_kwh_per_100km,
-                "consumption_source": "measured" if self.consumption_tracker.has_data else "default",
+                "consumption_source": "measured"
+                if self.consumption_tracker.has_data
+                else "default",
                 "consumption_measurements": self.consumption_tracker.measurement_count,
                 "timestamp": datetime.now(self._tz).isoformat(),
             }
@@ -314,7 +343,9 @@ class EVForecastService:
             # Get PV forecast (today's remaining kWh)
             pv_forecast_kwh = []
             try:
-                pv_state = await self.ha.get_state("sensor.pv_ai_forecast_today_remaining_kwh")
+                pv_state = await self.ha.get_state(
+                    "sensor.pv_ai_forecast_today_remaining_kwh"
+                )
                 pv_today_kwh = float(pv_state.get("state", 0))
                 if pv_today_kwh > 0:
                     pv_forecast_kwh.append(pv_today_kwh)
@@ -324,7 +355,8 @@ class EVForecastService:
 
             # Generate demand-focused plan with PV forecast awareness
             plan = await self.planner.generate_plan(
-                vehicle, day_plans,
+                vehicle,
+                day_plans,
                 pv_forecast_kwh=pv_forecast_kwh if pv_forecast_kwh else None,
             )
             self._last_plan = plan
@@ -333,6 +365,32 @@ class EVForecastService:
             plan_payload = plan.to_dict()
             plan_payload["reasoning"] = self._compose_plan_reasoning(plan, vehicle)
             self.mqtt.publish("homelab/ev-forecast/plan", plan_payload)
+
+            # Publish plan to NATS event bus
+            if self.nats and self.nats.connected:
+                await self.nats.publish(
+                    "energy.ev.plan_updated",
+                    {
+                        "trace_id": plan.trace_id,
+                        "days": [
+                            {
+                                "date": d.date.isoformat(),
+                                "urgency": d.urgency,
+                                "charge_mode": d.charge_mode,
+                                "energy_to_charge_kwh": round(
+                                    d.energy_to_charge_kwh, 2
+                                ),
+                                "departure_time": d.departure_time.strftime("%H:%M")
+                                if d.departure_time
+                                else None,
+                            }
+                            for d in plan.days
+                        ],
+                        "urgency": plan.days[0].urgency if plan.days else "none",
+                        "mode": plan.days[0].charge_mode if plan.days else "PV Surplus",
+                        "timestamp": datetime.now(self._tz).isoformat(),
+                    },
+                )
 
             # Apply immediate action to HA helpers (blocked in safe mode)
             safe_mode = await self._check_safe_mode()
@@ -389,9 +447,12 @@ class EVForecastService:
         try:
             now = datetime.now(self._tz)
             time_min = now.isoformat()
-            time_max = (now + timedelta(
-                days=self.settings.planning_horizon_days,
-            )).isoformat()
+            time_max = (
+                now
+                + timedelta(
+                    days=self.settings.planning_horizon_days,
+                )
+            ).isoformat()
 
             result = (
                 self._gcal_service.events()
@@ -410,14 +471,16 @@ class EVForecastService:
             for item in result.get("items", []):
                 start = item.get("start", {})
                 end = item.get("end", {})
-                events.append({
-                    "id": item.get("id", ""),
-                    "summary": item.get("summary", ""),
-                    "start": start.get("dateTime") or start.get("date", ""),
-                    "end": end.get("dateTime") or end.get("date", ""),
-                    "all_day": "date" in start,
-                    "location": item.get("location", ""),
-                })
+                events.append(
+                    {
+                        "id": item.get("id", ""),
+                        "summary": item.get("summary", ""),
+                        "start": start.get("dateTime") or start.get("date", ""),
+                        "end": end.get("dateTime") or end.get("date", ""),
+                        "all_day": "date" in start,
+                        "location": item.get("location", ""),
+                    }
+                )
 
             logger.info("calendar_events_fetched", count=len(events))
             return events
@@ -433,7 +496,9 @@ class EVForecastService:
     async def _resolve_home_location(self) -> None:
         """Get home lat/lon from HA config if not explicitly set."""
         if self._home_lat and self._home_lon:
-            logger.info("home_location_from_config", lat=self._home_lat, lon=self._home_lon)
+            logger.info(
+                "home_location_from_config", lat=self._home_lat, lon=self._home_lon
+            )
             return
 
         try:
@@ -445,7 +510,10 @@ class EVForecastService:
             self._home_lon = config.get("longitude", 0.0)
             logger.info("home_location_from_ha", lat=self._home_lat, lon=self._home_lon)
         except Exception:
-            logger.warning("home_location_unavailable", detail="Geocoding for unknown destinations will be disabled")
+            logger.warning(
+                "home_location_unavailable",
+                detail="Geocoding for unknown destinations will be disabled",
+            )
 
     # ------------------------------------------------------------------
     # MQTT callbacks
@@ -492,7 +560,9 @@ class EVForecastService:
             return
 
         if not self.settings.google_calendar_family_id:
-            logger.info("google_calendar_not_configured", reason="no family calendar ID")
+            logger.info(
+                "google_calendar_not_configured", reason="no family calendar ID"
+            )
             return
 
         try:
@@ -548,7 +618,10 @@ class EVForecastService:
             now = datetime.now(self._tz)
             for day_rec in plan.days:
                 # Skip days with no charging needed
-                if day_rec.energy_to_charge_kwh <= 0 and day_rec.charge_mode == "PV Surplus":
+                if (
+                    day_rec.energy_to_charge_kwh <= 0
+                    and day_rec.charge_mode == "PV Surplus"
+                ):
                     # Clean up any existing event for this day
                     event_id = f"evplan{day_rec.date.strftime('%Y%m%d')}"
                     await self._delete_calendar_event(cal_id, event_id)
@@ -576,17 +649,21 @@ class EVForecastService:
     ) -> None:
         """Create or update a calendar event for a single day's charging plan."""
         event_id = f"evplan{day_rec.date.strftime('%Y%m%d')}"
-        dep_str = day_rec.departure_time.strftime("%H:%M") if day_rec.departure_time else "—"
-        trips_str = ", ".join(
-            f"{t.person}: {t.destination} ({t.round_trip_km:.0f}km)"
-            for t in day_rec.trips
-        ) or "No trips"
+        dep_str = (
+            day_rec.departure_time.strftime("%H:%M") if day_rec.departure_time else "—"
+        )
+        trips_str = (
+            ", ".join(
+                f"{t.person}: {t.destination} ({t.round_trip_km:.0f}km)"
+                for t in day_rec.trips
+            )
+            or "No trips"
+        )
 
         soc_str = f"{plan.current_soc_pct:.0f}%" if plan.current_soc_pct else "?"
 
         summary = (
-            f"🔋 EV: {day_rec.charge_mode} "
-            f"({day_rec.energy_to_charge_kwh:.1f} kWh)"
+            f"🔋 EV: {day_rec.charge_mode} ({day_rec.energy_to_charge_kwh:.1f} kWh)"
         )
 
         description = (
@@ -614,10 +691,10 @@ class EVForecastService:
         # Add color based on urgency
         color_map = {
             "critical": "11",  # red
-            "high": "6",       # orange
-            "medium": "5",     # yellow
-            "low": "2",        # green
-            "none": "8",       # grey
+            "high": "6",  # orange
+            "medium": "5",  # yellow
+            "low": "2",  # green
+            "none": "8",  # grey
         }
         color_id = color_map.get(day_rec.urgency, "8")
         event_body["colorId"] = color_id
@@ -673,7 +750,10 @@ class EVForecastService:
         await self._upsert_calendar_event(cal_id, event_id, event_body)
 
     async def _upsert_calendar_event(
-        self, cal_id: str, event_id: str, event_body: dict,
+        self,
+        cal_id: str,
+        event_id: str,
+        event_body: dict,
     ) -> None:
         """Insert or update a calendar event by ID."""
         loop = asyncio.get_event_loop()
@@ -681,20 +761,33 @@ class EVForecastService:
             # Try update first
             await loop.run_in_executor(
                 None,
-                lambda: self._gcal_service.events().update(
-                    calendarId=cal_id, eventId=event_id, body=event_body,
-                ).execute(),
+                lambda: (
+                    self._gcal_service.events()
+                    .update(
+                        calendarId=cal_id,
+                        eventId=event_id,
+                        body=event_body,
+                    )
+                    .execute()
+                ),
             )
             logger.info("calendar_event_updated", event_id=event_id)
         except Exception as e:
-            logger.debug("calendar_event_update_failed", event_id=event_id, error=str(e))
+            logger.debug(
+                "calendar_event_update_failed", event_id=event_id, error=str(e)
+            )
             try:
                 # Doesn't exist — insert
                 await loop.run_in_executor(
                     None,
-                    lambda: self._gcal_service.events().insert(
-                        calendarId=cal_id, body=event_body,
-                    ).execute(),
+                    lambda: (
+                        self._gcal_service.events()
+                        .insert(
+                            calendarId=cal_id,
+                            body=event_body,
+                        )
+                        .execute()
+                    ),
                 )
                 logger.info("calendar_event_inserted", event_id=event_id)
             except Exception as e2:
@@ -711,9 +804,14 @@ class EVForecastService:
         try:
             await loop.run_in_executor(
                 None,
-                lambda: self._gcal_service.events().delete(
-                    calendarId=cal_id, eventId=event_id,
-                ).execute(),
+                lambda: (
+                    self._gcal_service.events()
+                    .delete(
+                        calendarId=cal_id,
+                        eventId=event_id,
+                    )
+                    .execute()
+                ),
             )
         except Exception:
             pass  # Not found or already deleted — fine
@@ -734,7 +832,10 @@ class EVForecastService:
 
         # Service status
         self.mqtt.publish_ha_discovery(
-            "binary_sensor", "service_status", node_id=node, config={
+            "binary_sensor",
+            "service_status",
+            node_id=node,
+            config={
                 "name": "Service Status",
                 "device": device,
                 "state_topic": "homelab/ev-forecast/heartbeat",
@@ -751,7 +852,10 @@ class EVForecastService:
 
         # EV SoC
         self.mqtt.publish_ha_discovery(
-            "sensor", "ev_soc", node_id=node, config={
+            "sensor",
+            "ev_soc",
+            node_id=node,
+            config={
                 "name": "EV Battery SoC",
                 "device": device,
                 "state_topic": vehicle_topic,
@@ -765,7 +869,10 @@ class EVForecastService:
 
         # EV Range
         self.mqtt.publish_ha_discovery(
-            "sensor", "ev_range", node_id=node, config={
+            "sensor",
+            "ev_range",
+            node_id=node,
+            config={
                 "name": "EV Range",
                 "device": device,
                 "state_topic": vehicle_topic,
@@ -777,7 +884,10 @@ class EVForecastService:
 
         # Active Account
         self.mqtt.publish_ha_discovery(
-            "sensor", "active_account", node_id=node, config={
+            "sensor",
+            "active_account",
+            node_id=node,
+            config={
                 "name": "Active Audi Account",
                 "device": device,
                 "state_topic": vehicle_topic,
@@ -788,7 +898,10 @@ class EVForecastService:
 
         # Charging State
         self.mqtt.publish_ha_discovery(
-            "sensor", "charging_state", node_id=node, config={
+            "sensor",
+            "charging_state",
+            node_id=node,
+            config={
                 "name": "EV Charging State",
                 "device": device,
                 "state_topic": vehicle_topic,
@@ -799,7 +912,10 @@ class EVForecastService:
 
         # Plug State
         self.mqtt.publish_ha_discovery(
-            "sensor", "plug_state", node_id=node, config={
+            "sensor",
+            "plug_state",
+            node_id=node,
+            config={
                 "name": "EV Plug State",
                 "device": device,
                 "state_topic": vehicle_topic,
@@ -810,7 +926,10 @@ class EVForecastService:
 
         # Plan: Energy Needed Today
         self.mqtt.publish_ha_discovery(
-            "sensor", "energy_needed_today", node_id=node, config={
+            "sensor",
+            "energy_needed_today",
+            node_id=node,
+            config={
                 "name": "Energy Needed Today",
                 "device": device,
                 "state_topic": plan_topic,
@@ -827,7 +946,10 @@ class EVForecastService:
 
         # Plan: Charge Mode
         self.mqtt.publish_ha_discovery(
-            "sensor", "recommended_mode", node_id=node, config={
+            "sensor",
+            "recommended_mode",
+            node_id=node,
+            config={
                 "name": "Recommended Charge Mode",
                 "device": device,
                 "state_topic": plan_topic,
@@ -842,7 +964,10 @@ class EVForecastService:
 
         # Plan: Next Trip
         self.mqtt.publish_ha_discovery(
-            "sensor", "next_trip", node_id=node, config={
+            "sensor",
+            "next_trip",
+            node_id=node,
+            config={
                 "name": "Next Trip",
                 "device": device,
                 "state_topic": plan_topic,
@@ -864,7 +989,10 @@ class EVForecastService:
 
         # Plan: Departure Time
         self.mqtt.publish_ha_discovery(
-            "sensor", "next_departure", node_id=node, config={
+            "sensor",
+            "next_departure",
+            node_id=node,
+            config={
                 "name": "Next Departure",
                 "device": device,
                 "state_topic": plan_topic,
@@ -880,7 +1008,10 @@ class EVForecastService:
 
         # Plan: Status/Reason
         self.mqtt.publish_ha_discovery(
-            "sensor", "plan_status", node_id=node, config={
+            "sensor",
+            "plan_status",
+            node_id=node,
+            config={
                 "name": "Plan Status",
                 "device": device,
                 "state_topic": plan_topic,
@@ -895,7 +1026,10 @@ class EVForecastService:
 
         # Uptime (diagnostic)
         self.mqtt.publish_ha_discovery(
-            "sensor", "uptime", node_id=node, config={
+            "sensor",
+            "uptime",
+            node_id=node,
+            config={
                 "name": "EV Forecast Uptime",
                 "device": device,
                 "state_topic": "homelab/ev-forecast/heartbeat",
@@ -909,7 +1043,10 @@ class EVForecastService:
 
         # Consumption (dynamic kWh/100km)
         self.mqtt.publish_ha_discovery(
-            "sensor", "consumption", node_id=node, config={
+            "sensor",
+            "consumption",
+            node_id=node,
+            config={
                 "name": "EV Consumption",
                 "device": device,
                 "state_topic": vehicle_topic,
@@ -926,7 +1063,10 @@ class EVForecastService:
 
         # Rich reasoning sensor with full plan details as JSON attributes
         self.mqtt.publish_ha_discovery(
-            "sensor", "plan_reasoning", node_id=node, config={
+            "sensor",
+            "plan_reasoning",
+            node_id=node,
+            config={
                 "name": "Plan Reasoning",
                 "device": device,
                 "state_topic": plan_topic,
@@ -972,9 +1112,7 @@ class EVForecastService:
             f"Vehicle: SoC {vehicle.soc_pct}% | Range {vehicle.range_km} km | "
             f"Mileage: {vehicle.mileage_km} km | Plug: {vehicle.plug_state}"
         )
-        lines.append(
-            f"Consumption: {consumption_info}"
-        )
+        lines.append(f"Consumption: {consumption_info}")
         lines.append(
             f"Plan: {plan.current_soc_pct}% SoC | "
             f"Plugged: {plan.vehicle_plugged_in} | "
@@ -982,10 +1120,13 @@ class EVForecastService:
         )
 
         for day in plan.days:
-            trip_list = ", ".join(
-                f"{t.person}: {t.destination} ({t.distance_km}km)"
-                for t in day.trips
-            ) or "no trips"
+            trip_list = (
+                ", ".join(
+                    f"{t.person}: {t.destination} ({t.distance_km}km)"
+                    for t in day.trips
+                )
+                or "no trips"
+            )
             dep = day.departure_time.strftime("%H:%M") if day.departure_time else "none"
             lines.append(
                 f"  {day.date}: [{day.urgency}] {day.charge_mode} | "
@@ -1016,16 +1157,21 @@ class EVForecastService:
             self._touch_healthcheck()
             try:
                 vehicle = self.vehicle.last_state
-                self.mqtt.publish("homelab/ev-forecast/heartbeat", {
-                    "status": "online",
-                    "service": "ev-forecast",
-                    "uptime_seconds": round(time.monotonic() - self._start_time, 1),
-                    "ev_soc_pct": vehicle.soc_pct,
-                    "active_account": vehicle.active_account or "single",
-                    "has_plan": self._last_plan is not None,
-                    "consumption_kwh_100km": self.consumption_tracker.consumption_kwh_per_100km,
-                    "consumption_source": "measured" if self.consumption_tracker.has_data else "default",
-                })
+                self.mqtt.publish(
+                    "homelab/ev-forecast/heartbeat",
+                    {
+                        "status": "online",
+                        "service": "ev-forecast",
+                        "uptime_seconds": round(time.monotonic() - self._start_time, 1),
+                        "ev_soc_pct": vehicle.soc_pct,
+                        "active_account": vehicle.active_account or "single",
+                        "has_plan": self._last_plan is not None,
+                        "consumption_kwh_100km": self.consumption_tracker.consumption_kwh_per_100km,
+                        "consumption_source": "measured"
+                        if self.consumption_tracker.has_data
+                        else "default",
+                    },
+                )
             except Exception:
                 logger.debug("heartbeat_publish_failed")
             self._heartbeat_stop.wait(interval)
@@ -1055,7 +1201,9 @@ class EVForecastService:
                 today = self._last_plan.days[0] if self._last_plan.days else None
                 state_data["last_plan"] = {
                     "mode_recommendation": today.charge_mode if today else None,
-                    "total_energy_needed": round(self._last_plan.total_energy_needed_kwh, 2),
+                    "total_energy_needed": round(
+                        self._last_plan.total_energy_needed_kwh, 2
+                    ),
                 }
 
             STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -1139,12 +1287,17 @@ class EVForecastService:
         if hasattr(self, "_heartbeat_stop"):
             self._heartbeat_stop.set()
         self.scheduler.shutdown(wait=False)
-        self.mqtt.publish("homelab/ev-forecast/heartbeat", {
-            "status": "offline",
-            "service": "ev-forecast",
-        })
+        self.mqtt.publish(
+            "homelab/ev-forecast/heartbeat",
+            {
+                "status": "offline",
+                "service": "ev-forecast",
+            },
+        )
         await self.ha.close()
         self.mqtt.disconnect()
+        if self.nats:
+            await self.nats.close()
         logger.info("shutdown_complete")
 
 
