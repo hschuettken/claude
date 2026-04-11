@@ -1,3 +1,5 @@
 # Google Calendar API (for reading family calendar)
 google-api-python-client>=2.100.0
 google-auth>=2.20.0
+
+nats-py>=2.6,<3

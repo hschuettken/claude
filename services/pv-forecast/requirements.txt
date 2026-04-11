@@ -6,3 +6,5 @@ joblib>=1.3,<2
 
 # Sunrise/sunset calculation
 astral>=3.2,<4
+
+nats-py>=2.6,<3

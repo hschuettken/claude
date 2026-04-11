@@ -19,8 +19,14 @@ import asyncio
 import json
 from typing import Any
 
-import nats
-import nats.aio.client
+try:
+    import nats
+    import nats.aio.client
+
+    _NATS_AVAILABLE = True
+except ImportError:
+    nats = None  # type: ignore[assignment]
+    _NATS_AVAILABLE = False
 
 from shared.log import get_logger
 
@@ -32,14 +38,22 @@ class NatsPublisher:
 
     def __init__(self, url: str = "nats://nats:4222") -> None:
         self._url = url
-        self._nc: nats.aio.client.Client | None = None
+        self._nc: Any | None = None
 
     @property
     def connected(self) -> bool:
-        return self._nc is not None and not self._nc.is_closed
+        if not _NATS_AVAILABLE or self._nc is None:
+            return False
+        return not self._nc.is_closed
 
     async def connect(self) -> None:
         """Connect to the NATS server."""
+        if not _NATS_AVAILABLE:
+            logger.warning(
+                "nats_unavailable",
+                reason="nats-py not installed; NATS publishing disabled",
+            )
+            return
         try:
             self._nc = await nats.connect(self._url)
             logger.info("nats_connected", url=self._url)
