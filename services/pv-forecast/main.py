@@ -25,10 +25,19 @@ from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from shared.energy_events import (
+    PVAnomalyDetected,
+    PVDriftDetected,
+    PVForecastAccuracyResult,
+    PVForecastUpdated,
+    PVModelRetrained,
+    SolarDaylightWindow,
+)
 from shared.ha_client import HomeAssistantClient
 from shared.influx_client import InfluxClient
 from shared.log import get_logger
 from shared.mqtt_client import MQTTClient
+from shared.nats_client import NatsPublisher
 
 HEALTHCHECK_FILE = Path("/app/data/healthcheck")
 
@@ -84,6 +93,19 @@ class PVForecastService:
         self._last_forecast_summary: str = ""
         self._loop: asyncio.AbstractEventLoop | None = None
 
+        # --- NATS ---
+        self.nats: NatsPublisher | None = None
+
+        # --- Accuracy / anomaly tracking ---
+        self._today_forecast_kwh: dict[str, float] = {}
+        self._anomaly_threshold_pct: float = 30.0
+        self._mae_history: list[float] = []
+        self._last_accuracy_pct: float = 0.0
+
+        # --- Sunrise/sunset ---
+        self._sunrise_hhmm: str | None = None
+        self._sunset_hhmm: str | None = None
+
     async def _resolve_location(self) -> None:
         """Get lat/lon from HA config if not explicitly set."""
         if self.latitude and self.longitude:
@@ -112,10 +134,17 @@ class PVForecastService:
         # Resolve location
         await self._resolve_location()
 
+        # Initialize NATS if enabled
+        if self.settings.nats_enabled:
+            self.nats = NatsPublisher(url=self.settings.nats_url)
+            await self.nats.connect()
+
         # Initialize components
         self.weather = OpenMeteoClient(self.latitude, self.longitude)
         self.data_collector = PVDataCollector(self.influx, self.weather, self.settings)
-        self.engine = ForecastEngine(self.settings, self.data_collector, self.weather, self.ha)
+        self.engine = ForecastEngine(
+            self.settings, self.data_collector, self.weather, self.ha
+        )
         # Pass resolved lat/lon (may have come from HA, not settings)
         self.engine.latitude = self.latitude
         self.engine.longitude = self.longitude
@@ -133,6 +162,9 @@ class PVForecastService:
             "homelab/orchestrator/command/pv-forecast",
             self._on_orchestrator_command,
         )
+
+        # Calculate sunrise/sunset and publish daylight window
+        await self._update_daylight_window()
 
         # Initial training attempt
         await self._train()
@@ -153,13 +185,28 @@ class PVForecastService:
             hour=self.settings.model_retrain_hour,
             id="daily_retrain",
         )
+        self.scheduler.add_job(
+            self._check_forecast_accuracy,
+            "cron",
+            hour=20,
+            minute=0,
+            id="accuracy_check",
+        )
+        self.scheduler.add_job(
+            self._update_daylight_window,
+            "cron",
+            hour=4,
+            minute=30,
+            id="daylight_window",
+        )
         self.scheduler.start()
 
         # Start heartbeat in a dedicated daemon thread so it can't be
         # blocked by long-running scheduler jobs (ML training, InfluxDB queries).
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread = threading.Thread(
-            target=self._heartbeat_thread_loop, daemon=True,
+            target=self._heartbeat_thread_loop,
+            daemon=True,
         )
         self._heartbeat_thread.start()
 
@@ -184,7 +231,9 @@ class PVForecastService:
             results = await self.engine.train()
             logger.info("training_complete", results=results)
             self._last_training_results = results
-            self._last_training_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            self._last_training_time = time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+            )
 
             # Count data days per array for sensor exposure
             for array_name, entity_id in [
@@ -192,7 +241,9 @@ class PVForecastService:
                 ("west", self.settings.pv_west_energy_entity_id),
             ]:
                 if entity_id and self.data_collector:
-                    self._data_days[array_name] = self.data_collector.count_days_of_data(entity_id)
+                    self._data_days[array_name] = (
+                        self.data_collector.count_days_of_data(entity_id)
+                    )
 
             # Publish training results with enhanced data
             enriched_results = {
@@ -201,6 +252,21 @@ class PVForecastService:
                 "data_days": self._data_days,
             }
             self.mqtt.publish("homelab/pv-forecast/model-trained", enriched_results)
+
+            # Publish NATS event
+            if self.nats and self.nats.connected and results:
+                east = results.get("east", {})
+                west = results.get("west", {})
+                event = PVModelRetrained(
+                    east_r2=east.get("r2", 0.0),
+                    east_mae=east.get("mae", 0.0),
+                    west_r2=west.get("r2", 0.0),
+                    west_mae=west.get("mae", 0.0),
+                    east_data_days=self._data_days.get("east", 0),
+                    west_data_days=self._data_days.get("west", 0),
+                    timestamp=self._last_training_time,
+                )
+                await self.nats.publish("energy.pv.model_retrained", event.model_dump())
         except Exception:
             logger.exception("training_failed")
 
@@ -210,7 +276,9 @@ class PVForecastService:
             forecast = await self.engine.forecast()
             await self.publisher.publish(forecast)
 
-            self._last_forecast_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            self._last_forecast_time = time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+            )
 
             # Fetch Forecast.Solar values for comparison
             await self._fetch_forecast_solar_comparison()
@@ -229,19 +297,23 @@ class PVForecastService:
                 "day_after_kwh": forecast.day_after_total_kwh,
                 "east_today_kwh": (
                     forecast.east.today.total_kwh
-                    if forecast.east and forecast.east.today else 0.0
+                    if forecast.east and forecast.east.today
+                    else 0.0
                 ),
                 "west_today_kwh": (
                     forecast.west.today.total_kwh
-                    if forecast.west and forecast.west.today else 0.0
+                    if forecast.west and forecast.west.today
+                    else 0.0
                 ),
                 "east_tomorrow_kwh": (
                     forecast.east.tomorrow.total_kwh
-                    if forecast.east and forecast.east.tomorrow else 0.0
+                    if forecast.east and forecast.east.tomorrow
+                    else 0.0
                 ),
                 "west_tomorrow_kwh": (
                     forecast.west.tomorrow.total_kwh
-                    if forecast.west and forecast.west.tomorrow else 0.0
+                    if forecast.west and forecast.west.tomorrow
+                    else 0.0
                 ),
                 "east_model": east_model,
                 "west_model": west_model,
@@ -255,8 +327,12 @@ class PVForecastService:
                 "data_days_west": self._data_days.get("west", 0),
                 "last_training_time": self._last_training_time,
                 # Forecast.Solar comparison
-                "forecast_solar_today_east": self._forecast_solar_today.get("east", 0.0),
-                "forecast_solar_today_west": self._forecast_solar_today.get("west", 0.0),
+                "forecast_solar_today_east": self._forecast_solar_today.get(
+                    "east", 0.0
+                ),
+                "forecast_solar_today_west": self._forecast_solar_today.get(
+                    "west", 0.0
+                ),
                 "forecast_solar_today_total": (
                     self._forecast_solar_today.get("east", 0.0)
                     + self._forecast_solar_today.get("west", 0.0)
@@ -265,10 +341,293 @@ class PVForecastService:
             }
             self.mqtt.publish("homelab/pv-forecast/updated", summary)
 
+            # Publish NATS event
+            if self.nats and self.nats.connected:
+                east_r2 = self._last_training_results.get("east", {}).get("r2", 0.0)
+                west_r2 = self._last_training_results.get("west", {}).get("r2", 0.0)
+                valid_r2 = [r for r in [east_r2, west_r2] if r > 0]
+                confidence = sum(valid_r2) / len(valid_r2) if valid_r2 else 0.5
+
+                model_type = "ml" if "ml" in (east_model, west_model) else "fallback"
+
+                # Store today's forecast per array for accuracy check
+                self._today_forecast_kwh["east"] = summary.get("east_today_kwh", 0.0)
+                self._today_forecast_kwh["west"] = summary.get("west_today_kwh", 0.0)
+
+                nats_event = PVForecastUpdated(
+                    today_kwh=summary["today_kwh"],
+                    today_remaining_kwh=summary["today_remaining_kwh"],
+                    tomorrow_kwh=summary["tomorrow_kwh"],
+                    day_after_kwh=summary["day_after_kwh"],
+                    east_today_kwh=summary["east_today_kwh"],
+                    west_today_kwh=summary["west_today_kwh"],
+                    confidence=round(confidence, 3),
+                    model_type=model_type,
+                    timestamp=forecast.timestamp.isoformat(),
+                    sunrise=self._sunrise_hhmm,
+                    sunset=self._sunset_hhmm,
+                )
+                await self.nats.publish(
+                    "energy.pv.forecast_updated", nats_event.model_dump()
+                )
+
         except Exception:
             logger.exception("forecast_failed")
         finally:
             self._touch_healthcheck()
+
+    async def _check_forecast_accuracy(self) -> None:
+        """Evening job: compare today's forecast vs actual production."""
+        try:
+            today_str = time.strftime("%Y-%m-%d", time.localtime())
+
+            # Query actual production for today from InfluxDB
+            east_actual = 0.0
+            west_actual = 0.0
+
+            east_entity = self.settings.pv_east_energy_entity_id
+            west_entity = self.settings.pv_west_energy_entity_id
+
+            if east_entity:
+                records = self.influx.query_records(
+                    bucket="hass",
+                    entity_id=east_entity,
+                    range_start="-24h",
+                    range_stop="now()",
+                )
+                if records:
+                    values = [
+                        r["_value"] for r in records if r.get("_value") is not None
+                    ]
+                    if len(values) >= 2:
+                        east_actual = max(values) - min(values)
+
+            if west_entity:
+                records = self.influx.query_records(
+                    bucket="hass",
+                    entity_id=west_entity,
+                    range_start="-24h",
+                    range_stop="now()",
+                )
+                if records:
+                    values = [
+                        r["_value"] for r in records if r.get("_value") is not None
+                    ]
+                    if len(values) >= 2:
+                        west_actual = max(values) - min(values)
+
+            east_forecast = self._today_forecast_kwh.get("east", 0.0)
+            west_forecast = self._today_forecast_kwh.get("west", 0.0)
+
+            if east_forecast <= 0 and west_forecast <= 0:
+                logger.info("accuracy_check_skipped", reason="no_forecast_data")
+                return
+
+            total_forecast = east_forecast + west_forecast
+            total_actual = east_actual + west_actual
+
+            def safe_delta(forecast: float, actual: float) -> float:
+                if forecast <= 0:
+                    return 0.0
+                return ((actual - forecast) / forecast) * 100.0
+
+            east_delta_pct = safe_delta(east_forecast, east_actual)
+            west_delta_pct = safe_delta(west_forecast, west_actual)
+            total_delta_pct = safe_delta(total_forecast, total_actual)
+            accuracy_pct = max(0.0, 100.0 - abs(total_delta_pct))
+
+            self._last_accuracy_pct = accuracy_pct
+
+            # Rolling MAE history (30-day window)
+            mae = abs(total_actual - total_forecast)
+            self._mae_history.append(mae)
+            if len(self._mae_history) > 30:
+                self._mae_history.pop(0)
+
+            # Write to InfluxDB
+            self.influx.write_point(
+                bucket="ev_analytics",
+                measurement="pv_forecast_accuracy",
+                fields={
+                    "forecast_kwh": round(total_forecast, 3),
+                    "actual_kwh": round(total_actual, 3),
+                    "delta_pct": round(total_delta_pct, 2),
+                    "accuracy_pct": round(accuracy_pct, 2),
+                    "east_forecast_kwh": round(east_forecast, 3),
+                    "east_actual_kwh": round(east_actual, 3),
+                    "west_forecast_kwh": round(west_forecast, 3),
+                    "west_actual_kwh": round(west_actual, 3),
+                },
+                tags={"date": today_str},
+            )
+
+            # Publish MQTT accuracy message for HA discovery sensor
+            self.mqtt.publish(
+                "homelab/pv-forecast/accuracy",
+                {
+                    "accuracy_pct": round(accuracy_pct, 1),
+                    "forecast_kwh": round(total_forecast, 2),
+                    "actual_kwh": round(total_actual, 2),
+                    "delta_pct": round(total_delta_pct, 2),
+                    "date": today_str,
+                },
+            )
+
+            # Publish NATS accuracy event
+            if self.nats and self.nats.connected:
+                accuracy_event = PVForecastAccuracyResult(
+                    date=today_str,
+                    east_forecast_kwh=round(east_forecast, 3),
+                    east_actual_kwh=round(east_actual, 3),
+                    east_delta_pct=round(east_delta_pct, 2),
+                    west_forecast_kwh=round(west_forecast, 3),
+                    west_actual_kwh=round(west_actual, 3),
+                    west_delta_pct=round(west_delta_pct, 2),
+                    total_forecast_kwh=round(total_forecast, 3),
+                    total_actual_kwh=round(total_actual, 3),
+                    total_delta_pct=round(total_delta_pct, 2),
+                    accuracy_pct=round(accuracy_pct, 2),
+                    timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                )
+                await self.nats.publish(
+                    "energy.pv.accuracy_checked", accuracy_event.model_dump()
+                )
+
+            # Drift detection: if 7-day MAE > 1.5x 30-day baseline
+            if len(self._mae_history) >= 7:
+                mae_7d = sum(self._mae_history[-7:]) / 7
+                mae_30d = sum(self._mae_history) / len(self._mae_history)
+                threshold = 1.5
+                if mae_30d > 0 and mae_7d > mae_30d * threshold:
+                    logger.warning(
+                        "pv_forecast_drift_detected",
+                        mae_7d=mae_7d,
+                        mae_30d=mae_30d,
+                    )
+                    if self.nats and self.nats.connected:
+                        drift_event = PVDriftDetected(
+                            mae_7d=round(mae_7d, 3),
+                            mae_30d=round(mae_30d, 3),
+                            ratio=round(mae_7d / mae_30d, 2),
+                            threshold=threshold,
+                            timestamp=time.strftime(
+                                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                            ),
+                        )
+                        await self.nats.publish(
+                            "energy.pv.drift_detected", drift_event.model_dump()
+                        )
+
+            # Anomaly detection: >30% deviation with meaningful forecast
+            if (
+                abs(total_delta_pct) > self._anomaly_threshold_pct
+                and total_forecast > 1.0
+            ):
+                if self.nats and self.nats.connected:
+                    anomaly_event = PVAnomalyDetected(
+                        array="total",
+                        actual_kwh=round(total_actual, 3),
+                        forecast_kwh=round(total_forecast, 3),
+                        deviation_pct=round(total_delta_pct, 2),
+                        timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    )
+                    await self.nats.publish(
+                        "energy.pv.anomaly_detected", anomaly_event.model_dump()
+                    )
+
+            logger.info(
+                "accuracy_check_complete",
+                accuracy_pct=round(accuracy_pct, 1),
+                total_forecast=round(total_forecast, 2),
+                total_actual=round(total_actual, 2),
+            )
+        except Exception:
+            logger.exception("accuracy_check_failed")
+
+    async def _update_daylight_window(self) -> None:
+        """Calculate and publish sunrise/sunset window via NATS.
+
+        Uses astral library if available, falls back to hard-coded estimates.
+        """
+        try:
+            from datetime import date as _date
+
+            now_local = time.localtime()
+            today = _date(now_local.tm_year, now_local.tm_mon, now_local.tm_mday)
+            today_str = today.isoformat()
+
+            sunrise_dt = None
+            sunset_dt = None
+
+            # Try astral first
+            try:
+                from zoneinfo import ZoneInfo
+
+                from astral import LocationInfo
+                from astral.sun import sun
+
+                tz_name = getattr(self.settings, "timezone", "Europe/Berlin")
+                loc = LocationInfo(
+                    latitude=self.latitude or 53.0,
+                    longitude=self.longitude or 10.0,
+                    timezone=tz_name,
+                )
+                s = sun(loc.observer, date=today, tzinfo=ZoneInfo(tz_name))
+                sunrise_dt = s["sunrise"]
+                sunset_dt = s["sunset"]
+            except ImportError:
+                logger.debug("astral_not_available_using_estimate")
+                # Fallback: rough estimate for Hamburg (53°N)
+                month = now_local.tm_mon
+                if 4 <= month <= 9:
+                    sunrise_h, sunrise_m = 5, 30
+                    sunset_h, sunset_m = 21, 0
+                elif 10 <= month <= 11 or month <= 2:
+                    sunrise_h, sunrise_m = 8, 0
+                    sunset_h, sunset_m = 16, 30
+                else:
+                    sunrise_h, sunrise_m = 6, 30
+                    sunset_h, sunset_m = 19, 30
+                self._sunrise_hhmm = f"{sunrise_h:02d}:{sunrise_m:02d}"
+                self._sunset_hhmm = f"{sunset_h:02d}:{sunset_m:02d}"
+
+            if sunrise_dt and sunset_dt:
+                self._sunrise_hhmm = sunrise_dt.strftime("%H:%M")
+                self._sunset_hhmm = sunset_dt.strftime("%H:%M")
+
+            if (
+                self.nats
+                and self.nats.connected
+                and self._sunrise_hhmm
+                and self._sunset_hhmm
+            ):
+                window_event = SolarDaylightWindow(
+                    sunrise=(
+                        sunrise_dt.isoformat()
+                        if sunrise_dt
+                        else f"{today_str}T{self._sunrise_hhmm}:00"
+                    ),
+                    sunset=(
+                        sunset_dt.isoformat()
+                        if sunset_dt
+                        else f"{today_str}T{self._sunset_hhmm}:00"
+                    ),
+                    sunrise_hhmm=self._sunrise_hhmm,
+                    sunset_hhmm=self._sunset_hhmm,
+                    date=today_str,
+                    timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                )
+                await self.nats.publish(
+                    "energy.solar.daylight_window", window_event.model_dump()
+                )
+
+            logger.info(
+                "daylight_window_updated",
+                sunrise=self._sunrise_hhmm,
+                sunset=self._sunset_hhmm,
+            )
+        except Exception:
+            logger.exception("daylight_window_failed")
 
     async def _fetch_forecast_solar_comparison(self) -> None:
         """Fetch Forecast.Solar values from HA for comparison sensors."""
@@ -286,9 +645,9 @@ class PVForecastService:
             except Exception:
                 logger.debug("forecast_solar_comparison_failed", array=array_name)
 
-    def _compose_forecast_reasoning(self, forecast: 'FullForecast') -> str:
+    def _compose_forecast_reasoning(self, forecast: "FullForecast") -> str:
         """Compose a human-readable reasoning for the current forecast."""
-        from forecast import FullForecast
+
         lines: list[str] = []
 
         lines.append(f"Forecast updated: {self._last_forecast_time}")
@@ -304,8 +663,12 @@ class PVForecastService:
             tmrw_kwh = arr.tomorrow.total_kwh if arr.tomorrow else 0.0
 
             if model == "ml":
-                r2 = self._last_training_results.get(arr_name.lower(), {}).get("r2", 0.0)
-                mae = self._last_training_results.get(arr_name.lower(), {}).get("mae", 0.0)
+                r2 = self._last_training_results.get(arr_name.lower(), {}).get(
+                    "r2", 0.0
+                )
+                mae = self._last_training_results.get(arr_name.lower(), {}).get(
+                    "mae", 0.0
+                )
                 lines.append(
                     f"{arr_name}: ML model (R²={r2:.3f}, MAE={mae:.3f} kWh, "
                     f"{data_days} days training data)"
@@ -324,8 +687,7 @@ class PVForecastService:
             if fs_val > 0 and today_kwh > 0:
                 diff_pct = ((today_kwh - fs_val) / fs_val) * 100
                 lines.append(
-                    f"  vs Forecast.Solar: {fs_val:.1f} kWh "
-                    f"(AI is {diff_pct:+.0f}%)"
+                    f"  vs Forecast.Solar: {fs_val:.1f} kWh (AI is {diff_pct:+.0f}%)"
                 )
 
         lines.append(
@@ -362,237 +724,358 @@ class PVForecastService:
         node = "pv_forecast"
         updated_topic = "homelab/pv-forecast/updated"
         heartbeat_topic = "homelab/pv-forecast/heartbeat"
-        trained_topic = "homelab/pv-forecast/model-trained"
+        trained_topic = "homelab/pv-forecast/model-trained"  # noqa: F841
 
         # --- Connectivity & uptime ---
-        self.mqtt.publish_ha_discovery("binary_sensor", "status", node_id=node, config={
-            "name": "PV Forecast Service",
-            "device": device,
-            "state_topic": heartbeat_topic,
-            "value_template": "{{ 'ON' if value_json.status == 'online' else 'OFF' }}",
-            "payload_on": "ON",
-            "payload_off": "OFF",
-            "device_class": "running",
-            "expire_after": 180,
-            "icon": "mdi:solar-power-variant",
-        })
+        self.mqtt.publish_ha_discovery(
+            "binary_sensor",
+            "status",
+            node_id=node,
+            config={
+                "name": "PV Forecast Service",
+                "device": device,
+                "state_topic": heartbeat_topic,
+                "value_template": "{{ 'ON' if value_json.status == 'online' else 'OFF' }}",
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "device_class": "running",
+                "expire_after": 180,
+                "icon": "mdi:solar-power-variant",
+            },
+        )
 
-        self.mqtt.publish_ha_discovery("sensor", "uptime", node_id=node, config={
-            "name": "PV Forecast Uptime",
-            "device": device,
-            "state_topic": heartbeat_topic,
-            "value_template": "{{ value_json.uptime_seconds | round(0) }}",
-            "unit_of_measurement": "s",
-            "device_class": "duration",
-            "entity_category": "diagnostic",
-            "icon": "mdi:timer-outline",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "uptime",
+            node_id=node,
+            config={
+                "name": "PV Forecast Uptime",
+                "device": device,
+                "state_topic": heartbeat_topic,
+                "value_template": "{{ value_json.uptime_seconds | round(0) }}",
+                "unit_of_measurement": "s",
+                "device_class": "duration",
+                "entity_category": "diagnostic",
+                "icon": "mdi:timer-outline",
+            },
+        )
 
         # --- Core forecast sensors ---
-        self.mqtt.publish_ha_discovery("sensor", "today_kwh", node_id=node, config={
-            "name": "PV Forecast Today",
-            "device": device,
-            "state_topic": updated_topic,
-            "value_template": "{{ value_json.today_kwh }}",
-            "unit_of_measurement": "kWh",
-            "device_class": "energy",
-            "icon": "mdi:solar-power-variant",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "today_kwh",
+            node_id=node,
+            config={
+                "name": "PV Forecast Today",
+                "device": device,
+                "state_topic": updated_topic,
+                "value_template": "{{ value_json.today_kwh }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:solar-power-variant",
+            },
+        )
 
-        self.mqtt.publish_ha_discovery("sensor", "today_remaining_kwh", node_id=node, config={
-            "name": "PV Forecast Today Remaining",
-            "device": device,
-            "state_topic": updated_topic,
-            "value_template": "{{ value_json.today_remaining_kwh }}",
-            "unit_of_measurement": "kWh",
-            "device_class": "energy",
-            "icon": "mdi:solar-power-variant",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "today_remaining_kwh",
+            node_id=node,
+            config={
+                "name": "PV Forecast Today Remaining",
+                "device": device,
+                "state_topic": updated_topic,
+                "value_template": "{{ value_json.today_remaining_kwh }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:solar-power-variant",
+            },
+        )
 
-        self.mqtt.publish_ha_discovery("sensor", "tomorrow_kwh", node_id=node, config={
-            "name": "PV Forecast Tomorrow",
-            "device": device,
-            "state_topic": updated_topic,
-            "value_template": "{{ value_json.tomorrow_kwh }}",
-            "unit_of_measurement": "kWh",
-            "device_class": "energy",
-            "icon": "mdi:solar-power-variant",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "tomorrow_kwh",
+            node_id=node,
+            config={
+                "name": "PV Forecast Tomorrow",
+                "device": device,
+                "state_topic": updated_topic,
+                "value_template": "{{ value_json.tomorrow_kwh }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:solar-power-variant",
+            },
+        )
 
-        self.mqtt.publish_ha_discovery("sensor", "day_after_kwh", node_id=node, config={
-            "name": "PV Forecast Day After Tomorrow",
-            "device": device,
-            "state_topic": updated_topic,
-            "value_template": "{{ value_json.day_after_kwh }}",
-            "unit_of_measurement": "kWh",
-            "device_class": "energy",
-            "icon": "mdi:solar-power-variant",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "day_after_kwh",
+            node_id=node,
+            config={
+                "name": "PV Forecast Day After Tomorrow",
+                "device": device,
+                "state_topic": updated_topic,
+                "value_template": "{{ value_json.day_after_kwh }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:solar-power-variant",
+            },
+        )
 
         # --- Per-array breakdown sensors ---
-        self.mqtt.publish_ha_discovery("sensor", "east_today_kwh", node_id=node, config={
-            "name": "PV Forecast East Today",
-            "device": device,
-            "state_topic": updated_topic,
-            "value_template": "{{ value_json.east_today_kwh }}",
-            "unit_of_measurement": "kWh",
-            "device_class": "energy",
-            "icon": "mdi:solar-panel",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "east_today_kwh",
+            node_id=node,
+            config={
+                "name": "PV Forecast East Today",
+                "device": device,
+                "state_topic": updated_topic,
+                "value_template": "{{ value_json.east_today_kwh }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:solar-panel",
+            },
+        )
 
-        self.mqtt.publish_ha_discovery("sensor", "west_today_kwh", node_id=node, config={
-            "name": "PV Forecast West Today",
-            "device": device,
-            "state_topic": updated_topic,
-            "value_template": "{{ value_json.west_today_kwh }}",
-            "unit_of_measurement": "kWh",
-            "device_class": "energy",
-            "icon": "mdi:solar-panel",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "west_today_kwh",
+            node_id=node,
+            config={
+                "name": "PV Forecast West Today",
+                "device": device,
+                "state_topic": updated_topic,
+                "value_template": "{{ value_json.west_today_kwh }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:solar-panel",
+            },
+        )
 
-        self.mqtt.publish_ha_discovery("sensor", "east_tomorrow_kwh", node_id=node, config={
-            "name": "PV Forecast East Tomorrow",
-            "device": device,
-            "state_topic": updated_topic,
-            "value_template": "{{ value_json.east_tomorrow_kwh }}",
-            "unit_of_measurement": "kWh",
-            "device_class": "energy",
-            "icon": "mdi:solar-panel",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "east_tomorrow_kwh",
+            node_id=node,
+            config={
+                "name": "PV Forecast East Tomorrow",
+                "device": device,
+                "state_topic": updated_topic,
+                "value_template": "{{ value_json.east_tomorrow_kwh }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:solar-panel",
+            },
+        )
 
-        self.mqtt.publish_ha_discovery("sensor", "west_tomorrow_kwh", node_id=node, config={
-            "name": "PV Forecast West Tomorrow",
-            "device": device,
-            "state_topic": updated_topic,
-            "value_template": "{{ value_json.west_tomorrow_kwh }}",
-            "unit_of_measurement": "kWh",
-            "device_class": "energy",
-            "icon": "mdi:solar-panel",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "west_tomorrow_kwh",
+            node_id=node,
+            config={
+                "name": "PV Forecast West Tomorrow",
+                "device": device,
+                "state_topic": updated_topic,
+                "value_template": "{{ value_json.west_tomorrow_kwh }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:solar-panel",
+            },
+        )
 
         # --- Model quality & training sensors ---
-        self.mqtt.publish_ha_discovery("sensor", "east_model_type", node_id=node, config={
-            "name": "East Model Type",
-            "device": device,
-            "state_topic": updated_topic,
-            "value_template": "{{ value_json.east_model }}",
-            "icon": "mdi:brain",
-            "entity_category": "diagnostic",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "east_model_type",
+            node_id=node,
+            config={
+                "name": "East Model Type",
+                "device": device,
+                "state_topic": updated_topic,
+                "value_template": "{{ value_json.east_model }}",
+                "icon": "mdi:brain",
+                "entity_category": "diagnostic",
+            },
+        )
 
-        self.mqtt.publish_ha_discovery("sensor", "west_model_type", node_id=node, config={
-            "name": "West Model Type",
-            "device": device,
-            "state_topic": updated_topic,
-            "value_template": "{{ value_json.west_model }}",
-            "icon": "mdi:brain",
-            "entity_category": "diagnostic",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "west_model_type",
+            node_id=node,
+            config={
+                "name": "West Model Type",
+                "device": device,
+                "state_topic": updated_topic,
+                "value_template": "{{ value_json.west_model }}",
+                "icon": "mdi:brain",
+                "entity_category": "diagnostic",
+            },
+        )
 
-        self.mqtt.publish_ha_discovery("sensor", "east_model_r2", node_id=node, config={
-            "name": "East Model R²",
-            "device": device,
-            "state_topic": updated_topic,
-            "value_template": "{{ value_json.east_r2 }}",
-            "icon": "mdi:chart-line",
-            "entity_category": "diagnostic",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "east_model_r2",
+            node_id=node,
+            config={
+                "name": "East Model R²",
+                "device": device,
+                "state_topic": updated_topic,
+                "value_template": "{{ value_json.east_r2 }}",
+                "icon": "mdi:chart-line",
+                "entity_category": "diagnostic",
+            },
+        )
 
-        self.mqtt.publish_ha_discovery("sensor", "west_model_r2", node_id=node, config={
-            "name": "West Model R²",
-            "device": device,
-            "state_topic": updated_topic,
-            "value_template": "{{ value_json.west_r2 }}",
-            "icon": "mdi:chart-line",
-            "entity_category": "diagnostic",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "west_model_r2",
+            node_id=node,
+            config={
+                "name": "West Model R²",
+                "device": device,
+                "state_topic": updated_topic,
+                "value_template": "{{ value_json.west_r2 }}",
+                "icon": "mdi:chart-line",
+                "entity_category": "diagnostic",
+            },
+        )
 
-        self.mqtt.publish_ha_discovery("sensor", "east_model_mae", node_id=node, config={
-            "name": "East Model MAE",
-            "device": device,
-            "state_topic": updated_topic,
-            "value_template": "{{ value_json.east_mae }}",
-            "unit_of_measurement": "kWh",
-            "icon": "mdi:chart-scatter-plot",
-            "entity_category": "diagnostic",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "east_model_mae",
+            node_id=node,
+            config={
+                "name": "East Model MAE",
+                "device": device,
+                "state_topic": updated_topic,
+                "value_template": "{{ value_json.east_mae }}",
+                "unit_of_measurement": "kWh",
+                "icon": "mdi:chart-scatter-plot",
+                "entity_category": "diagnostic",
+            },
+        )
 
-        self.mqtt.publish_ha_discovery("sensor", "west_model_mae", node_id=node, config={
-            "name": "West Model MAE",
-            "device": device,
-            "state_topic": updated_topic,
-            "value_template": "{{ value_json.west_mae }}",
-            "unit_of_measurement": "kWh",
-            "icon": "mdi:chart-scatter-plot",
-            "entity_category": "diagnostic",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "west_model_mae",
+            node_id=node,
+            config={
+                "name": "West Model MAE",
+                "device": device,
+                "state_topic": updated_topic,
+                "value_template": "{{ value_json.west_mae }}",
+                "unit_of_measurement": "kWh",
+                "icon": "mdi:chart-scatter-plot",
+                "entity_category": "diagnostic",
+            },
+        )
 
-        self.mqtt.publish_ha_discovery("sensor", "data_days_east", node_id=node, config={
-            "name": "Training Data Days (East)",
-            "device": device,
-            "state_topic": updated_topic,
-            "value_template": "{{ value_json.data_days_east }}",
-            "unit_of_measurement": "days",
-            "icon": "mdi:database-clock-outline",
-            "entity_category": "diagnostic",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "data_days_east",
+            node_id=node,
+            config={
+                "name": "Training Data Days (East)",
+                "device": device,
+                "state_topic": updated_topic,
+                "value_template": "{{ value_json.data_days_east }}",
+                "unit_of_measurement": "days",
+                "icon": "mdi:database-clock-outline",
+                "entity_category": "diagnostic",
+            },
+        )
 
-        self.mqtt.publish_ha_discovery("sensor", "data_days_west", node_id=node, config={
-            "name": "Training Data Days (West)",
-            "device": device,
-            "state_topic": updated_topic,
-            "value_template": "{{ value_json.data_days_west }}",
-            "unit_of_measurement": "days",
-            "icon": "mdi:database-clock-outline",
-            "entity_category": "diagnostic",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "data_days_west",
+            node_id=node,
+            config={
+                "name": "Training Data Days (West)",
+                "device": device,
+                "state_topic": updated_topic,
+                "value_template": "{{ value_json.data_days_west }}",
+                "unit_of_measurement": "days",
+                "icon": "mdi:database-clock-outline",
+                "entity_category": "diagnostic",
+            },
+        )
 
-        self.mqtt.publish_ha_discovery("sensor", "last_training", node_id=node, config={
-            "name": "Last Model Training",
-            "device": device,
-            "state_topic": updated_topic,
-            "value_template": "{{ value_json.last_training_time }}",
-            "device_class": "timestamp",
-            "icon": "mdi:school-outline",
-            "entity_category": "diagnostic",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "last_training",
+            node_id=node,
+            config={
+                "name": "Last Model Training",
+                "device": device,
+                "state_topic": updated_topic,
+                "value_template": "{{ value_json.last_training_time }}",
+                "device_class": "timestamp",
+                "icon": "mdi:school-outline",
+                "entity_category": "diagnostic",
+            },
+        )
 
         # --- Forecast.Solar comparison ---
-        self.mqtt.publish_ha_discovery("sensor", "forecast_solar_today", node_id=node, config={
-            "name": "Forecast.Solar Today (comparison)",
-            "device": device,
-            "state_topic": updated_topic,
-            "value_template": "{{ value_json.forecast_solar_today_total }}",
-            "unit_of_measurement": "kWh",
-            "device_class": "energy",
-            "icon": "mdi:weather-sunny-alert",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "forecast_solar_today",
+            node_id=node,
+            config={
+                "name": "Forecast.Solar Today (comparison)",
+                "device": device,
+                "state_topic": updated_topic,
+                "value_template": "{{ value_json.forecast_solar_today_total }}",
+                "unit_of_measurement": "kWh",
+                "device_class": "energy",
+                "icon": "mdi:weather-sunny-alert",
+            },
+        )
 
         # --- Decision reasoning (the key sensor) ---
-        self.mqtt.publish_ha_discovery("sensor", "forecast_reasoning", node_id=node, config={
-            "name": "Forecast Reasoning",
-            "device": device,
-            "state_topic": updated_topic,
-            "value_template": (
-                "{{ value_json.east_model }}/{{ value_json.west_model }}: "
-                "{{ value_json.today_kwh }} kWh today"
-            ),
-            "json_attributes_topic": updated_topic,
-            "json_attributes_template": (
-                '{{ {"full_reasoning": value_json.reasoning, '
-                '"east_model": value_json.east_model, '
-                '"west_model": value_json.west_model, '
-                '"east_r2": value_json.east_r2, '
-                '"west_r2": value_json.west_r2, '
-                '"data_days_east": value_json.data_days_east, '
-                '"data_days_west": value_json.data_days_west, '
-                '"forecast_solar_today_total": value_json.forecast_solar_today_total, '
-                '"last_training_time": value_json.last_training_time} | tojson }}'
-            ),
-            "icon": "mdi:head-cog-outline",
-        })
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "forecast_reasoning",
+            node_id=node,
+            config={
+                "name": "Forecast Reasoning",
+                "device": device,
+                "state_topic": updated_topic,
+                "value_template": (
+                    "{{ value_json.east_model }}/{{ value_json.west_model }}: "
+                    "{{ value_json.today_kwh }} kWh today"
+                ),
+                "json_attributes_topic": updated_topic,
+                "json_attributes_template": (
+                    '{{ {"full_reasoning": value_json.reasoning, '
+                    '"east_model": value_json.east_model, '
+                    '"west_model": value_json.west_model, '
+                    '"east_r2": value_json.east_r2, '
+                    '"west_r2": value_json.west_r2, '
+                    '"data_days_east": value_json.data_days_east, '
+                    '"data_days_west": value_json.data_days_west, '
+                    '"forecast_solar_today_total": value_json.forecast_solar_today_total, '
+                    '"last_training_time": value_json.last_training_time} | tojson }}'
+                ),
+                "icon": "mdi:head-cog-outline",
+            },
+        )
 
-        logger.info("ha_discovery_registered", entity_count=23)
+        # --- Accuracy sensor ---
+        self.mqtt.publish_ha_discovery(
+            "sensor",
+            "forecast_accuracy_today",
+            node_id=node,
+            config={
+                "name": "PV Forecast Accuracy Today",
+                "device": device,
+                "state_topic": "homelab/pv-forecast/accuracy",
+                "value_template": "{{ value_json.accuracy_pct }}",
+                "unit_of_measurement": "%",
+                "icon": "mdi:crosshairs-gps",
+                "entity_category": "diagnostic",
+            },
+        )
+
+        logger.info("ha_discovery_registered", entity_count=24)
 
     def _heartbeat_thread_loop(self) -> None:
         """Publish heartbeat + touch healthcheck from a dedicated thread.
@@ -607,11 +1090,14 @@ class PVForecastService:
         while not self._heartbeat_stop.is_set():
             self._touch_healthcheck()
             try:
-                self.mqtt.publish("homelab/pv-forecast/heartbeat", {
-                    "status": "online",
-                    "service": "pv-forecast",
-                    "uptime_seconds": round(time.monotonic() - self._start_time, 1),
-                })
+                self.mqtt.publish(
+                    "homelab/pv-forecast/heartbeat",
+                    {
+                        "status": "online",
+                        "service": "pv-forecast",
+                        "uptime_seconds": round(time.monotonic() - self._start_time, 1),
+                    },
+                )
             except Exception:
                 logger.debug("heartbeat_publish_failed")
             self._heartbeat_stop.wait(interval)
@@ -633,6 +1119,8 @@ class PVForecastService:
         await self.ha.close()
         self.influx.close()
         self.mqtt.disconnect()
+        if self.nats:
+            await self.nats.close()
         if self.weather:
             await self.weather.close()
         logger.info("shutdown_complete")

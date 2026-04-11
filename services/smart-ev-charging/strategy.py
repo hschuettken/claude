@@ -59,6 +59,8 @@ class ChargingContext:
     forecast_needed_soc: float = 0.0  # SoC% needed according to forecast
     # Drain PV battery mode
     drain_pv_battery: bool = False  # True = intentionally discharge PV battery into EV
+    drain_budget_kwh: float = 0.0  # Max kWh allowed to drain from battery
+    drain_used_kwh: float = 0.0  # kWh already drained this session
 
     @property
     def energy_needed_kwh(self) -> float:
@@ -393,7 +395,9 @@ class ChargingStrategy:
         if ctx.drain_pv_battery:
             drain_boost, drain_reason = self._calc_drain_boost(ctx)
 
-        available = pv_only + assist + hold_boost + drain_boost
+        available = (
+            pv_only + assist * self.charger_efficiency + hold_boost + drain_boost
+        )
 
         ev_soc_low = ctx.ev_soc_pct is not None and ctx.ev_soc_pct < 50
         battery_high = ctx.battery_soc_pct >= 80
@@ -1192,6 +1196,13 @@ class ChargingStrategy:
             return (
                 0.0,
                 f"SoC {ctx.battery_soc_pct:.0f}% <= drain floor {drain_floor_soc:.0f}% — stopping",
+            )
+
+        # Budget check: if budget tracking is active and budget exhausted, stop drain
+        if ctx.drain_budget_kwh > 0 and ctx.drain_used_kwh >= ctx.drain_budget_kwh:
+            return (
+                0.0,
+                f"Drain budget exhausted ({ctx.drain_used_kwh:.2f}/{ctx.drain_budget_kwh:.2f} kWh)",
             )
 
         drain_available_kwh = (

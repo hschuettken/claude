@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     anthropic_api_key: str = ""
 
+    # --- NATS ---
+    nats_url: str = "nats://nats:4222"
+    nats_enabled: bool = True
+
     # --- Global Safe Mode ---
     # When enabled, services continue monitoring but block write actions
     safe_mode_entity: str = ""  # e.g. "input_boolean.homelab_safe_mode"
