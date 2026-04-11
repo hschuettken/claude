@@ -1,7 +1,16 @@
-FROM homelab-base:latest
-ENV PYTHONPATH="/app"
+FROM python:3.12-slim
+ENV PYTHONPATH="/app:/app/shared"
 
-# Install service-specific dependencies
+# System dependencies (mirrors homelab-base)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install base requirements inline (homelab-base:latest not available on all hosts)
+COPY base/requirements.txt /tmp/base-requirements.txt
+RUN pip install --no-cache-dir -r /tmp/base-requirements.txt && rm /tmp/base-requirements.txt
+
+# Service-specific requirements
 COPY services/ev-forecast/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
 
@@ -10,6 +19,9 @@ COPY services/ev-forecast/*.py /app/
 
 # Bundle shared libs
 COPY shared/ /app/shared/
+
+WORKDIR /app
+
 HEALTHCHECK --interval=60s --timeout=5s --start-period=120s --retries=3 \
     CMD ["python", "healthcheck.py"]
 
