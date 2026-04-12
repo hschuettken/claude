@@ -165,6 +165,13 @@ class EVForecastService:
         # Last plan for publishing
         self._last_plan: ChargingPlan | None = None
 
+        # 7-day weekly plan builder
+        self._weekly_builder = WeeklyPlanBuilder()
+
+        # Cached PV forecast values (updated via NATS subscription)
+        # Keys: YYYY-MM-DD strings for today and tomorrow
+        self._pv_forecast_cache: dict[str, float] = {}
+
     async def start(self) -> None:
         """Initialize and start the service."""
         logger.info(
@@ -236,6 +243,12 @@ class EVForecastService:
             await self.nats.subscribe_json(
                 "orchestrator.knowledge.update",
                 _on_knowledge_update,
+            )
+
+            # PV forecast updates — cache today/tomorrow values for weekly plan
+            await self.nats.subscribe_json(
+                "energy.pv.forecast_updated",
+                self._on_pv_forecast_updated,
             )
 
         # Initialize Google Calendar
@@ -431,6 +444,33 @@ class EVForecastService:
                     },
                 )
 
+            # Build and publish 7-day weekly plan to NATS
+            if self.nats and self.nats.connected:
+                # Collect all trips from day_plans
+                all_trips = [t for dp in day_plans for t in dp.trips]
+
+                # Build pv_forecast_by_date from cached NATS data
+                # Days 0+1 use cached values; days 2-6 default to 0.0
+                pv_by_date: dict[str, float] = dict(self._pv_forecast_cache)
+
+                weekly_plan = self._weekly_builder.build(
+                    trips=all_trips,
+                    current_soc_pct=vehicle.soc_pct or 50.0,
+                    battery_capacity_kwh=self.settings.ev_battery_capacity_net_kwh,
+                    consumption_kwh_per_100km=self.consumption_tracker.consumption_kwh_per_100km,
+                    pv_forecast_by_date=pv_by_date,
+                    timestamp=datetime.now(self._tz).isoformat(),
+                )
+                await self.nats.publish(
+                    "energy.ev.weekly_plan",
+                    weekly_plan.model_dump(),
+                )
+                logger.info(
+                    "weekly_plan_published",
+                    days=len(weekly_plan.days),
+                    current_soc_pct=vehicle.soc_pct,
+                )
+
             # Apply immediate action to HA helpers (blocked in safe mode)
             safe_mode = await self._check_safe_mode()
             if safe_mode:
@@ -527,6 +567,30 @@ class EVForecastService:
         except Exception:
             logger.exception("calendar_fetch_failed")
             return []
+
+    # ------------------------------------------------------------------
+    # PV forecast cache (updated via NATS)
+    # ------------------------------------------------------------------
+
+    async def _on_pv_forecast_updated(self, subject: str, payload: dict) -> None:
+        """Cache today/tomorrow PV forecast values from NATS event."""
+        try:
+            today_kwh = float(payload.get("today_kwh", 0.0))
+            tomorrow_kwh = float(payload.get("tomorrow_kwh", 0.0))
+            now = datetime.now(self._tz).date()
+            today_key = now.isoformat()
+            tomorrow_key = (now + timedelta(days=1)).isoformat()
+            self._pv_forecast_cache = {
+                today_key: today_kwh,
+                tomorrow_key: tomorrow_kwh,
+            }
+            logger.debug(
+                "pv_forecast_cache_updated",
+                today=today_kwh,
+                tomorrow=tomorrow_kwh,
+            )
+        except Exception:
+            logger.exception("pv_forecast_cache_update_failed")
 
     # ------------------------------------------------------------------
     # Home location resolution

@@ -19,12 +19,13 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import structlog
 
+from shared.energy_events import EVDailyPlan, EVWeeklyPlan
 from shared.ha_client import HomeAssistantClient
 
 from trips import DayPlan, Trip
@@ -863,3 +864,122 @@ class ChargingPlanner:
         if target_dt <= now:
             return 0.0  # Already past
         return (target_dt - now).total_seconds() / 3600
+
+
+class WeeklyPlanBuilder:
+    """Builds a 7-day EVWeeklyPlan from trips and PV forecast data.
+
+    This complements ChargingPlanner (which drives HA helper writes) by
+    producing a forward-looking multi-day summary published to NATS as
+    energy.ev.weekly_plan so downstream services (e.g. smart-ev-charging)
+    can make multi-day grid/PV decisions.
+    """
+
+    # 5% buffer per day added on top of raw trip energy
+    ENERGY_BUFFER_FRACTION = 0.05
+
+    def build(
+        self,
+        trips: list[Trip],
+        current_soc_pct: float,
+        battery_capacity_kwh: float,
+        consumption_kwh_per_100km: float,
+        pv_forecast_by_date: dict[str, float],
+        today: date | None = None,
+        timestamp: str | None = None,
+    ) -> EVWeeklyPlan:
+        """Build a 7-day weekly plan.
+
+        Args:
+            trips: All trips across the planning horizon (any day).
+            current_soc_pct: Car battery SoC right now (%).
+            battery_capacity_kwh: Net battery capacity in kWh.
+            consumption_kwh_per_100km: Energy consumption rate.
+            pv_forecast_by_date: Mapping of YYYY-MM-DD to expected PV kWh.
+                Days not in the dict default to 0.0 (no forecast).
+            today: Override for today's date (useful in tests).
+            timestamp: ISO timestamp for the plan; defaults to now.
+        """
+        if today is None:
+            today = date.today()
+        if timestamp is None:
+            timestamp = datetime.now().isoformat()
+
+        # Index trips by date string for quick lookup
+        trips_by_date: dict[str, list[Trip]] = {}
+        for trip in trips:
+            key = trip.date.isoformat()
+            trips_by_date.setdefault(key, []).append(trip)
+
+        running_soc = current_soc_pct
+        days: list[EVDailyPlan] = []
+
+        for day_offset in range(7):
+            day = today + timedelta(days=day_offset)
+            day_key = day.isoformat()
+
+            day_trips = trips_by_date.get(day_key, [])
+
+            # Raw energy from trips using round_trip_km
+            raw_energy = sum(
+                t.round_trip_km * consumption_kwh_per_100km / 100.0 for t in day_trips
+            )
+            energy_needed = raw_energy * (1.0 + self.ENERGY_BUFFER_FRACTION)
+
+            pv_expected = pv_forecast_by_date.get(day_key, 0.0)
+            grid_needed = max(0.0, energy_needed - pv_expected)
+
+            # Charge source recommendation
+            if energy_needed == 0.0:
+                charge_source = "pv_only"
+            elif pv_expected == 0.0:
+                charge_source = "grid_required"
+            elif grid_needed == 0.0:
+                charge_source = "pv_only"
+            else:
+                charge_source = "pv_plus_grid"
+
+            # SoC target at the start of this day equals current running_soc
+            target_soc = max(0.0, min(100.0, running_soc))
+
+            # Deplete running SoC by trips for the next day's calculation
+            soc_delta = (
+                (energy_needed / battery_capacity_kwh * 100.0)
+                if battery_capacity_kwh > 0
+                else 0.0
+            )
+            running_soc = max(0.0, running_soc - soc_delta)
+
+            trip_dicts = [
+                {
+                    "destination": t.destination,
+                    "km": t.round_trip_km,
+                    "departure_time": (
+                        t.departure_time.strftime("%H:%M") if t.departure_time else None
+                    ),
+                    "energy_kwh": round(
+                        t.round_trip_km * consumption_kwh_per_100km / 100.0, 2
+                    ),
+                }
+                for t in day_trips
+            ]
+
+            days.append(
+                EVDailyPlan(
+                    date=day_key,
+                    trips=trip_dicts,
+                    energy_needed_kwh=round(energy_needed, 2),
+                    pv_expected_kwh=round(pv_expected, 2),
+                    grid_needed_kwh=round(grid_needed, 2),
+                    target_soc_start_of_day=round(target_soc, 1),
+                    charge_source_recommendation=charge_source,
+                )
+            )
+
+        return EVWeeklyPlan(
+            days=days,
+            current_soc_pct=current_soc_pct,
+            consumption_kwh_per_100km=consumption_kwh_per_100km,
+            battery_capacity_kwh=battery_capacity_kwh,
+            timestamp=timestamp,
+        )
