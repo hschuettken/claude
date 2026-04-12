@@ -37,6 +37,7 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from shared.ha_client import HomeAssistantClient
+from shared.influx_client import InfluxClient
 from shared.log import get_logger
 from shared.mqtt_client import MQTTClient
 from shared.nats_client import NatsPublisher
