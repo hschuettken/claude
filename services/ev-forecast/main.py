@@ -156,6 +156,16 @@ class EVForecastService:
         # NATS publisher (initialized in start() if nats_enabled)
         self.nats: NatsPublisher | None = None
 
+        # InfluxDB client for writing consumption samples
+        self.influx = InfluxClient(
+            url=self.settings.influxdb_url,
+            token=self.settings.influxdb_token,
+            org=self.settings.influxdb_org,
+        )
+
+        # Track previous mileage to compute km_delta for InfluxDB writes
+        self._prev_mileage_km: float | None = None
+
         # Google Calendar
         self._gcal_service: Any = None
 
@@ -291,7 +301,21 @@ class EVForecastService:
             state = await self.vehicle.ensure_fresh_data()
 
             # Feed consumption tracker with new mileage + SoC reading
-            self.consumption_tracker.update(state.mileage_km, state.soc_pct)
+            prev_mileage = self._prev_mileage_km
+            consumption_sample = self.consumption_tracker.update(
+                state.mileage_km, state.soc_pct
+            )
+            self._prev_mileage_km = state.mileage_km
+
+            # Write driving segment to InfluxDB when a valid sample is detected
+            if (
+                consumption_sample is not None
+                and prev_mileage is not None
+                and state.mileage_km is not None
+            ):
+                km_delta = state.mileage_km - prev_mileage
+                kwh_used = (consumption_sample / 100.0) * km_delta
+                self._write_consumption_influx(km_delta, kwh_used, consumption_sample)
 
             # Update trip predictor with latest consumption estimate
             if self.trips is not None:
@@ -321,6 +345,24 @@ class EVForecastService:
             logger.exception("vehicle_update_failed")
         finally:
             self._touch_healthcheck()
+
+    def _write_consumption_influx(
+        self,
+        distance_km: float,
+        kwh_used: float,
+        kwh_per_100km: float,
+    ) -> None:
+        """Write a driving segment measurement to InfluxDB."""
+        self.influx.write_point(
+            bucket=self.settings.influxdb_bucket,
+            measurement="ev_consumption_sample",
+            fields={
+                "distance_km": round(distance_km, 2),
+                "kwh_used": round(kwh_used, 3),
+                "kwh_per_100km": round(kwh_per_100km, 2),
+            },
+            tags={"vehicle": "audi_a6_etron"},
+        )
 
     # ------------------------------------------------------------------
     # Plan generation
