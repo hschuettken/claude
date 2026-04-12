@@ -88,6 +88,12 @@ class SmartEVChargingService(BaseService):
         self._sunset_hour: int = 21
         self._sunset_hhmm: str = "21:00"
 
+        # --- PV accuracy tracking ---
+        self._pv_accuracy_pct: float = 100.0
+
+        # --- Strategy reference (set in run()) ---
+        self._strategy: ChargingStrategy | None = None
+
         # --- Counters ---
         self._surplus_publish_counter: int = 0
         self._influx_cycle_count: int = 0
@@ -108,18 +114,6 @@ class SmartEVChargingService(BaseService):
             self._on_orchestrator_command,
         )
 
-        # Subscribe to ev-forecast plan for cross-service correlation
-        self.mqtt.subscribe(
-            "homelab/ev-forecast/plan",
-            self._on_ev_forecast_plan,
-        )
-
-        # Subscribe to pv-forecast updates to track sunset hour
-        self.mqtt.subscribe(
-            "homelab/pv-forecast/updated",
-            self._on_pv_forecast_updated,
-        )
-
         charger = WallboxController(
             ha=self.ha,
             vehicle_state_entity=self.settings.wallbox_vehicle_state_entity,
@@ -128,7 +122,7 @@ class SmartEVChargingService(BaseService):
             hems_power_number=self.settings.wallbox_hems_power_number,
         )
 
-        strategy = ChargingStrategy(
+        self._strategy = ChargingStrategy(
             max_power_w=self.settings.wallbox_max_power_w,
             min_power_w=self.settings.wallbox_min_power_w,
             eco_power_w=self.settings.eco_charge_power_w,
@@ -149,6 +143,19 @@ class SmartEVChargingService(BaseService):
             pv_defer_confidence_factor=self.settings.pv_defer_confidence_factor,
             pv_defer_min_hours_before_departure=self.settings.pv_defer_min_hours_before_departure,
         )
+        strategy = self._strategy
+
+        # Subscribe to service-to-service NATS events
+        if self.nats and self.nats.connected:
+            await self.nats.subscribe_json(
+                "energy.ev.plan_updated", self._on_ev_plan_nats
+            )
+            await self.nats.subscribe_json(
+                "energy.pv.forecast_updated", self._on_pv_forecast_nats
+            )
+            await self.nats.subscribe_json(
+                "energy.pv.accuracy_checked", self._on_pv_accuracy_nats
+            )
 
         self.logger.info(
             "service_ready",
@@ -630,6 +637,18 @@ class SmartEVChargingService(BaseService):
 
         # Reset drain mode when toggle goes off
         if not drain_pv_battery and self._drain_mode_active:
+            if self._drain_session_start_time is not None:
+                import time as _time_module
+
+                duration_min = (
+                    _time_module.monotonic() - self._drain_session_start_time
+                ) / 60.0
+                self._write_drain_session_influx(
+                    kwh_drained=self._drain_used_kwh,
+                    battery_soc_start=self._drain_session_start_soc,
+                    battery_soc_end=battery_soc,
+                    duration_minutes=duration_min,
+                )
             self._drain_mode_active = False
 
         # --- Publish drain status MQTT ---
@@ -1045,37 +1064,28 @@ class SmartEVChargingService(BaseService):
         else:
             self.logger.debug("unknown_command", command=command)
 
-    def _on_ev_forecast_plan(self, topic: str, payload: dict) -> None:
+    async def _on_ev_plan_nats(self, subject: str, payload: dict) -> None:
+        """Handle energy.ev.plan_updated from NATS."""
         trace_id = payload.get("trace_id", "")
         if trace_id:
             self._current_trace_id = trace_id
-            self.logger.info("ev_forecast_trace_id_received", trace_id=trace_id)
 
-        # Cache forecast energy need from ev-forecast plan
         days = payload.get("days", [])
         if days:
             day0 = days[0]
             self._forecast_needed_kwh = float(day0.get("energy_needed_kwh", 0.0))
-            # Compute forecast_needed_soc: current_soc + (forecast_kwh / battery_capacity * 100)
             current_soc = float(payload.get("current_soc_pct") or 0.0)
-            battery_capacity = (
-                self.settings.battery_capacity_kwh
-                if hasattr(self.settings, "battery_capacity_kwh")
-                else 77.0
-            )
-            # Use ev_battery_capacity from settings (EV battery, not home battery)
-            ev_capacity = 77.0  # default
+            ev_capacity = 77.0
             self._forecast_needed_soc = min(
                 100.0, current_soc + (self._forecast_needed_kwh / ev_capacity * 100.0)
             )
             self.logger.info(
-                "ev_forecast_plan_cached",
+                "ev_plan_nats_cached",
                 forecast_needed_kwh=round(self._forecast_needed_kwh, 1),
-                forecast_needed_soc=round(self._forecast_needed_soc, 1),
             )
 
-    def _on_pv_forecast_updated(self, topic: str, payload: dict) -> None:
-        """Extract sunset time from pv-forecast MQTT update."""
+    async def _on_pv_forecast_nats(self, subject: str, payload: dict) -> None:
+        """Handle energy.pv.forecast_updated from NATS — extract sunset hour."""
         sunset = payload.get("sunset")
         if sunset and isinstance(sunset, str) and ":" in sunset:
             try:
@@ -1084,6 +1094,25 @@ class SmartEVChargingService(BaseService):
                 self._sunset_hhmm = sunset[:5]
             except (ValueError, IndexError):
                 pass
+
+    async def _on_pv_accuracy_nats(self, subject: str, payload: dict) -> None:
+        """Handle energy.pv.accuracy_checked — adjust PV defer confidence."""
+        accuracy_pct = float(payload.get("accuracy_pct", 100.0))
+        self._pv_accuracy_pct = accuracy_pct
+        if self._strategy is None:
+            return
+        if accuracy_pct < 70.0:
+            self._strategy.pv_defer_confidence_factor = 1.95
+            self.logger.info(
+                "pv_accuracy_low_defer_confidence_raised", accuracy_pct=accuracy_pct
+            )
+        else:
+            self._strategy.pv_defer_confidence_factor = (
+                self.settings.pv_defer_confidence_factor
+            )
+            self.logger.debug(
+                "pv_accuracy_ok_defer_confidence_normal", accuracy_pct=accuracy_pct
+            )
 
     # ------------------------------------------------------------------
     # NATS helpers
@@ -1163,6 +1192,29 @@ class SmartEVChargingService(BaseService):
             )
         except Exception:
             self.logger.debug("influx_session_write_failed")
+
+    def _write_drain_session_influx(
+        self,
+        kwh_drained: float,
+        battery_soc_start: float,
+        battery_soc_end: float,
+        duration_minutes: float,
+    ) -> None:
+        """Write EV drain session to InfluxDB."""
+        try:
+            self.influx.write_point(
+                bucket=self.settings.influxdb_bucket,
+                measurement="ev_drain_session",
+                fields={
+                    "kwh_drained": round(kwh_drained, 3),
+                    "battery_soc_start_pct": round(battery_soc_start, 1),
+                    "battery_soc_end_pct": round(battery_soc_end, 1),
+                    "duration_minutes": round(duration_minutes, 1),
+                },
+                tags={"service": "smart-ev-charging"},
+            )
+        except Exception:
+            self.logger.debug("influx_drain_session_write_failed")
 
     def _write_control_decision_influx(
         self,

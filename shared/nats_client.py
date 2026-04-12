@@ -86,6 +86,32 @@ class NatsPublisher:
         except Exception as exc:
             logger.warning("nats_publish_failed", subject=subject, error=str(exc))
 
+    async def subscribe(self, subject: str, callback) -> None:
+        """Subscribe to a subject; callback receives raw nats.Msg."""
+        if not self.connected:
+            logger.warning("nats_subscribe_skipped_not_connected", subject=subject)
+            return
+        await self._nc.subscribe(subject, cb=callback)  # type: ignore[union-attr]
+        logger.info("nats_subscribed", subject=subject)
+
+    async def subscribe_json(self, subject: str, callback) -> None:
+        """Subscribe to a subject; callback receives (subject: str, payload: dict)."""
+        if not self.connected:
+            logger.warning("nats_subscribe_skipped_not_connected", subject=subject)
+            return
+
+        async def _wrapper(msg: Any) -> None:
+            try:
+                data = json.loads(msg.data.decode())
+                await callback(msg.subject, data)
+            except Exception as exc:
+                logger.warning(
+                    "nats_callback_failed", subject=msg.subject, error=str(exc)
+                )
+
+        await self._nc.subscribe(subject, cb=_wrapper)  # type: ignore[union-attr]
+        logger.info("nats_subscribed", subject=subject)
+
     def publish_sync(self, subject: str, data: dict[str, Any]) -> None:
         """Synchronous wrapper for publish().
 
