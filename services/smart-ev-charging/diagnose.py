@@ -8,7 +8,7 @@ Usage:
     docker compose run --rm smart-ev-charging python diagnose.py --step ha
     docker compose run --rm smart-ev-charging python diagnose.py --step wallbox
     docker compose run --rm smart-ev-charging python diagnose.py --step energy
-    docker compose run --rm smart-ev-charging python diagnose.py --step mqtt
+    docker compose run --rm smart-ev-charging python diagnose.py --step nats
     docker compose run --rm smart-ev-charging python diagnose.py --step cycle
     docker compose run --rm smart-ev-charging python diagnose.py --step all
 """
@@ -17,9 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import sys
-import time
 import traceback
 
 # Bootstrap shared library
@@ -35,9 +33,9 @@ INFO = "\033[94m INFO \033[0m"
 
 
 def header(title: str) -> None:
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  {title}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
 
 def result(label: str, ok: bool, detail: str = "") -> None:
@@ -64,17 +62,19 @@ def warn(label: str, detail: str = "") -> None:
 
 # -- Step: Config ──────────────────────────────────────────────
 
+
 def check_config() -> dict:
     header("Configuration")
     try:
         from config import EVChargingSettings
+
         s = EVChargingSettings()
         result("Config loaded", True)
 
         checks = {
             "HA_URL": s.ha_url,
             "HA_TOKEN": s.ha_token[:8] + "..." if s.ha_token else "(empty)",
-            "MQTT_HOST": s.mqtt_host,
+            "NATS_URL": getattr(s, "nats_url", "nats://192.168.0.50:4222"),
             "WALLBOX_MAX_POWER_W": str(s.wallbox_max_power_w),
             "WALLBOX_MIN_POWER_W": str(s.wallbox_min_power_w),
             "ECO_CHARGE_POWER_W": str(s.eco_charge_power_w),
@@ -102,6 +102,7 @@ def check_config() -> dict:
 
 # -- Step: Home Assistant ──────────────────────────────────────
 
+
 async def check_ha(settings) -> None:
     header("Home Assistant")
     from shared.ha_client import HomeAssistantClient
@@ -115,8 +116,7 @@ async def check_ha(settings) -> None:
         resp = await client.get("/config")
         if resp.status_code == 200:
             config = resp.json()
-            result("Config endpoint", True,
-                   f"HA version: {config.get('version', '?')}")
+            result("Config endpoint", True, f"HA version: {config.get('version', '?')}")
         else:
             result("Config endpoint", False, f"Status: {resp.status_code}")
 
@@ -143,6 +143,7 @@ async def check_ha(settings) -> None:
 
 # -- Step: Wallbox ─────────────────────────────────────────────
 
+
 async def check_wallbox(settings) -> None:
     header("Wallbox (Amtron)")
     from shared.ha_client import HomeAssistantClient
@@ -167,6 +168,7 @@ async def check_wallbox(settings) -> None:
         # Test WallboxController
         info("Testing WallboxController...")
         from charger import WallboxController
+
         charger = WallboxController(
             ha=ha,
             vehicle_state_entity=settings.wallbox_vehicle_state_entity,
@@ -175,11 +177,14 @@ async def check_wallbox(settings) -> None:
             hems_power_number=settings.wallbox_hems_power_number,
         )
         wb_state = await charger.read_state()
-        result("WallboxController.read_state()", True,
-               f"Vehicle: {wb_state.vehicle_state_text}\n"
-               f"Connected: {wb_state.vehicle_connected}\n"
-               f"Power: {wb_state.current_power_w} W\n"
-               f"Session: {wb_state.session_energy_kwh} kWh")
+        result(
+            "WallboxController.read_state()",
+            True,
+            f"Vehicle: {wb_state.vehicle_state_text}\n"
+            f"Connected: {wb_state.vehicle_connected}\n"
+            f"Power: {wb_state.current_power_w} W\n"
+            f"Session: {wb_state.session_energy_kwh} kWh",
+        )
 
     except Exception:
         result("Wallbox", False, traceback.format_exc())
@@ -188,6 +193,7 @@ async def check_wallbox(settings) -> None:
 
 
 # -- Step: Energy State ────────────────────────────────────────
+
 
 async def check_energy(settings) -> None:
     header("Energy State")
@@ -207,10 +213,20 @@ async def check_energy(settings) -> None:
 
     try:
         entities = [
-            ("Grid power", settings.grid_power_entity, "W", "positive=export, negative=import"),
+            (
+                "Grid power",
+                settings.grid_power_entity,
+                "W",
+                "positive=export, negative=import",
+            ),
             ("PV DC power", settings.pv_power_entity, "W", ""),
             ("House power", settings.house_power_entity, "W", "always positive"),
-            ("Battery power", settings.battery_power_entity, "W", "positive=charging, negative=discharging"),
+            (
+                "Battery power",
+                settings.battery_power_entity,
+                "W",
+                "positive=charging, negative=discharging",
+            ),
             ("Battery SoC", settings.battery_soc_entity, "%", ""),
             ("PV forecast remaining", settings.pv_forecast_remaining_entity, "kWh", ""),
         ]
@@ -229,8 +245,11 @@ async def check_energy(settings) -> None:
         if settings.ev_soc_entity:
             val_str, val_float = await read_val(settings.ev_soc_entity)
             values["EV SoC"] = val_float
-            result(f"EV SoC ({settings.ev_soc_entity})",
-                   val_float is not None, f"Value: {val_str} %")
+            result(
+                f"EV SoC ({settings.ev_soc_entity})",
+                val_float is not None,
+                f"Value: {val_str} %",
+            )
         else:
             values["EV SoC"] = None
             info("EV SoC not configured (EV_SOC_ENTITY is empty)")
@@ -242,18 +261,19 @@ async def check_energy(settings) -> None:
         ]:
             val_str, val_float = await read_val(entity_id)
             values[label] = val_float
-            result(f"{label} ({entity_id})",
-                   val_float is not None, f"Value: {val_str}")
+            result(f"{label} ({entity_id})", val_float is not None, f"Value: {val_str}")
 
         # Calculate PV surplus (same formula as the service)
         grid = values.get("Grid power") or 0
         pv = values.get("PV DC power") or 0
         battery = values.get("Battery power") or 0
         surplus = grid + battery - settings.grid_reserve_w
-        info(f"PV surplus calculation:",
-             f"grid ({grid:+.0f}) + battery ({battery:+.0f}) "
-             f"- reserve ({settings.grid_reserve_w}) = {surplus:.0f} W\n"
-             f"(EV would reclaim its own power when actually charging)")
+        info(
+            "PV surplus calculation:",
+            f"grid ({grid:+.0f}) + battery ({battery:+.0f}) "
+            f"- reserve ({settings.grid_reserve_w}) = {surplus:.0f} W\n"
+            f"(EV would reclaim its own power when actually charging)",
+        )
 
         # SoC-based target
         ev_soc = values.get("EV SoC")
@@ -275,47 +295,29 @@ async def check_energy(settings) -> None:
         await ha.close()
 
 
-# -- Step: MQTT ────────────────────────────────────────────────
+# -- Step: NATS ────────────────────────────────────────────────
 
-def check_mqtt(settings) -> None:
-    header("MQTT")
-    import paho.mqtt.client as mqtt
 
-    connected = False
+def check_nats(settings) -> None:
+    header("NATS")
+    import nats as nats_lib
 
-    def on_connect(client, userdata, flags, rc, properties=None):
-        nonlocal connected
-        connected = (rc == 0)
+    nats_url = getattr(settings, "nats_url", "nats://192.168.0.50:4222")
 
-    client = mqtt.Client(
-        callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-        client_id="smart-ev-charging-diagnose",
-    )
-    if settings.mqtt_username:
-        client.username_pw_set(settings.mqtt_username, settings.mqtt_password)
-    client.on_connect = on_connect
+    async def _check() -> bool:
+        nc = await nats_lib.connect(nats_url, connect_timeout=3)
+        await nc.close()
+        return True
 
     try:
-        client.connect(settings.mqtt_host, settings.mqtt_port)
-        client.loop_start()
-        time.sleep(2)
-        result("Connection", connected,
-               f"{settings.mqtt_host}:{settings.mqtt_port}")
-
-        if connected:
-            pub_result = client.publish(
-                "homelab/smart-ev-charging/diagnose",
-                json.dumps({"test": True}),
-            )
-            result("Publish test", pub_result.rc == 0, "Topic: homelab/smart-ev-charging/diagnose")
-
-        client.loop_stop()
-        client.disconnect()
+        connected = asyncio.run(_check())
+        result("Connection", connected, nats_url)
     except Exception:
         result("Connection", False, traceback.format_exc())
 
 
 # -- Step: Control Cycle Dry Run ───────────────────────────────
+
 
 async def check_cycle(settings) -> None:
     header("Control Cycle Dry Run")
@@ -430,23 +432,26 @@ async def check_cycle(settings) -> None:
         decision = strategy.decide(ctx)
 
         ev_soc_str = f"{ev_soc:.0f}%" if ev_soc is not None else "N/A"
-        result("Control cycle", True,
-               f"Mode: {mode.value}\n"
-               f"Vehicle: {wallbox.vehicle_state_text} (connected: {wallbox.vehicle_connected})\n"
-               f"Grid: {grid_power:+.0f} W | PV: {pv_power:.0f} W\n"
-               f"Battery: {battery_power:+.0f} W ({battery_soc:.0f}%)\n"
-               f"EV SoC: {ev_soc_str} | Target SoC: {ev_target_soc:.0f}%"
-               f" | Capacity: {ev_battery_cap:.0f} kWh\n"
-               f"Energy needed: {ctx.energy_needed_kwh:.1f} kWh\n"
-               f"PV forecast remaining: {pv_forecast_remaining:.1f} kWh\n"
-               f"Full-by-morning: {full_by_morning} | "
-               f"Target: {target_energy:.0f} kWh | "
-               f"Departure: {departure_time}\n"
-               f"--- Decision ---\n"
-               f"Target power: {decision.target_power_w} W\n"
-               f"PV surplus: {decision.pv_surplus_w:.0f} W\n"
-               f"Battery assist: {decision.battery_assist_w:.0f} W ({decision.battery_assist_reason})\n"
-               f"Reason: {decision.reason}")
+        result(
+            "Control cycle",
+            True,
+            f"Mode: {mode.value}\n"
+            f"Vehicle: {wallbox.vehicle_state_text} (connected: {wallbox.vehicle_connected})\n"
+            f"Grid: {grid_power:+.0f} W | PV: {pv_power:.0f} W\n"
+            f"Battery: {battery_power:+.0f} W ({battery_soc:.0f}%)\n"
+            f"EV SoC: {ev_soc_str} | Target SoC: {ev_target_soc:.0f}%"
+            f" | Capacity: {ev_battery_cap:.0f} kWh\n"
+            f"Energy needed: {ctx.energy_needed_kwh:.1f} kWh\n"
+            f"PV forecast remaining: {pv_forecast_remaining:.1f} kWh\n"
+            f"Full-by-morning: {full_by_morning} | "
+            f"Target: {target_energy:.0f} kWh | "
+            f"Departure: {departure_time}\n"
+            f"--- Decision ---\n"
+            f"Target power: {decision.target_power_w} W\n"
+            f"PV surplus: {decision.pv_surplus_w:.0f} W\n"
+            f"Battery assist: {decision.battery_assist_w:.0f} W ({decision.battery_assist_reason})\n"
+            f"Reason: {decision.reason}",
+        )
 
         info("NOTE: This was a dry run — no HEMS limit was written to the wallbox.")
 
@@ -458,11 +463,12 @@ async def check_cycle(settings) -> None:
 
 # -- Main ──────────────────────────────────────────────────────
 
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Smart EV Charging diagnostic tool")
     parser.add_argument(
         "--step",
-        choices=["config", "ha", "wallbox", "energy", "mqtt", "cycle", "all"],
+        choices=["config", "ha", "wallbox", "energy", "nats", "cycle", "all"],
         default="all",
         help="Which check to run (default: all)",
     )
@@ -490,15 +496,15 @@ async def main() -> None:
     if args.step in ("all", "energy"):
         await check_energy(settings)
 
-    if args.step in ("all", "mqtt"):
-        check_mqtt(settings)
+    if args.step in ("all", "nats"):
+        check_nats(settings)
 
     if args.step in ("all", "cycle"):
         await check_cycle(settings)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("  DONE")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ Usage:
     docker compose run --rm ev-forecast python diagnose.py
     docker compose run --rm ev-forecast python diagnose.py --step ha
     docker compose run --rm ev-forecast python diagnose.py --step audi
-    docker compose run --rm ev-forecast python diagnose.py --step mqtt
+    docker compose run --rm ev-forecast python diagnose.py --step nats
     docker compose run --rm ev-forecast python diagnose.py --step calendar
     docker compose run --rm ev-forecast python diagnose.py --step geocoding
     docker compose run --rm ev-forecast python diagnose.py --step plan
@@ -35,9 +35,9 @@ INFO = "\033[94m INFO \033[0m"
 
 
 def header(title: str) -> None:
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  {title}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
 
 def result(label: str, ok: bool, detail: str = "") -> None:
@@ -64,26 +64,32 @@ def warn(label: str, detail: str = "") -> None:
 
 # ── Step: Config ──────────────────────────────────────────────
 
+
 def check_config() -> dict:
     header("Configuration")
     try:
         from config import EVForecastSettings
+
         s = EVForecastSettings()
         result("Config loaded", True)
 
         checks = {
             "HA_URL": s.ha_url,
             "HA_TOKEN": s.ha_token[:8] + "..." if s.ha_token else "(empty)",
-            "MQTT_HOST": s.mqtt_host,
+            "NATS_URL": getattr(s, "nats_url", "nats://192.168.0.50:4222"),
             "EV_BATTERY_CAPACITY_NET_KWH": str(s.ev_battery_capacity_net_kwh),
             "EV_CONSUMPTION_KWH_PER_100KM": str(s.ev_consumption_kwh_per_100km),
             "EV_SOC_ENTITY": s.ev_soc_entity,
             "EV_RANGE_ENTITY": s.ev_range_entity,
             "EV_ACTIVE_ACCOUNT_ENTITY": s.ev_active_account_entity,
             "AUDI_ACCOUNT1_NAME": s.audi_account1_name,
-            "AUDI_ACCOUNT1_VIN": s.audi_account1_vin[:4] + "..." if s.audi_account1_vin else "(empty)",
+            "AUDI_ACCOUNT1_VIN": s.audi_account1_vin[:4] + "..."
+            if s.audi_account1_vin
+            else "(empty)",
             "AUDI_ACCOUNT2_NAME": s.audi_account2_name,
-            "AUDI_ACCOUNT2_VIN": s.audi_account2_vin[:4] + "..." if s.audi_account2_vin else "(empty)",
+            "AUDI_ACCOUNT2_VIN": s.audi_account2_vin[:4] + "..."
+            if s.audi_account2_vin
+            else "(empty)",
             "GOOGLE_CALENDAR_FAMILY_ID": s.google_calendar_family_id or "(not set)",
             "NICOLE_COMMUTE_KM": str(s.nicole_commute_km),
             "HENNING_TRAIN_THRESHOLD_KM": str(s.henning_train_threshold_km),
@@ -113,6 +119,7 @@ def check_config() -> dict:
 
 # ── Step: Home Assistant ──────────────────────────────────────
 
+
 async def check_ha(settings) -> None:
     header("Home Assistant")
     from shared.ha_client import HomeAssistantClient
@@ -126,9 +133,12 @@ async def check_ha(settings) -> None:
         resp = await client.get("/config")
         if resp.status_code == 200:
             config = resp.json()
-            result("Config endpoint", True,
-                   f"HA version: {config.get('version', '?')}\n"
-                   f"Location: {config.get('latitude', '?')}, {config.get('longitude', '?')}")
+            result(
+                "Config endpoint",
+                True,
+                f"HA version: {config.get('version', '?')}\n"
+                f"Location: {config.get('latitude', '?')}, {config.get('longitude', '?')}",
+            )
         else:
             result("Config endpoint", False, f"Status: {resp.status_code}")
 
@@ -154,6 +164,7 @@ async def check_ha(settings) -> None:
 
 # ── Step: Audi Connect ────────────────────────────────────────
 
+
 async def check_audi(settings) -> None:
     header("Audi Connect Sensors")
     from shared.ha_client import HomeAssistantClient
@@ -171,7 +182,11 @@ async def check_audi(settings) -> None:
         }
         if not settings.audi_single_account and settings.ev_active_account_entity:
             combined_entities["Active Account"] = settings.ev_active_account_entity
-        label = "Single-account HA sensors" if settings.audi_single_account else "Combined HA template sensors"
+        label = (
+            "Single-account HA sensors"
+            if settings.audi_single_account
+            else "Combined HA template sensors"
+        )
         info(f"{label}:")
         valid_count = 0
         for prop, entity_id in combined_entities.items():
@@ -191,6 +206,7 @@ async def check_audi(settings) -> None:
         # Test vehicle monitor
         info("Testing vehicle monitor...")
         from vehicle import RefreshConfig, VehicleConfig, VehicleMonitor
+
         vehicle_config = VehicleConfig(
             soc_entity=settings.ev_soc_entity,
             range_entity=settings.ev_range_entity,
@@ -201,23 +217,33 @@ async def check_audi(settings) -> None:
             active_account_entity=settings.ev_active_account_entity,
         )
         refresh_configs = [
-            RefreshConfig(name=settings.audi_account1_name, vin=settings.audi_account1_vin),
+            RefreshConfig(
+                name=settings.audi_account1_name, vin=settings.audi_account1_vin
+            ),
         ]
         if not settings.audi_single_account and settings.audi_account2_vin:
             refresh_configs.append(
-                RefreshConfig(name=settings.audi_account2_name, vin=settings.audi_account2_vin),
+                RefreshConfig(
+                    name=settings.audi_account2_name, vin=settings.audi_account2_vin
+                ),
             )
         monitor = VehicleMonitor(
-            ha, vehicle_config, refresh_configs, settings.ev_battery_capacity_net_kwh,
+            ha,
+            vehicle_config,
+            refresh_configs,
+            settings.ev_battery_capacity_net_kwh,
         )
         state = await monitor.read_state()
-        result("Vehicle monitor", state.is_valid,
-               f"Active account: {state.active_account}\n"
-               f"SoC: {state.soc_pct}%\n"
-               f"Range: {state.range_km} km\n"
-               f"Charging: {state.charging_state}\n"
-               f"Plug: {state.plug_state}\n"
-               f"Mileage: {state.mileage_km} km")
+        result(
+            "Vehicle monitor",
+            state.is_valid,
+            f"Active account: {state.active_account}\n"
+            f"SoC: {state.soc_pct}%\n"
+            f"Range: {state.range_km} km\n"
+            f"Charging: {state.charging_state}\n"
+            f"Plug: {state.plug_state}\n"
+            f"Mileage: {state.mileage_km} km",
+        )
 
     except Exception:
         result("Audi Connect", False, traceback.format_exc())
@@ -225,50 +251,29 @@ async def check_audi(settings) -> None:
         await ha.close()
 
 
-# ── Step: MQTT ────────────────────────────────────────────────
+# ── Step: NATS ────────────────────────────────────────────────
 
-def check_mqtt(settings) -> None:
-    header("MQTT")
-    import paho.mqtt.client as mqtt
-    import time
 
-    connected = False
-    error_msg = ""
+def check_nats(settings) -> None:
+    header("NATS")
+    import nats as nats_lib
 
-    def on_connect(client, userdata, flags, rc, properties=None):
-        nonlocal connected
-        connected = (rc == 0)
+    nats_url = getattr(settings, "nats_url", "nats://192.168.0.50:4222")
 
-    client = mqtt.Client(
-        callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-        client_id="ev-forecast-diagnose",
-    )
-    if settings.mqtt_username:
-        client.username_pw_set(settings.mqtt_username, settings.mqtt_password)
-    client.on_connect = on_connect
+    async def _check() -> bool:
+        nc = await nats_lib.connect(nats_url, connect_timeout=3)
+        await nc.close()
+        return True
 
     try:
-        client.connect(settings.mqtt_host, settings.mqtt_port)
-        client.loop_start()
-        time.sleep(2)
-        result("Connection", connected,
-               f"{settings.mqtt_host}:{settings.mqtt_port}" +
-               (f" — error: {error_msg}" if error_msg else ""))
-
-        if connected:
-            pub_result = client.publish(
-                "homelab/ev-forecast/diagnose",
-                json.dumps({"test": True}),
-            )
-            result("Publish test", pub_result.rc == 0, "Topic: homelab/ev-forecast/diagnose")
-
-        client.loop_stop()
-        client.disconnect()
+        connected = asyncio.run(_check())
+        result("Connection", connected, nats_url)
     except Exception:
         result("Connection", False, traceback.format_exc())
 
 
 # ── Step: Google Calendar ─────────────────────────────────────
+
 
 async def check_calendar(settings) -> None:
     header("Google Calendar")
@@ -277,9 +282,14 @@ async def check_calendar(settings) -> None:
     try:
         from google.oauth2.service_account import Credentials
         from googleapiclient.discovery import build
+
         result("Google API library", True)
     except ImportError:
-        result("Google API library", False, "pip install google-api-python-client google-auth")
+        result(
+            "Google API library",
+            False,
+            "pip install google-api-python-client google-auth",
+        )
         return
 
     if not settings.google_calendar_family_id:
@@ -305,13 +315,16 @@ async def check_calendar(settings) -> None:
             creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
             result("Credentials loaded", True, "From JSON env var")
         else:
-            result("Credentials loaded", False, "No credentials file or JSON configured")
+            result(
+                "Credentials loaded", False, "No credentials file or JSON configured"
+            )
             return
 
         service = build("calendar", "v3", credentials=creds)
 
         from datetime import datetime, timedelta
         from zoneinfo import ZoneInfo
+
         tz = ZoneInfo(settings.timezone)
         now = datetime.now(tz)
         time_max = (now + timedelta(days=settings.planning_horizon_days)).isoformat()
@@ -330,14 +343,19 @@ async def check_calendar(settings) -> None:
         )
 
         items = events_result.get("items", [])
-        result("Calendar events", True,
-               f"Found {len(items)} events in next {settings.planning_horizon_days} days")
+        result(
+            "Calendar events",
+            True,
+            f"Found {len(items)} events in next {settings.planning_horizon_days} days",
+        )
 
         # Show driving-relevant events
         driving_count = 0
         for item in items:
             summary = item.get("summary", "")
-            start = item.get("start", {}).get("dateTime") or item.get("start", {}).get("date", "")
+            start = item.get("start", {}).get("dateTime") or item.get("start", {}).get(
+                "date", ""
+            )
             summary_lower = summary.lower()
             if summary_lower.startswith("h:") or summary_lower.startswith("n:"):
                 driving_count += 1
@@ -352,6 +370,7 @@ async def check_calendar(settings) -> None:
 
 # ── Step: Geocoding ───────────────────────────────────────────
 
+
 async def check_geocoding(settings) -> None:
     header("Geocoding (Nominatim)")
 
@@ -361,6 +380,7 @@ async def check_geocoding(settings) -> None:
     if not lat or not lon:
         try:
             from shared.ha_client import HomeAssistantClient
+
             ha = HomeAssistantClient(settings.ha_url, settings.ha_token)
             client = await ha._get_client()
             resp = await client.get("/config")
@@ -378,7 +398,10 @@ async def check_geocoding(settings) -> None:
         return
 
     from trips import GeoDistance
-    geo = GeoDistance(home_lat=lat, home_lon=lon, road_factor=settings.geocoding_road_factor)
+
+    geo = GeoDistance(
+        home_lat=lat, home_lon=lon, road_factor=settings.geocoding_road_factor
+    )
 
     # Test with known cities
     test_cities = ["Bocholt", "Münster", "Aachen", "Stuttgart"]
@@ -386,7 +409,11 @@ async def check_geocoding(settings) -> None:
         try:
             distance = await geo.estimate_distance(city)
             if distance is not None:
-                result(f"Geocode '{city}'", True, f"Estimated road distance: {distance:.1f} km")
+                result(
+                    f"Geocode '{city}'",
+                    True,
+                    f"Estimated road distance: {distance:.1f} km",
+                )
             else:
                 result(f"Geocode '{city}'", False, "Geocoding returned no results")
         except Exception as e:
@@ -394,6 +421,7 @@ async def check_geocoding(settings) -> None:
 
 
 # ── Step: Plan dry run ────────────────────────────────────────
+
 
 async def check_plan(settings) -> None:
     header("Plan Dry Run")
@@ -416,17 +444,26 @@ async def check_plan(settings) -> None:
             active_account_entity=settings.ev_active_account_entity,
         )
         refresh_configs = [
-            RefreshConfig(name=settings.audi_account1_name, vin=settings.audi_account1_vin),
+            RefreshConfig(
+                name=settings.audi_account1_name, vin=settings.audi_account1_vin
+            ),
         ]
         if not settings.audi_single_account and settings.audi_account2_vin:
             refresh_configs.append(
-                RefreshConfig(name=settings.audi_account2_name, vin=settings.audi_account2_vin),
+                RefreshConfig(
+                    name=settings.audi_account2_name, vin=settings.audi_account2_vin
+                ),
             )
         monitor = VehicleMonitor(
-            ha, vehicle_config, refresh_configs, settings.ev_battery_capacity_net_kwh,
+            ha,
+            vehicle_config,
+            refresh_configs,
+            settings.ev_battery_capacity_net_kwh,
         )
         vehicle = await monitor.read_state()
-        info(f"Vehicle SoC: {vehicle.soc_pct}%, Range: {vehicle.range_km} km, Plug: {vehicle.plug_state}")
+        info(
+            f"Vehicle SoC: {vehicle.soc_pct}%, Range: {vehicle.range_km} km, Plug: {vehicle.plug_state}"
+        )
 
         # Resolve home location for geocoding
         lat = settings.home_latitude
@@ -441,7 +478,11 @@ async def check_plan(settings) -> None:
             except Exception:
                 pass
 
-        geo = GeoDistance(lat, lon, settings.geocoding_road_factor) if lat and lon else None
+        geo = (
+            GeoDistance(lat, lon, settings.geocoding_road_factor)
+            if lat and lon
+            else None
+        )
 
         # Set up trip predictor
         known_destinations = json.loads(settings.known_destinations)
@@ -459,14 +500,18 @@ async def check_plan(settings) -> None:
         )
 
         # Predict trips (using empty calendar for dry run)
-        day_plans = await predictor.predict_trips([], days=settings.planning_horizon_days)
+        day_plans = await predictor.predict_trips(
+            [], days=settings.planning_horizon_days
+        )
 
         for dp in day_plans:
             trip_list = ", ".join(t.label for t in dp.trips) or "no trips"
             info(f"  {dp.date}: {trip_list}")
             if dp.total_energy_kwh > 0:
-                info(f"    Total energy: {dp.total_energy_kwh:.1f} kWh, "
-                     f"Departure: {dp.earliest_departure}")
+                info(
+                    f"    Total energy: {dp.total_energy_kwh:.1f} kWh, "
+                    f"Departure: {dp.earliest_departure}"
+                )
 
         # Generate plan
         planner = ChargingPlanner(
@@ -478,16 +523,21 @@ async def check_plan(settings) -> None:
             timezone=settings.timezone,
         )
         plan = await planner.generate_plan(vehicle, day_plans)
-        result("Plan generated", True,
-               f"Current SoC: {plan.current_soc_pct}%\n"
-               f"Vehicle plugged: {plan.vehicle_plugged_in}\n"
-               f"Total energy needed: {plan.total_energy_needed_kwh:.1f} kWh")
+        result(
+            "Plan generated",
+            True,
+            f"Current SoC: {plan.current_soc_pct}%\n"
+            f"Vehicle plugged: {plan.vehicle_plugged_in}\n"
+            f"Total energy needed: {plan.total_energy_needed_kwh:.1f} kWh",
+        )
 
         for day in plan.days:
-            info(f"  {day.date}: [{day.urgency}] {day.charge_mode}",
-                 f"Need: {day.energy_to_charge_kwh:.1f} kWh, "
-                 f"Departure: {day.departure_time.strftime('%H:%M') if day.departure_time else 'none'}\n"
-                 f"Reason: {day.reason}")
+            info(
+                f"  {day.date}: [{day.urgency}] {day.charge_mode}",
+                f"Need: {day.energy_to_charge_kwh:.1f} kWh, "
+                f"Departure: {day.departure_time.strftime('%H:%M') if day.departure_time else 'none'}\n"
+                f"Reason: {day.reason}",
+            )
 
     except Exception:
         result("Plan", False, traceback.format_exc())
@@ -497,11 +547,21 @@ async def check_plan(settings) -> None:
 
 # ── Main ──────────────────────────────────────────────────────
 
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description="EV Forecast diagnostic tool")
     parser.add_argument(
         "--step",
-        choices=["config", "ha", "audi", "mqtt", "calendar", "geocoding", "plan", "all"],
+        choices=[
+            "config",
+            "ha",
+            "audi",
+            "nats",
+            "calendar",
+            "geocoding",
+            "plan",
+            "all",
+        ],
         default="all",
         help="Which check to run (default: all)",
     )
@@ -526,8 +586,8 @@ async def main() -> None:
     if args.step in ("all", "audi"):
         await check_audi(settings)
 
-    if args.step in ("all", "mqtt"):
-        check_mqtt(settings)
+    if args.step in ("all", "nats"):
+        check_nats(settings)
 
     if args.step in ("all", "calendar"):
         await check_calendar(settings)
@@ -538,9 +598,9 @@ async def main() -> None:
     if args.step in ("all", "plan"):
         await check_plan(settings)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("  DONE")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ instead of debugging the full running service.
 Usage:
     docker compose run --rm orchestrator python diagnose.py
     docker compose run --rm orchestrator python diagnose.py --step ha
-    docker compose run --rm orchestrator python diagnose.py --step mqtt
+    docker compose run --rm orchestrator python diagnose.py --step nats
     docker compose run --rm orchestrator python diagnose.py --step llm
     docker compose run --rm orchestrator python diagnose.py --step telegram
     docker compose run --rm orchestrator python diagnose.py --step calendar
@@ -21,7 +21,6 @@ import argparse
 import asyncio
 import json
 import sys
-import time
 import traceback
 
 # Bootstrap shared library
@@ -37,9 +36,9 @@ INFO = "\033[94m INFO \033[0m"
 
 
 def header(title: str) -> None:
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  {title}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
 
 def result(label: str, ok: bool, detail: str = "") -> None:
@@ -66,25 +65,32 @@ def warn(label: str, detail: str = "") -> None:
 
 # -- Step: Config ──────────────────────────────────────────────
 
+
 def check_config() -> dict:
     header("Configuration")
     try:
         from config import OrchestratorSettings
+
         s = OrchestratorSettings()
         result("Config loaded", True)
 
         checks = {
             "HA_URL": s.ha_url,
             "HA_TOKEN": s.ha_token[:8] + "..." if s.ha_token else "(empty)",
-            "MQTT_HOST": s.mqtt_host,
+            "NATS_URL": getattr(s, "nats_url", "nats://192.168.0.50:4222"),
             "LLM_PROVIDER": s.llm_provider,
-            "GEMINI_API_KEY": s.gemini_api_key[:8] + "..." if s.gemini_api_key else "(empty)",
-            "TELEGRAM_BOT_TOKEN": s.telegram_bot_token[:8] + "..." if s.telegram_bot_token else "(empty)",
+            "GEMINI_API_KEY": s.gemini_api_key[:8] + "..."
+            if s.gemini_api_key
+            else "(empty)",
+            "TELEGRAM_BOT_TOKEN": s.telegram_bot_token[:8] + "..."
+            if s.telegram_bot_token
+            else "(empty)",
             "TELEGRAM_ALLOWED_CHAT_IDS": s.telegram_allowed_chat_ids or "(none)",
             "ENABLE_PROACTIVE_SUGGESTIONS": str(s.enable_proactive_suggestions),
             "ENABLE_SEMANTIC_MEMORY": str(s.enable_semantic_memory),
             "GOOGLE_CALENDAR_FAMILY_ID": s.google_calendar_family_id or "(not set)",
-            "GOOGLE_CALENDAR_ORCHESTRATOR_ID": s.google_calendar_orchestrator_id or "(not set)",
+            "GOOGLE_CALENDAR_ORCHESTRATOR_ID": s.google_calendar_orchestrator_id
+            or "(not set)",
             "HOUSEHOLD_USERS": s.household_users,
             "HOUSEHOLD_LANGUAGE": s.household_language,
         }
@@ -107,6 +113,7 @@ def check_config() -> dict:
 
 # -- Step: Home Assistant ──────────────────────────────────────
 
+
 async def check_ha(settings) -> None:
     header("Home Assistant")
     from shared.ha_client import HomeAssistantClient
@@ -120,9 +127,12 @@ async def check_ha(settings) -> None:
         resp = await client.get("/config")
         if resp.status_code == 200:
             config = resp.json()
-            result("Config endpoint", True,
-                   f"HA version: {config.get('version', '?')}\n"
-                   f"Location: {config.get('latitude', '?')}, {config.get('longitude', '?')}")
+            result(
+                "Config endpoint",
+                True,
+                f"HA version: {config.get('version', '?')}\n"
+                f"Location: {config.get('latitude', '?')}, {config.get('longitude', '?')}",
+            )
         else:
             result("Config endpoint", False, f"Status: {resp.status_code}")
 
@@ -152,77 +162,42 @@ async def check_ha(settings) -> None:
         await ha.close()
 
 
-# -- Step: MQTT ────────────────────────────────────────────────
+# -- Step: NATS ────────────────────────────────────────────────
 
-def check_mqtt(settings) -> None:
-    header("MQTT")
-    import paho.mqtt.client as mqtt
 
-    connected = False
-    received_messages: list[str] = []
+def check_nats(settings) -> None:
+    header("NATS")
+    import nats as nats_lib
 
-    def on_connect(client, userdata, flags, rc, properties=None):
-        nonlocal connected
-        connected = (rc == 0)
-        if connected:
-            client.subscribe("homelab/+/heartbeat")
+    nats_url = getattr(settings, "nats_url", "nats://192.168.0.50:4222")
 
-    def on_message(client, userdata, msg):
-        try:
-            payload = json.loads(msg.payload)
-            service = payload.get("service", "?")
-            status = payload.get("status", "?")
-            received_messages.append(f"{service}: {status}")
-        except Exception:
-            received_messages.append(f"{msg.topic}: (parse error)")
-
-    client = mqtt.Client(
-        callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-        client_id="orchestrator-diagnose",
-    )
-    if settings.mqtt_username:
-        client.username_pw_set(settings.mqtt_username, settings.mqtt_password)
-    client.on_connect = on_connect
-    client.on_message = on_message
+    async def _check() -> bool:
+        nc = await nats_lib.connect(nats_url, connect_timeout=3)
+        await nc.close()
+        return True
 
     try:
-        client.connect(settings.mqtt_host, settings.mqtt_port)
-        client.loop_start()
-        time.sleep(3)  # wait for heartbeats
-        result("Connection", connected, f"{settings.mqtt_host}:{settings.mqtt_port}")
-
-        if connected:
-            pub_result = client.publish(
-                "homelab/orchestrator/diagnose",
-                json.dumps({"test": True}),
-            )
-            result("Publish test", pub_result.rc == 0, "Topic: homelab/orchestrator/diagnose")
-
-            if received_messages:
-                info(f"Service heartbeats received ({len(received_messages)}):")
-                for msg in received_messages[:10]:
-                    print(f"           {msg}")
-            else:
-                info("No service heartbeats received (other services may not be running)")
-
-        client.loop_stop()
-        client.disconnect()
+        connected = asyncio.run(_check())
+        result("Connection", connected, nats_url)
     except Exception:
         result("Connection", False, traceback.format_exc())
 
 
 # -- Step: LLM Provider ───────────────────────────────────────
 
+
 async def check_llm(settings) -> None:
     header("LLM Provider")
     try:
         from llm import create_provider
+
         provider = create_provider(settings)
         result("Provider created", True, f"Type: {settings.llm_provider}")
 
         # Try a simple test call
         info("Testing LLM with a simple prompt...")
         from llm.base import Message
+
         messages = [Message(role="user", content="Reply with exactly: OK")]
         response = await provider.chat(messages, tools=None)
         text = response.content or ""
@@ -236,6 +211,7 @@ async def check_llm(settings) -> None:
 
 # -- Step: Telegram ────────────────────────────────────────────
 
+
 async def check_telegram(settings) -> None:
     header("Telegram Bot")
     if not settings.telegram_bot_token:
@@ -244,6 +220,7 @@ async def check_telegram(settings) -> None:
 
     try:
         import httpx
+
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"https://api.telegram.org/bot{settings.telegram_bot_token}/getMe"
@@ -252,12 +229,17 @@ async def check_telegram(settings) -> None:
                 data = resp.json()
                 if data.get("ok"):
                     bot = data["result"]
-                    result("Bot API", True,
-                           f"Bot: @{bot.get('username', '?')}\n"
-                           f"Name: {bot.get('first_name', '?')}\n"
-                           f"ID: {bot.get('id', '?')}")
+                    result(
+                        "Bot API",
+                        True,
+                        f"Bot: @{bot.get('username', '?')}\n"
+                        f"Name: {bot.get('first_name', '?')}\n"
+                        f"ID: {bot.get('id', '?')}",
+                    )
                 else:
-                    result("Bot API", False, f"API error: {data.get('description', '?')}")
+                    result(
+                        "Bot API", False, f"API error: {data.get('description', '?')}"
+                    )
             else:
                 result("Bot API", False, f"HTTP {resp.status_code}")
 
@@ -266,7 +248,9 @@ async def check_telegram(settings) -> None:
         if chat_ids:
             info(f"Allowed chat IDs: {chat_ids}")
         else:
-            warn("No TELEGRAM_ALLOWED_CHAT_IDS configured — bot will reject all messages")
+            warn(
+                "No TELEGRAM_ALLOWED_CHAT_IDS configured — bot will reject all messages"
+            )
 
     except ImportError:
         result("httpx library", False, "pip install httpx")
@@ -276,10 +260,12 @@ async def check_telegram(settings) -> None:
 
 # -- Step: Google Calendar ─────────────────────────────────────
 
+
 async def check_calendar(settings) -> None:
     header("Google Calendar")
     try:
         from gcal import GoogleCalendarClient
+
         gcal = GoogleCalendarClient(
             credentials_file=settings.google_calendar_credentials_file,
             credentials_json=settings.google_calendar_credentials_json,
@@ -299,12 +285,17 @@ async def check_calendar(settings) -> None:
                     days_ahead=3,
                     max_results=5,
                 )
-                result("Family calendar", True,
-                       f"Calendar ID: {settings.google_calendar_family_id}\n"
-                       f"Events (next 3 days): {len(events)}")
+                result(
+                    "Family calendar",
+                    True,
+                    f"Calendar ID: {settings.google_calendar_family_id}\n"
+                    f"Events (next 3 days): {len(events)}",
+                )
                 for event in events[:3]:
-                    info(f"  {event.get('summary', '?')}",
-                         f"Start: {event.get('start', '?')}")
+                    info(
+                        f"  {event.get('summary', '?')}",
+                        f"Start: {event.get('start', '?')}",
+                    )
             except Exception as e:
                 result("Family calendar", False, str(e))
         else:
@@ -318,9 +309,12 @@ async def check_calendar(settings) -> None:
                     days_ahead=3,
                     max_results=5,
                 )
-                result("Orchestrator calendar", True,
-                       f"Calendar ID: {settings.google_calendar_orchestrator_id}\n"
-                       f"Events (next 3 days): {len(events)}")
+                result(
+                    "Orchestrator calendar",
+                    True,
+                    f"Calendar ID: {settings.google_calendar_orchestrator_id}\n"
+                    f"Events (next 3 days): {len(events)}",
+                )
             except Exception as e:
                 result("Orchestrator calendar", False, str(e))
         else:
@@ -334,15 +328,18 @@ async def check_calendar(settings) -> None:
 
 # -- Step: Memory ──────────────────────────────────────────────
 
+
 async def check_memory(settings) -> None:
     header("Memory & Semantic Memory")
 
     # Regular memory
     try:
         from memory import Memory
+
         mem = Memory(max_history=settings.max_conversation_history)
-        result("Memory system", True,
-               f"Max history: {settings.max_conversation_history}")
+        result(
+            "Memory system", True, f"Max history: {settings.max_conversation_history}"
+        )
     except Exception:
         result("Memory system", False, traceback.format_exc())
 
@@ -357,7 +354,9 @@ async def check_memory(settings) -> None:
 
         chroma = ChromaClient()
         if not chroma.heartbeat():
-            warn("ChromaDB not reachable — semantic memory disabled fallback is expected")
+            warn(
+                "ChromaDB not reachable — semantic memory disabled fallback is expected"
+            )
             return
 
         embedder = EmbeddingProvider(
@@ -372,16 +371,17 @@ async def check_memory(settings) -> None:
             recency_weight=settings.semantic_memory_recency_weight,
             recency_half_life_days=settings.semantic_memory_recency_half_life_days,
         )
-        result("Semantic memory loaded", True,
-               f"Entries: {semantic.entry_count}\n"
-               f"Provider: {settings.llm_provider}")
+        result(
+            "Semantic memory loaded",
+            True,
+            f"Entries: {semantic.entry_count}\nProvider: {settings.llm_provider}",
+        )
 
         # Test embedding
         info("Testing embedding generation...")
         test_embedding = await embedder.embed("test diagnostic query")
         if test_embedding:
-            result("Embedding API", True,
-                   f"Vector dimensions: {len(test_embedding)}")
+            result("Embedding API", True, f"Vector dimensions: {len(test_embedding)}")
         else:
             result("Embedding API", False, "No embedding returned")
 
@@ -391,44 +391,60 @@ async def check_memory(settings) -> None:
 
 # -- Step: Service Status ──────────────────────────────────────
 
-def check_services(settings) -> None:
-    header("Service Status (via MQTT)")
-    import paho.mqtt.client as mqtt
 
+def check_services(settings) -> None:
+    header("Service Status (via NATS heartbeats)")
+    import nats as nats_lib
+
+    nats_url = getattr(settings, "nats_url", "nats://192.168.0.50:4222")
     services: dict[str, dict] = {}
 
-    def on_connect(client, userdata, flags, rc, properties=None):
-        if rc == 0:
-            client.subscribe("homelab/+/heartbeat")
+    async def _collect() -> None:
+        nc = await nats_lib.connect(nats_url, connect_timeout=3)
+        sub = await nc.subscribe("heartbeat.>")
+        info("Listening for service heartbeats (5 seconds)...")
+        await asyncio.sleep(5)
+        await sub.unsubscribe()
+        while True:
+            try:
+                msg = sub.next_msg(timeout=0.0)
+                try:
+                    payload = json.loads(msg.data)
+                    service = payload.get("service", msg.subject.split(".")[-1])
+                    services[service] = {
+                        "status": payload.get("status", "?"),
+                        "uptime": payload.get("uptime_seconds", 0),
+                        "memory_mb": payload.get("memory_mb", 0),
+                    }
+                except Exception:
+                    pass
+            except Exception:
+                break
+        await nc.drain()
 
-    def on_message(client, userdata, msg):
-        try:
-            payload = json.loads(msg.payload)
-            service = payload.get("service", "unknown")
-            services[service] = {
-                "status": payload.get("status", "?"),
-                "uptime": payload.get("uptime_seconds", 0),
-                "memory_mb": payload.get("memory_mb", 0),
-            }
-        except Exception:
-            pass
+    # Drain the buffered messages after the sleep
+    async def _collect_buffered() -> None:
+        nc = await nats_lib.connect(nats_url, connect_timeout=3)
 
-    client = mqtt.Client(
-        callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-        client_id="orchestrator-diagnose-svc",
-    )
-    if settings.mqtt_username:
-        client.username_pw_set(settings.mqtt_username, settings.mqtt_password)
-    client.on_connect = on_connect
-    client.on_message = on_message
+        async def _handler(msg: Any) -> None:
+            try:
+                payload = json.loads(msg.data)
+                service = payload.get("service", msg.subject.split(".")[-1])
+                services[service] = {
+                    "status": payload.get("status", "?"),
+                    "uptime": payload.get("uptime_seconds", 0),
+                    "memory_mb": payload.get("memory_mb", 0),
+                }
+            except Exception:
+                pass
+
+        await nc.subscribe("heartbeat.>", cb=_handler)
+        info("Listening for service heartbeats (5 seconds)...")
+        await asyncio.sleep(5)
+        await nc.drain()
 
     try:
-        client.connect(settings.mqtt_host, settings.mqtt_port)
-        client.loop_start()
-        info("Listening for service heartbeats (5 seconds)...")
-        time.sleep(5)
-        client.loop_stop()
-        client.disconnect()
+        asyncio.run(_collect_buffered())
 
         if services:
             result(f"Services found: {len(services)}", True)
@@ -437,22 +453,36 @@ def check_services(settings) -> None:
                 uptime_h = data["uptime"] / 3600 if data["uptime"] else 0
                 mem = data["memory_mb"]
                 ok = status == "online"
-                result(f"  {svc}", ok,
-                       f"Status: {status} | Uptime: {uptime_h:.1f}h | Memory: {mem} MB")
+                result(
+                    f"  {svc}",
+                    ok,
+                    f"Status: {status} | Uptime: {uptime_h:.1f}h | Memory: {mem} MB",
+                )
         else:
             warn("No services responded — other services may not be running")
 
     except Exception:
-        result("MQTT connection", False, traceback.format_exc())
+        result("NATS connection", False, traceback.format_exc())
 
 
 # -- Main ──────────────────────────────────────────────────────
+
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Orchestrator diagnostic tool")
     parser.add_argument(
         "--step",
-        choices=["config", "ha", "mqtt", "llm", "telegram", "calendar", "memory", "services", "all"],
+        choices=[
+            "config",
+            "ha",
+            "nats",
+            "llm",
+            "telegram",
+            "calendar",
+            "memory",
+            "services",
+            "all",
+        ],
         default="all",
         help="Which check to run (default: all)",
     )
@@ -474,8 +504,8 @@ async def main() -> None:
     if args.step in ("all", "ha"):
         await check_ha(settings)
 
-    if args.step in ("all", "mqtt"):
-        check_mqtt(settings)
+    if args.step in ("all", "nats"):
+        check_nats(settings)
 
     if args.step in ("all", "llm"):
         await check_llm(settings)
@@ -492,9 +522,9 @@ async def main() -> None:
     if args.step in ("all", "services"):
         check_services(settings)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("  DONE")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
 
 if __name__ == "__main__":
