@@ -8,14 +8,18 @@ Selected via `input_select.ev_charge_mode`:
 
 | Mode | Behavior |
 |------|----------|
+| **Auto** | Default. Smart + auto-drain-PV-battery + multi-day PV awareness from ev-forecast weekly plan. `input_boolean.ev_drain_pv_battery` is a disable toggle (not enable). Subscribes to `energy.ev.weekly_plan` NATS. |
+| **Ready By** | One-action target SoC + deadline. Set `input_number.ev_ready_by_target_soc` + `input_datetime.ev_ready_by_deadline`. System picks PV-only if forecast sufficient, else grid+PV. |
+| **PV Only** | Never grid. Multi-day completion estimate via `estimated_completion_days`. |
 | Off | Wallbox paused (HEMS = 0 W) |
-| PV Surplus | Dynamic tracking of solar surplus only |
-| Smart | PV surplus + grid fill by departure (with "Full by Morning") |
+| PV Surplus | Dynamic tracking of solar surplus only (legacy, use PV Only instead) |
+| Smart | PV surplus + grid fill by departure (legacy, use Auto instead) |
 | Eco | Fixed ~5 kW constant |
 | Fast | Fixed 11 kW maximum |
 | Manual | Service hands off — user controls wallbox directly via HA |
+| Manual Until | Charge to target kWh/SoC then stop |
 
-**"Full by Morning" modifier** (`input_boolean.ev_full_by_morning`): When enabled with PV Surplus or Smart mode, calculates whether the target energy can be reached by departure time. If not, escalates to grid charging as the deadline approaches.
+**"Full by Morning" modifier** (`input_boolean.ev_full_by_morning`): When enabled with PV Surplus or Smart mode, escalates to grid charging as departure deadline approaches. In Auto mode this happens automatically.
 
 ## EV SoC integration (Audi Connect)
 
