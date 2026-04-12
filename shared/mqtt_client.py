@@ -1,4 +1,22 @@
-"""MQTT client wrapper for inter-service messaging.
+"""MQTT client wrapper for inter-service messaging — DEPRECATED.
+
+All services have been migrated to NATS JetStream (Session 28).
+Use shared.nats_client.NatsPublisher for all new code.
+"""
+
+import warnings
+
+warnings.warn(
+    "shared.mqtt_client is deprecated and scheduled for removal. "
+    "Use shared.nats_client.NatsPublisher instead. "
+    "This file is kept only as a legacy reference (Session 28 migration).",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
+"""Original docstring preserved below for reference:
+
+MQTT client wrapper for inter-service messaging.
 
 Provides a simple pub/sub interface. Services use MQTT topics to
 communicate without direct dependencies on each other.
@@ -75,7 +93,9 @@ class MQTTClient:
         self._client.on_connect = self._on_connect
         self._client.on_message = self._on_message
 
-    def _on_connect(self, client: Any, userdata: Any, flags: Any, rc: Any, properties: Any = None) -> None:
+    def _on_connect(
+        self, client: Any, userdata: Any, flags: Any, rc: Any, properties: Any = None
+    ) -> None:
         logger.info("mqtt_connected", host=self.host, port=self.port)
         # Re-subscribe on reconnect
         for topic in self._handlers:
@@ -124,6 +144,7 @@ class MQTTClient:
     def connect_background(self) -> None:
         """Connect and start the network loop in a background thread."""
         import time as _time
+
         last_exc = None
         for attempt in range(10):
             try:
@@ -175,14 +196,18 @@ class MQTTClient:
     def _publish_error(self, original_topic: str, payload: Any, exc: Exception) -> None:
         """Publish failed message metadata to a dead-letter error topic."""
         try:
-            error_payload = json.dumps({
-                "original_topic": original_topic,
-                "original_payload": payload if isinstance(payload, dict) else str(payload),
-                "error": str(exc),
-                "error_type": type(exc).__name__,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "service": self._client_id,
-            })
+            error_payload = json.dumps(
+                {
+                    "original_topic": original_topic,
+                    "original_payload": payload
+                    if isinstance(payload, dict)
+                    else str(payload),
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "service": self._client_id,
+                }
+            )
             self._client.publish(
                 f"homelab/errors/{self._client_id}",
                 error_payload,
