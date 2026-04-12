@@ -9,7 +9,7 @@ Guidance for AI assistants working on this repository.
 - **Repository**: `hschuettken/claude`
 - **Language**: Python 3.12
 - **Orchestration**: Docker Compose (one container per service)
-- **Integrations**: Home Assistant (REST/WebSocket), InfluxDB v2 (Flux), MQTT (Mosquitto)
+- **Integrations**: Home Assistant (REST/WebSocket), InfluxDB v2 (Flux), **NATS JetStream** (primary event bus), MQTT only via nats-mqtt-bridge
 
 ## Services
 
@@ -155,28 +155,31 @@ Every service inherits from `shared.service.BaseService`. This gives you:
 - VS Code debugger support (via `DEBUG_SERVICE` env var)
 - Graceful shutdown with resource cleanup
 
-### MQTT heartbeat
+### NATS heartbeat (Session 28 — post-migration)
 
-All services automatically publish to `homelab/{service-name}/heartbeat` every 60s:
+All services publish heartbeats to `heartbeat.{service-name}` on NATS every 60s:
 
 ```json
 {"status": "online", "service": "pv-forecast", "uptime_seconds": 3661.2, "memory_mb": 42.3}
 ```
 
-Override `health_check()` to add custom status. Publishes `"offline"` on graceful shutdown. Configure interval via `HEARTBEAT_INTERVAL_SECONDS` (0 to disable).
+The `nats-mqtt-bridge` (:8235) translates `heartbeat.{service}` → MQTT `homelab/{service}/heartbeat` automatically so HA dashboards still work.
 
-### MQTT vs NATS — which to use
+`NatsPublisher` in `shared/nats_client.py` provides `publish()` and `subscribe_json()`. `self.mqtt` is `None` (backward-compat sentinel only).
 
-**Rule: NATS for everything we control. MQTT only for things we don't control.**
+### NATS — the only event bus (Session 28)
 
-| Use case | Transport | Why |
-|----------|-----------|-----|
-| Service-to-service events (energy, plans, state changes) | **NATS JetStream** | Durable, replayable, consumer groups |
-| HA auto-discovery (`homeassistant/…/config`) | **MQTT** | HA protocol requirement |
-| Heartbeat / MQTT status topics | **MQTT** | BaseService pattern; HA can consume |
-| Third-party device integration | **MQTT** | Devices speak MQTT |
+**All services publish to NATS. No service imports paho or aiomqtt directly.**
 
-`NatsPublisher` in `shared/nats_client.py` provides both `publish()` and `subscribe_json()`.
+| Use case | Subject pattern | Bridge? |
+|----------|----------------|---------|
+| Energy service events | `energy.pv.forecast.*`, `energy.ev.*` | Yes → MQTT for HA dashboards |
+| HA auto-discovery | `ha.discovery.{component}.{node}.{id}.config` | Yes → MQTT `homeassistant/…/config` (retained) |
+| Heartbeats | `heartbeat.{service}` | Yes → MQTT `homelab/{service}/heartbeat` |
+| Governance/alerts | `governance.alert.*` | No (NATS-native) |
+| HA state inbound | `ha.state.{domain}.{entity}` | From MQTT `homeassistant/+/+/state` |
+| Bootstrap telemetry | `bootstrap.node.*.telemetry` | From MQTT `homelab/nodes/+/telemetry` |
+| Frigate events | `frigate.events`, `frigate.detection.*` | From MQTT `frigate/…` |
 
 ### MQTT topic convention (HA integration only)
 
@@ -186,7 +189,7 @@ homelab/{service-name}/{event-type}
 
 Used only for: heartbeat, HA sensor state topics, and MQTT discovery config payloads.
 
-### Inter-service commands (MQTT, pending migration to NATS)
+### Inter-service commands (NATS, post-Session 28 migration)
 
 The orchestrator currently sends commands to services via MQTT:
 
