@@ -22,6 +22,20 @@ from memory import Memory
 from semantic_memory import EmbeddingProvider, SemanticMemory
 from tools import ToolExecutor
 
+import companion.db as companion_db  # noqa: F401
+import companion.migrations as companion_migrations  # noqa: F401
+from companion.chat import ChatEngine  # noqa: F401
+from companion.cost import CostTracker  # noqa: F401
+from companion.dispatch import DispatchManager  # noqa: F401
+from companion.events import KairosEventPublisher  # noqa: F401
+from companion.hot_state import HotStateSubscriber  # noqa: F401
+from companion.memory import MemoryManager  # noqa: F401
+from companion.metrics import KairosMetrics  # noqa: F401
+from companion.persona import PersonaBuilder  # noqa: F401
+from companion.rag import RAGEngine  # noqa: F401
+from companion.router import init_router as init_companion_router  # noqa: F401
+from companion.tools import ToolRegistry  # noqa: F401
+
 HEALTHCHECK_FILE = Path("/app/data/healthcheck")
 
 
@@ -156,6 +170,130 @@ class OrchestratorService(BaseService):
             "energy.ev.forecast.clarification_needed", self._on_ev_clarification
         )
 
+        # --- Companion module (Kairos) ---
+        companion_pool_ready: bool = False
+        companion_chat_engine: ChatEngine | None = None
+        companion_dispatch: DispatchManager | None = None
+        companion_memory_mgr: MemoryManager | None = None
+        companion_events: KairosEventPublisher | None = None
+        companion_hot: HotStateSubscriber | None = None
+
+        try:
+            companion_pool = await companion_db.get_pool(self.settings)
+            await companion_migrations.run_migrations(companion_pool)
+            companion_pool_ready = True
+            self.logger.info("companion_db_ready")
+
+            import os
+            import redis.asyncio as aioredis
+
+            redis_url = getattr(
+                self.settings, "redis_url", "redis://192.168.0.78:6379/0"
+            )
+            nats_url = getattr(self.settings, "nats_url", "nats://192.168.0.50:4222")
+            llm_router_url = getattr(
+                self.settings, "llm_router_url", "http://192.168.0.50:8070"
+            )
+            oracle_url = getattr(
+                self.settings, "oracle_url", "http://192.168.0.50:8225"
+            )
+
+            # Hot state subscriber
+            companion_hot = HotStateSubscriber(nats_url=nats_url, redis_url=redis_url)
+            try:
+                await companion_hot.start()
+            except Exception as exc:
+                self.logger.warning("companion_hot_state_start_failed", error=str(exc))
+                companion_hot = None
+
+            # Memory manager
+            companion_memory_mgr = MemoryManager(
+                pool=companion_pool, redis_url=redis_url
+            )
+            try:
+                await companion_memory_mgr.connect()
+            except Exception as exc:
+                self.logger.warning("companion_memory_connect_failed", error=str(exc))
+
+            # Tool registry
+            policy_path = os.path.join(
+                os.path.dirname(__file__), "companion", "tools_policy.yaml"
+            )
+            companion_tools = ToolRegistry(
+                oracle_url=oracle_url, policy_path=policy_path
+            )
+            try:
+                await companion_tools.load()
+            except Exception as exc:
+                self.logger.warning("companion_tools_load_failed", error=str(exc))
+
+            # RAG engine
+            companion_rag = RAGEngine(
+                pool=companion_pool,
+                redis_url=redis_url,
+                graphrag_url=getattr(
+                    self.settings,
+                    "graphrag_url",
+                    "http://192.168.0.50:8060/api/v1/graph-rag",
+                ),
+                scout_url=getattr(
+                    self.settings, "scout_url", "http://192.168.0.50:8888"
+                ),
+                oracle_url=oracle_url,
+            )
+
+            # Persona builder
+            companion_persona = PersonaBuilder()
+
+            # Event publisher
+            companion_events = KairosEventPublisher(nats_url=nats_url)
+            try:
+                await companion_events.connect()
+            except Exception as exc:
+                self.logger.warning("companion_events_connect_failed", error=str(exc))
+                companion_events = None
+
+            # Metrics + cost tracker
+            companion_metrics = KairosMetrics()
+            companion_cost: CostTracker | None = None
+            try:
+                companion_redis = aioredis.from_url(redis_url)
+                companion_cost = CostTracker(redis_client=companion_redis)
+            except Exception as exc:
+                self.logger.warning(
+                    "companion_cost_tracker_init_failed", error=str(exc)
+                )
+
+            # Chat engine
+            fallback_hot = HotStateSubscriber(nats_url=nats_url, redis_url=redis_url)
+            companion_chat_engine = ChatEngine(
+                memory=companion_memory_mgr,
+                hot_state=companion_hot if companion_hot is not None else fallback_hot,
+                tools=companion_tools,
+                rag=companion_rag,
+                persona=companion_persona,
+                llm_router_url=llm_router_url,
+                event_publisher=companion_events,
+                metrics=companion_metrics,
+                cost_tracker=companion_cost,
+            )
+
+            # Dispatch manager
+            companion_dispatch = DispatchManager(pool=companion_pool)
+
+            # Wire router dependencies
+            init_companion_router(
+                chat_engine=companion_chat_engine,
+                dispatch_manager=companion_dispatch,
+                event_publisher=companion_events,
+                metrics=companion_metrics,
+                cost_tracker=companion_cost,
+            )
+            self.logger.info("companion_router_wired")
+
+        except Exception as exc:
+            self.logger.warning("companion_init_failed", error=str(exc))
+
         api_task: asyncio.Task | None = None
         if self.settings.orchestrator_api_key:
             api_app = create_app(
@@ -165,6 +303,8 @@ class OrchestratorService(BaseService):
                 settings=self.settings,
                 service_states=self._service_states,
                 start_time=time.monotonic(),
+                companion_chat_engine=companion_chat_engine,
+                companion_dispatch_manager=companion_dispatch,
             )
             api_task = asyncio.create_task(
                 start_api_server(
@@ -203,6 +343,25 @@ class OrchestratorService(BaseService):
                 await api_task
             except asyncio.CancelledError:
                 pass
+
+        # Companion shutdown
+        if companion_memory_mgr is not None:
+            try:
+                await companion_memory_mgr.close()
+            except Exception:
+                pass
+        if companion_hot is not None:
+            try:
+                await companion_hot.stop()
+            except Exception:
+                pass
+        if companion_events is not None:
+            try:
+                await companion_events.close()
+            except Exception:
+                pass
+        if companion_pool_ready:
+            await companion_db.close_pool()
 
         self.logger.info("orchestrator_stopped")
 

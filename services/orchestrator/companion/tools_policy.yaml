@@ -1,0 +1,64 @@
+# Kairos Tool Policy
+# Defines approval gates for tool execution.
+#
+# approval: auto | confirm | always_confirm
+#   auto = execute without user confirmation
+#   confirm = ask user if callback available, auto-execute in headless mode
+#   always_confirm = require explicit user approval before executing
+
+tools:
+  scout: auto
+
+  ops_bridge:
+    default: confirm
+    endpoints:
+      /deploy: always_confirm
+      /restart: always_confirm
+      /exec: always_confirm
+
+  bootstrap_api:
+    default: confirm
+    endpoints:
+      /exec: always_confirm
+
+  envctl: always_confirm
+
+  neo4j: auto
+
+  redis: auto
+
+  workflow_engine:
+    default: confirm
+    endpoints:
+      /runs: confirm
+
+  llm_router: auto
+
+  feature_registry: auto
+
+  marketing: auto
+
+  life_admin: auto
+
+  proxmox_api: confirm
+
+  opnsense_api: confirm
+
+  pihole_api: auto
+
+  dns_deployer:
+    default: confirm
+    endpoints:
+      /deploy: always_confirm
+
+  dhcp_automation: confirm
+
+  omada_api: auto
+
+  mikrotik_api: auto
+
+  bifrost: auto
+
+  orchestrator: auto
+
+  nats_monitor: auto

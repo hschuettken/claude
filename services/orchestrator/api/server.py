@@ -34,6 +34,8 @@ def create_app(
     settings: Any,
     service_states: dict[str, dict[str, Any]],
     start_time: float,
+    companion_chat_engine: Any = None,
+    companion_dispatch_manager: Any = None,
 ) -> FastAPI:
     """Build the FastAPI app with REST routes and MCP server mounted."""
 
@@ -50,7 +52,8 @@ def create_app(
     # --- Auth middleware ---
     if settings.orchestrator_api_key:
         app.add_middleware(
-            APIKeyMiddleware, api_key=settings.orchestrator_api_key,
+            APIKeyMiddleware,
+            api_key=settings.orchestrator_api_key,
         )
         logger.info("api_auth_enabled")
     else:
@@ -71,6 +74,16 @@ def create_app(
         start_time=start_time,
     )
     app.include_router(routes.router)
+
+    # --- Companion router (Kairos) ---
+    if companion_chat_engine is not None or companion_dispatch_manager is not None:
+        try:
+            from companion.router import router as companion_router
+
+            app.include_router(companion_router)
+            logger.info("companion_router_registered", prefix="/companion")
+        except Exception as exc:
+            logger.warning("companion_router_register_failed", error=str(exc))
 
     # --- Health endpoint (exempt from auth) ---
     @app.get("/_health", tags=["health"])
