@@ -227,14 +227,17 @@ class OrchestratorService(BaseService):
             except Exception as exc:
                 self.logger.warning("companion_tools_load_failed", error=str(exc))
 
+            # Shared Redis client (used by RAG + cost tracker)
+            companion_redis = aioredis.from_url(redis_url)
+
             # RAG engine
             companion_rag = RAGEngine(
+                redis_client=companion_redis,
                 pool=companion_pool,
-                redis_url=redis_url,
                 graphrag_url=getattr(
                     self.settings,
                     "graphrag_url",
-                    "http://192.168.0.50:8060/api/v1/graph-rag",
+                    "http://192.168.0.50:8060/api/v1/graph-rag/search",
                 ),
                 scout_url=getattr(
                     self.settings, "scout_url", "http://192.168.0.50:8888"
@@ -257,7 +260,6 @@ class OrchestratorService(BaseService):
             companion_metrics = KairosMetrics()
             companion_cost: CostTracker | None = None
             try:
-                companion_redis = aioredis.from_url(redis_url)
                 companion_cost = CostTracker(redis_client=companion_redis)
             except Exception as exc:
                 self.logger.warning(
