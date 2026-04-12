@@ -165,17 +165,30 @@ All services automatically publish to `homelab/{service-name}/heartbeat` every 6
 
 Override `health_check()` to add custom status. Publishes `"offline"` on graceful shutdown. Configure interval via `HEARTBEAT_INTERVAL_SECONDS` (0 to disable).
 
-### MQTT topic convention
+### MQTT vs NATS — which to use
+
+**Rule: NATS for everything we control. MQTT only for things we don't control.**
+
+| Use case | Transport | Why |
+|----------|-----------|-----|
+| Service-to-service events (energy, plans, state changes) | **NATS JetStream** | Durable, replayable, consumer groups |
+| HA auto-discovery (`homeassistant/…/config`) | **MQTT** | HA protocol requirement |
+| Heartbeat / MQTT status topics | **MQTT** | BaseService pattern; HA can consume |
+| Third-party device integration | **MQTT** | Devices speak MQTT |
+
+`NatsPublisher` in `shared/nats_client.py` provides both `publish()` and `subscribe_json()`.
+
+### MQTT topic convention (HA integration only)
 
 ```
 homelab/{service-name}/{event-type}
 ```
 
-Examples: `homelab/energy-monitor/price-changed`, `homelab/climate-control/setpoint-updated`.
+Used only for: heartbeat, HA sensor state topics, and MQTT discovery config payloads.
 
-### Inter-service commands via MQTT
+### Inter-service commands (MQTT, pending migration to NATS)
 
-The orchestrator can send commands to other services via:
+The orchestrator currently sends commands to services via MQTT:
 
 ```
 homelab/orchestrator/command/{service-name}
@@ -183,7 +196,7 @@ homelab/orchestrator/command/{service-name}
 
 Payload: `{"command": "refresh"}`, `{"command": "retrain"}`, `{"command": "refresh_vehicle"}`.
 
-Every service subscribes to its command topic on startup. The orchestrator exposes this via the `request_service_refresh` LLM tool.
+**Note**: This is a legacy pattern. New inter-service communication should use NATS subjects (e.g., `energy.pv.forecast_updated`). The orchestrator command topics will migrate to NATS once the orchestrator is updated.
 
 | Service | Supported Commands |
 |---------|-------------------|
