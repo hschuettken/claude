@@ -10,7 +10,7 @@ from nicegui import ui
 from layout import COLORS, create_page_layout
 
 if TYPE_CHECKING:
-    from shared.mqtt_client import MQTTClient
+    from shared.nats_client import NatsPublisher
 
     from config import DashboardSettings
     from state import DashboardState
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 def setup(
     state: DashboardState,
     settings: DashboardSettings,
-    mqtt: MQTTClient,
+    nats: NatsPublisher,
 ) -> None:
     """Register the chat page."""
 
@@ -27,14 +27,16 @@ def setup(
     def chat_page() -> None:
         create_page_layout("/chat")
 
-        with ui.column().classes("w-full max-w-4xl mx-auto p-6 gap-4").style(
-            "height: calc(100vh - 80px)"
+        with (
+            ui.column()
+            .classes("w-full max-w-4xl mx-auto p-6 gap-4")
+            .style("height: calc(100vh - 80px)")
         ):
             with ui.row().classes("items-center gap-2"):
                 ui.icon("chat").style(f"color: {COLORS['primary']}")
-                ui.label("Chat with Orchestrator").classes(
-                    "text-xl font-bold"
-                ).style("color: #e2e8f0")
+                ui.label("Chat with Orchestrator").classes("text-xl font-bold").style(
+                    "color: #e2e8f0"
+                )
 
             # Chat message area
             chat_scroll = (
@@ -92,10 +94,10 @@ def setup(
                     state.add_chat_message("user", text)
                     msg_input.value = ""
 
-                    # Send via MQTT
+                    # Send via NATS
                     request_id = state.send_chat_request()
-                    mqtt.publish(
-                        "homelab/orchestrator/command/dashboard",
+                    nats.publish_sync(
+                        "services.dashboard.chat",
                         {
                             "command": "chat",
                             "message": text,
@@ -166,8 +168,12 @@ def _render_message(msg: dict) -> None:
     time_str = time.strftime("%H:%M", time.localtime(ts)) if ts else ""
 
     with ui.column().classes(f"w-full {align}"):
-        with ui.card().classes("p-3 max-w-[80%]").style(
-            f"background: {bg} !important; border: 1px solid {border} !important"
+        with (
+            ui.card()
+            .classes("p-3 max-w-[80%]")
+            .style(
+                f"background: {bg} !important; border: 1px solid {border} !important"
+            )
         ):
             with ui.row().classes("items-center gap-2 mb-1"):
                 ui.icon(icon).style(f"color: {name_color}; font-size: 1rem")
@@ -183,13 +189,15 @@ def _render_message(msg: dict) -> None:
 def _render_typing_indicator() -> None:
     """Render a typing/thinking indicator."""
     with ui.column().classes("w-full items-start"):
-        with ui.card().classes("p-3").style(
-            "background: #1e1e2e !important; border: 1px solid #2d2d4a !important"
+        with (
+            ui.card()
+            .classes("p-3")
+            .style(
+                "background: #1e1e2e !important; border: 1px solid #2d2d4a !important"
+            )
         ):
             with ui.row().classes("items-center gap-2"):
-                ui.icon("smart_toy").style(
-                    f"color: {COLORS['solar']}; font-size: 1rem"
-                )
+                ui.icon("smart_toy").style(f"color: {COLORS['solar']}; font-size: 1rem")
                 ui.label("Orchestrator").classes("text-xs font-bold").style(
                     f"color: {COLORS['solar']}"
                 )

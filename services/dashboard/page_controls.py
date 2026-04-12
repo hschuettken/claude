@@ -10,7 +10,7 @@ from layout import COLORS, create_page_layout, section_title
 
 if TYPE_CHECKING:
     from shared.ha_client import HomeAssistantClient
-    from shared.mqtt_client import MQTTClient
+    from shared.nats_client import NatsPublisher
 
     from config import DashboardSettings
     from state import DashboardState
@@ -20,7 +20,7 @@ def setup(
     state: DashboardState,
     settings: DashboardSettings,
     ha: HomeAssistantClient,
-    mqtt: MQTTClient,
+    nats: NatsPublisher,
 ) -> None:
     """Register the controls page."""
 
@@ -35,9 +35,9 @@ def setup(
             with ui.card().classes("w-full p-5"):
                 with ui.row().classes("items-center gap-2 mb-4"):
                     ui.icon("electric_car").style(f"color: {COLORS['ev']}")
-                    ui.label("Wallbox & Charging").classes(
-                        "text-lg font-bold"
-                    ).style("color: #e2e8f0")
+                    ui.label("Wallbox & Charging").classes("text-lg font-bold").style(
+                        "color: #e2e8f0"
+                    )
 
                 with ui.column().classes("w-full gap-4"):
                     # Charge mode select
@@ -60,11 +60,15 @@ def setup(
                         current_mode = state.get_entity_state(
                             settings.ev_charge_mode_entity
                         )
-                        mode_select = ui.select(
-                            mode_options,
-                            value=current_mode if current_mode in mode_options else None,
-                        ).classes("flex-1").props(
-                            'outlined dense dark color="deep-purple-4"'
+                        mode_select = (
+                            ui.select(
+                                mode_options,
+                                value=current_mode
+                                if current_mode in mode_options
+                                else None,
+                            )
+                            .classes("flex-1")
+                            .props('outlined dense dark color="deep-purple-4"')
                         )
 
                         async def on_mode_change(e: Any) -> None:
@@ -85,9 +89,11 @@ def setup(
                         current_soc = state.get_entity_float(
                             settings.ev_target_soc_entity, 80
                         )
-                        soc_label = ui.label(f"{current_soc:.0f}%").classes(
-                            "text-lg font-bold w-16 text-right"
-                        ).style(f"color: {COLORS['ev']}")
+                        soc_label = (
+                            ui.label(f"{current_soc:.0f}%")
+                            .classes("text-lg font-bold w-16 text-right")
+                            .style(f"color: {COLORS['ev']}")
+                        )
                         soc_slider = (
                             ui.slider(min=20, max=100, step=5, value=current_soc)
                             .classes("flex-1")
@@ -107,9 +113,9 @@ def setup(
                                 "Target SoC",
                             )
 
-                        ui.button(
-                            "Set", on_click=on_soc_commit
-                        ).props('flat dense color="deep-purple-4"')
+                        ui.button("Set", on_click=on_soc_commit).props(
+                            'flat dense color="deep-purple-4"'
+                        )
 
                     # Departure time
                     with ui.row().classes("items-center gap-4 w-full"):
@@ -119,11 +125,17 @@ def setup(
                         dep_state = state.get_entity_state(
                             settings.ev_departure_time_entity
                         )
-                        dep_val = dep_state if dep_state not in ("unknown", "unavailable") else "07:00"
-                        dep_input = ui.input(
-                            value=dep_val,
-                        ).classes("flex-1").props(
-                            'outlined dense dark color="deep-purple-4"'
+                        dep_val = (
+                            dep_state
+                            if dep_state not in ("unknown", "unavailable")
+                            else "07:00"
+                        )
+                        dep_input = (
+                            ui.input(
+                                value=dep_val,
+                            )
+                            .classes("flex-1")
+                            .props('outlined dense dark color="deep-purple-4"')
                         )
 
                         async def on_dep_change() -> None:
@@ -135,9 +147,9 @@ def setup(
                                 "Departure time",
                             )
 
-                        ui.button(
-                            "Set", on_click=on_dep_change
-                        ).props('flat dense color="deep-purple-4"')
+                        ui.button("Set", on_click=on_dep_change).props(
+                            'flat dense color="deep-purple-4"'
+                        )
 
                     # Full by morning toggle
                     with ui.row().classes("items-center gap-4 w-full"):
@@ -174,9 +186,9 @@ def setup(
             with ui.card().classes("w-full p-5"):
                 with ui.row().classes("items-center gap-2 mb-4"):
                     ui.icon("bolt").style(f"color: {COLORS['warning']}")
-                    ui.label("Service Commands").classes(
-                        "text-lg font-bold"
-                    ).style("color: #e2e8f0")
+                    ui.label("Service Commands").classes("text-lg font-bold").style(
+                        "color: #e2e8f0"
+                    )
 
                 with ui.row().classes("gap-3 flex-wrap"):
 
@@ -188,13 +200,11 @@ def setup(
                         color: str = "indigo-6",
                     ) -> None:
                         def send() -> None:
-                            mqtt.publish(
-                                f"homelab/orchestrator/command/{service}",
+                            nats.publish_sync(
+                                f"services.orchestrator.command.{service}",
                                 {"command": command},
                             )
-                            ui.notify(
-                                f"Sent '{command}' to {service}", type="info"
-                            )
+                            ui.notify(f"Sent '{command}' to {service}", type="info")
 
                         ui.button(label, icon=icon, on_click=send).props(
                             f'color="{color}" no-caps'
@@ -274,7 +284,10 @@ def setup(
 
 
 async def _set_input_select(
-    ha: HomeAssistantClient, entity_id: str, option: str, label: str,
+    ha: HomeAssistantClient,
+    entity_id: str,
+    option: str,
+    label: str,
 ) -> None:
     try:
         await ha.call_service(
@@ -288,7 +301,10 @@ async def _set_input_select(
 
 
 async def _set_input_number(
-    ha: HomeAssistantClient, entity_id: str, value: float, label: str,
+    ha: HomeAssistantClient,
+    entity_id: str,
+    value: float,
+    label: str,
 ) -> None:
     try:
         await ha.call_service(
@@ -302,7 +318,10 @@ async def _set_input_number(
 
 
 async def _set_input_datetime(
-    ha: HomeAssistantClient, entity_id: str, time_str: str, label: str,
+    ha: HomeAssistantClient,
+    entity_id: str,
+    time_str: str,
+    label: str,
 ) -> None:
     try:
         await ha.call_service(
