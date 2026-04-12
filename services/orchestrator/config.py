@@ -38,9 +38,15 @@ class OrchestratorSettings(BaseSettings):
     enable_proactive_suggestions: bool = True
     enable_morning_briefing: bool = True
     enable_evening_briefing: bool = False
-    proactive_startup_delay_seconds: int = 120  # delay before optimization suggestions start
-    consolidation_startup_delay_seconds: int = 300  # delay before memory consolidation starts
-    consolidation_check_interval_seconds: int = 600  # how often to check if consolidation is due
+    proactive_startup_delay_seconds: int = (
+        120  # delay before optimization suggestions start
+    )
+    consolidation_startup_delay_seconds: int = (
+        300  # delay before memory consolidation starts
+    )
+    consolidation_check_interval_seconds: int = (
+        600  # how often to check if consolidation is due
+    )
 
     # --- Energy entities (defaults match CLAUDE.md setup) ---
     grid_power_entity: str = "sensor.power_meter_active_power"
@@ -54,7 +60,9 @@ class OrchestratorSettings(BaseSettings):
 
     # PV forecast sensors (from pv-forecast service)
     pv_forecast_today_entity: str = "sensor.pv_ai_forecast_today_kwh"
-    pv_forecast_today_remaining_entity: str = "sensor.pv_ai_forecast_today_remaining_kwh"
+    pv_forecast_today_remaining_entity: str = (
+        "sensor.pv_ai_forecast_today_remaining_kwh"
+    )
     pv_forecast_tomorrow_entity: str = "sensor.pv_ai_forecast_tomorrow_kwh"
 
     # PV production sensors
@@ -79,7 +87,9 @@ class OrchestratorSettings(BaseSettings):
     google_calendar_credentials_file: str = ""  # path to service account JSON key
     google_calendar_credentials_json: str = ""  # or base64-encoded JSON (for Docker)
     google_calendar_family_id: str = ""  # shared family calendar (read-only)
-    google_calendar_orchestrator_id: str = ""  # orchestrator's own calendar (read/write)
+    google_calendar_orchestrator_id: str = (
+        ""  # orchestrator's own calendar (read/write)
+    )
 
     # --- Memory ---
     max_conversation_history: int = 50
@@ -88,8 +98,12 @@ class OrchestratorSettings(BaseSettings):
 
     # --- Knowledge store (structured facts + memory.md) ---
     enable_knowledge_store: bool = True  # structured knowledge persistence
-    memory_document_max_size: int = 4000  # max chars for memory.md (injected into context)
-    knowledge_auto_extract: bool = True  # LLM auto-extracts structured facts from conversations
+    memory_document_max_size: int = (
+        4000  # max chars for memory.md (injected into context)
+    )
+    knowledge_auto_extract: bool = (
+        True  # LLM auto-extracts structured facts from conversations
+    )
 
     # --- Semantic memory tuning ---
     semantic_memory_max_entries: int = 5000  # cap to keep file size reasonable
@@ -116,11 +130,23 @@ class OrchestratorSettings(BaseSettings):
     household_users: str = "Henning,Nicole"  # comma-separated
     household_language: str = "de"  # default response language
 
+    # --- Companion / Kairos ---
+    postgres_url: str = "postgresql://homelab:homelab@192.168.0.80:5432/homelab"
+    redis_url: str = "redis://192.168.0.78:6379/0"
+    kairos_daily_token_cap: int = 500000  # per user per day
+    kairos_daily_token_warning_pct: float = 0.80
+    kairos_dispatch_token_cap: int = 200000
+    llm_router_url: str = "http://192.168.0.50:8070"
+
     @property
     def allowed_chat_ids(self) -> list[int]:
         if not self.telegram_allowed_chat_ids:
             return []
-        return [int(x.strip()) for x in self.telegram_allowed_chat_ids.split(",") if x.strip()]
+        return [
+            int(x.strip())
+            for x in self.telegram_allowed_chat_ids.split(",")
+            if x.strip()
+        ]
 
     @property
     def user_list(self) -> list[str]:
