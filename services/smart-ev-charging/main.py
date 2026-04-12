@@ -90,6 +90,13 @@ class SmartEVChargingService(BaseService):
         # --- PV accuracy tracking ---
         self._pv_accuracy_pct: float = 100.0
 
+        # --- Weekly EV plan (from energy.ev.weekly_plan NATS) ---
+        self._weekly_plan: list[dict] | None = None
+
+        # --- PV hourly forecast (from energy.pv.hourly_forecast NATS) ---
+        self._pv_hourly_forecast: list[dict] | None = None  # today
+        self._pv_hourly_forecast_tomorrow: list[dict] | None = None  # tomorrow
+
         # --- Strategy reference (set in run()) ---
         self._strategy: ChargingStrategy | None = None
 
@@ -151,6 +158,12 @@ class SmartEVChargingService(BaseService):
             )
             await self.nats.subscribe_json(
                 "energy.pv.accuracy_checked", self._on_pv_accuracy_nats
+            )
+            await self.nats.subscribe_json(
+                "energy.ev.weekly_plan", self._on_weekly_plan_nats
+            )
+            await self.nats.subscribe_json(
+                "energy.pv.hourly_forecast", self._on_pv_hourly_forecast_nats
             )
 
         self.logger.info(
@@ -332,6 +345,15 @@ class SmartEVChargingService(BaseService):
             default=0.0,
         )
 
+        # --- Read Ready By mode helpers ---
+        ready_by_target_soc = await self._read_float(
+            self.settings.ready_by_target_soc_entity,
+            default=0.0,
+        )
+        ready_by_deadline = await self._read_datetime(
+            self.settings.ready_by_deadline_entity,
+        )
+
         now = datetime.now(self.tz)
 
         # --- Feature #6: Plug/unplug resilience ---
@@ -485,6 +507,12 @@ class SmartEVChargingService(BaseService):
             drain_pv_battery=drain_pv_battery,
             drain_budget_kwh=drain_budget,
             drain_used_kwh=self._drain_used_kwh,
+            # New: Auto / Ready By / PV Only fields
+            weekly_plan=self._weekly_plan,
+            ready_by_target_soc=ready_by_target_soc,
+            ready_by_deadline=ready_by_deadline,
+            pv_hourly_forecast=self._pv_hourly_forecast,
+            pv_forecast_tomorrow_hourly=self._pv_hourly_forecast_tomorrow,
         )
 
         # 2) Decide target power
@@ -863,6 +891,28 @@ class SmartEVChargingService(BaseService):
         except Exception:
             return False
 
+    async def _read_datetime(self, entity_id: str) -> datetime | None:
+        """Read an input_datetime entity and return a timezone-aware datetime, or None."""
+        if not entity_id:
+            return None
+        try:
+            state = await asyncio.wait_for(
+                self.ha.get_state(entity_id),
+                timeout=self.HA_READ_TIMEOUT,
+            )
+            val = state.get("state", "")
+            if not val or val in ("unavailable", "unknown"):
+                return None
+            # HA input_datetime format: "2026-04-13 07:30:00" or "2026-04-13T07:30:00"
+            val = val.replace(" ", "T")
+            dt = datetime.fromisoformat(val)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=self.tz)
+            return dt
+        except Exception:
+            self.logger.warning("read_datetime_failed", entity_id=entity_id)
+            return None
+
     async def _read_time(self, entity_id: str) -> dt_time | None:
         try:
             state = await asyncio.wait_for(
@@ -1089,6 +1139,31 @@ class SmartEVChargingService(BaseService):
                 self._sunset_hhmm = sunset[:5]
             except (ValueError, IndexError):
                 pass
+
+    async def _on_weekly_plan_nats(self, subject: str, payload: dict) -> None:
+        """Handle energy.ev.weekly_plan from NATS — cache for Auto mode multi-day deferral."""
+        days = payload.get("days", [])
+        if days:
+            self._weekly_plan = days
+            self.logger.info(
+                "weekly_plan_nats_cached",
+                days=len(days),
+                first_day=days[0].get("date") if days else None,
+            )
+
+    async def _on_pv_hourly_forecast_nats(self, subject: str, payload: dict) -> None:
+        """Handle energy.pv.hourly_forecast from NATS — cache today + tomorrow slots."""
+        today = payload.get("today", [])
+        tomorrow = payload.get("tomorrow", [])
+        if today:
+            self._pv_hourly_forecast = today
+        if tomorrow:
+            self._pv_hourly_forecast_tomorrow = tomorrow
+        self.logger.debug(
+            "pv_hourly_forecast_cached",
+            today_slots=len(today),
+            tomorrow_slots=len(tomorrow),
+        )
 
     async def _on_pv_accuracy_nats(self, subject: str, payload: dict) -> None:
         """Handle energy.pv.accuracy_checked — adjust PV defer confidence."""

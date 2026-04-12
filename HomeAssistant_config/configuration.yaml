@@ -860,12 +860,15 @@ input_select:
     name: EV Charge Mode
     options:
       - "Off"
+      - "Auto"
       - "PV Surplus"
+      - "PV Only"
       - "Smart"
       - "Eco"
       - "Fast"
       - "Manual"
       - "Manual Until"
+      - "Ready By"
     initial: "Off"
     icon: mdi:ev-station
 
@@ -884,6 +887,10 @@ input_datetime:
     name: EV Departure Time
     has_time: true
     has_date: false
+  ev_ready_by_deadline:
+    name: EV Ready By Deadline
+    has_time: true
+    has_date: true
 
 input_number:
   ev_target_energy_kwh:
@@ -910,6 +917,14 @@ input_number:
     unit_of_measurement: kWh
     initial: 77
     icon: mdi:car-battery
+  ev_ready_by_target_soc:
+    name: EV Ready By Target SoC
+    min: 10
+    max: 100
+    step: 5
+    unit_of_measurement: "%"
+    initial: 80
+    icon: mdi:battery-clock
 
 sensor:
   - platform: integration

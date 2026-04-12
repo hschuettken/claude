@@ -74,6 +74,10 @@ class EVChargingSettings(BaseSettings):
     manual_target_kwh_entity: str = "input_number.ev_manual_target_kwh"
     manual_target_soc_entity: str = "input_number.ev_manual_target_soc"
 
+    # --- Ready By mode helpers ---
+    ready_by_target_soc_entity: str = "input_number.ev_ready_by_target_soc"
+    ready_by_deadline_entity: str = "input_datetime.ev_ready_by_deadline"
+
     # --- Wallbox power limits ---
     wallbox_max_power_w: int = 11000
     wallbox_min_power_w: int = 4200

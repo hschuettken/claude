@@ -22,6 +22,9 @@ class ChargeMode(str, Enum):
     FAST = "Fast"
     MANUAL = "Manual"
     MANUAL_UNTIL = "Manual Until"
+    AUTO = "Auto"
+    READY_BY = "Ready By"
+    PV_ONLY = "PV Only"
 
 
 @dataclass
@@ -61,6 +64,17 @@ class ChargingContext:
     drain_pv_battery: bool = False  # True = intentionally discharge PV battery into EV
     drain_budget_kwh: float = 0.0  # Max kWh allowed to drain from battery
     drain_used_kwh: float = 0.0  # kWh already drained this session
+
+    # Auto mode: weekly plan from ev-forecast NATS (energy.ev.weekly_plan)
+    weekly_plan: list[dict] | None = None  # EVWeeklyPlan.days if available
+
+    # Ready By mode inputs
+    ready_by_target_soc: float = 0.0  # target SoC % (0 = use ev_target_soc_pct)
+    ready_by_deadline: datetime | None = None  # deadline datetime for Ready By
+
+    # PV hourly forecast (from energy.pv.hourly_forecast NATS)
+    pv_hourly_forecast: list[dict] | None = None  # [{hour, kwh, confidence}] today
+    pv_forecast_tomorrow_hourly: list[dict] | None = None  # tomorrow hourly
 
     @property
     def energy_needed_kwh(self) -> float:
@@ -118,6 +132,9 @@ class ChargingDecision:
     # --- Drain PV battery ---
     drain_boost_w: float = 0.0  # Extra power from intentional battery drain
     drain_boost_reason: str = ""  # Explanation for drain boost
+
+    # --- PV Only: multi-day completion estimate ---
+    estimated_completion_days: float = 0.0  # 0 = today, 1.5 = 1.5 days from now
 
 
 class ChargingStrategy:
@@ -202,7 +219,13 @@ class ChargingStrategy:
         # --- Target SoC reached — continue topping up with PV surplus ---
         if ctx.target_reached:
             if (
-                ctx.mode in (ChargeMode.PV_SURPLUS, ChargeMode.SMART)
+                ctx.mode
+                in (
+                    ChargeMode.PV_SURPLUS,
+                    ChargeMode.SMART,
+                    ChargeMode.AUTO,
+                    ChargeMode.PV_ONLY,
+                )
                 and ctx.pv_power_w > 100
             ):
                 if (
@@ -249,8 +272,14 @@ class ChargingStrategy:
             decision = self._fixed(self.eco_power_w, "Eco")
         elif ctx.mode == ChargeMode.PV_SURPLUS:
             decision = self._pv_surplus(ctx)
+        elif ctx.mode == ChargeMode.PV_ONLY:
+            decision = self._pv_only(ctx)
         elif ctx.mode == ChargeMode.SMART:
             decision = self._smart(ctx)
+        elif ctx.mode == ChargeMode.AUTO:
+            decision = self._auto(ctx)
+        elif ctx.mode == ChargeMode.READY_BY:
+            decision = self._ready_by(ctx)
         elif ctx.mode == ChargeMode.MANUAL_UNTIL:
             decision = self._manual_until(ctx)
         else:
@@ -259,6 +288,7 @@ class ChargingStrategy:
         # --- Full-by-morning deadline escalation ---
         # BUG #4 FIX: Skip deadline escalation if departure has passed
         # BUG #1 FIX: Don't escalate with "waiting for tomorrow" when departure is today and imminent
+        # Ready By and PV Only handle their own deadline/grid logic — skip escalation
         if (
             ctx.full_by_morning
             and not ctx.departure_passed
@@ -266,11 +296,12 @@ class ChargingStrategy:
             in (
                 ChargeMode.PV_SURPLUS,
                 ChargeMode.SMART,
+                ChargeMode.AUTO,
             )
         ):
             # Skip deadline escalation during morning PV-wait window
             is_pv_wait_window = (
-                ctx.mode == ChargeMode.SMART
+                ctx.mode in (ChargeMode.SMART, ChargeMode.AUTO)
                 and 5 <= ctx.now.hour < self.morning_escalation_hour
                 and ctx.overnight_grid_kwh_charged > 0
                 and decision.target_power_w == 0
@@ -639,6 +670,258 @@ class ChargingStrategy:
             pv_surplus_w=pv.pv_surplus_w,
             battery_assist_w=pv.battery_assist_w,
             battery_assist_reason=pv.battery_assist_reason,
+        )
+
+    def _auto(self, ctx: ChargingContext) -> ChargingDecision:
+        """Auto mode — Smart + auto-drain PV battery + multi-day PV awareness.
+
+        Behaves like Smart, but:
+        - drain_pv_battery is ENABLED by default (ctx.drain_pv_battery acts as disable)
+        - When weekly_plan is available, defers overnight grid charge if tomorrow's
+          charge_source_recommendation is "pv_only" with enough pv_expected_kwh.
+        """
+        # Auto: drain is enabled by default, ctx.drain_pv_battery = False means user
+        # has NOT disabled it (it's an inverse toggle). We patch ctx in a local copy
+        # by temporarily forcing drain_pv_battery=True for the Smart sub-call.
+        # We do this by creating a patched context for the _pv_surplus call.
+        # The _smart method uses ctx.drain_pv_battery — so we need to handle this here.
+
+        # --- Multi-day deferral: check weekly_plan before calling _smart ---
+        # Only applies during nighttime when we would otherwise start grid charging
+        current_hour = ctx.now.hour
+        is_nighttime = current_hour >= 20 or current_hour < 5
+
+        if is_nighttime and ctx.weekly_plan and ctx.energy_needed_kwh > 0:
+            # Check if tomorrow's plan says "pv_only" with sufficient forecast
+            if len(ctx.weekly_plan) >= 2:
+                tomorrow_plan = ctx.weekly_plan[1]
+            elif len(ctx.weekly_plan) == 1:
+                tomorrow_plan = ctx.weekly_plan[0]
+            else:
+                tomorrow_plan = None
+
+            if tomorrow_plan:
+                rec = tomorrow_plan.get("charge_source_recommendation", "")
+                pv_expected = float(tomorrow_plan.get("pv_expected_kwh", 0.0))
+                energy_needed = ctx.energy_needed_kwh
+                if (
+                    rec == "pv_only"
+                    and pv_expected >= energy_needed * self.pv_defer_confidence_factor
+                ):
+                    logger.info(
+                        "auto_weekly_plan_defer",
+                        rec=rec,
+                        pv_expected=round(pv_expected, 1),
+                        energy_needed=round(energy_needed, 1),
+                    )
+                    return ChargingDecision(
+                        0,
+                        f"Auto: deferring to tomorrow PV (weekly plan: {pv_expected:.1f} kWh forecast, "
+                        f"{energy_needed:.1f} kWh needed)",
+                        solar_defer_active=True,
+                        solar_defer_pv_kwh=round(pv_expected, 1),
+                        solar_defer_needed_kwh=round(energy_needed, 1),
+                    )
+
+        # Fall through to Smart logic.
+        # For drain: in AUTO mode, drain is on unless user explicitly set drain_pv_battery=False.
+        # The Smart logic uses ctx.drain_pv_battery inside _pv_surplus. We patch it here
+        # by temporarily forcing it true (auto mode always drains unless toggle=off).
+        #
+        # Since ChargingContext is a dataclass (mutable), we temporarily override.
+        original_drain = ctx.drain_pv_battery
+        ctx.drain_pv_battery = True  # Auto: drain enabled by default
+
+        smart_decision = self._smart(ctx)
+
+        ctx.drain_pv_battery = original_drain  # restore
+
+        # Relabel "Smart:" → "Auto:" in reason string
+        reason = smart_decision.reason
+        if reason.startswith("Smart:") or reason.startswith("Smart "):
+            reason = "Auto:" + reason[5:]
+        elif not reason.startswith("Auto"):
+            reason = f"Auto: {reason}"
+
+        smart_decision.reason = reason
+        return smart_decision
+
+    def _ready_by(self, ctx: ChargingContext) -> ChargingDecision:
+        """Ready By mode — charge to target SoC by a specific deadline.
+
+        Uses PV where possible; supplements with grid as deadline approaches.
+        Falls back to PV surplus if no deadline or target already reached.
+        """
+        target_soc = (
+            ctx.ready_by_target_soc
+            if ctx.ready_by_target_soc > 0
+            else ctx.ev_target_soc_pct
+        )
+        deadline = ctx.ready_by_deadline
+
+        # Check if target already reached
+        if ctx.ev_soc_pct is not None and ctx.ev_soc_pct >= target_soc:
+            pv = self._pv_surplus(ctx)
+            if pv.target_power_w > 0:
+                pv.reason = f"Ready By: target {target_soc:.0f}% reached, PV surplus only: {pv.reason}"
+                return pv
+            return ChargingDecision(
+                0,
+                f"Ready By: target {target_soc:.0f}% reached",
+            )
+
+        energy_needed = ctx.energy_needed_kwh
+
+        if not deadline:
+            # No deadline — fall back to PV surplus
+            pv = self._pv_surplus(ctx)
+            pv.reason = f"Ready By (no deadline, PV only): {pv.reason}"
+            return pv
+
+        hours_left = (deadline - ctx.now).total_seconds() / 3600.0
+
+        if hours_left <= 0:
+            # Past deadline — charge at max
+            return ChargingDecision(
+                self.max_power_w,
+                f"Ready By: deadline passed, charging at max {self.max_power_w} W",
+                deadline_active=True,
+                deadline_hours_left=0.0,
+                energy_remaining_kwh=round(energy_needed, 2),
+            )
+
+        # Calculate PV available in the remaining window from hourly forecast
+        pv_available_for_period = 0.0
+        if ctx.pv_hourly_forecast:
+            now_hour = ctx.now.hour
+            # deadline hours — handle same-day vs next-day
+            if deadline.date() == ctx.now.date():
+                deadline_hour = deadline.hour
+            else:
+                deadline_hour = 24  # use all remaining hours today
+            for slot in ctx.pv_hourly_forecast:
+                slot_hour = slot.get("hour", -1)
+                if now_hour <= slot_hour < deadline_hour:
+                    pv_available_for_period += float(slot.get("kwh", 0.0))
+
+        # If PV alone can meet deadline with 10% margin, use PV only
+        if pv_available_for_period >= energy_needed * 1.1:
+            pv = self._pv_surplus(ctx)
+            if pv.target_power_w > 0:
+                pv.reason = (
+                    f"Ready By: PV sufficient ({pv_available_for_period:.1f} kWh avail, "
+                    f"{energy_needed:.1f} kWh needed, {hours_left:.1f}h left): {pv.reason}"
+                )
+                return ChargingDecision(
+                    pv.target_power_w,
+                    pv.reason,
+                    pv_surplus_w=pv.pv_surplus_w,
+                    battery_assist_w=pv.battery_assist_w,
+                    battery_assist_reason=pv.battery_assist_reason,
+                    deadline_active=True,
+                    deadline_hours_left=round(hours_left, 2),
+                    energy_remaining_kwh=round(energy_needed, 2),
+                )
+            return ChargingDecision(
+                0,
+                f"Ready By: PV sufficient ({pv_available_for_period:.1f} kWh), waiting for surplus",
+                deadline_active=True,
+                deadline_hours_left=round(hours_left, 2),
+                energy_remaining_kwh=round(energy_needed, 2),
+            )
+
+        # Need grid assistance — calculate required power
+        required_w = (
+            energy_needed * 1000.0 / max(0.1, hours_left) / self.charger_efficiency
+        )
+        target_power = max(self.min_power_w, min(self.max_power_w, int(required_w)))
+
+        # Boost with any PV surplus available now
+        pv_surplus_now = self._calc_pv_only_available(ctx)
+        if pv_surplus_now > self.min_power_w:
+            target_power = max(target_power, self._clamp(int(pv_surplus_now)))
+
+        return ChargingDecision(
+            target_power,
+            f"Ready By: {hours_left:.1f}h left, {energy_needed:.1f} kWh needed, "
+            f"grid+PV ({pv_available_for_period:.1f} kWh PV forecast < {energy_needed * 1.1:.1f} kWh required)",
+            deadline_active=True,
+            deadline_hours_left=round(hours_left, 2),
+            deadline_required_w=round(required_w, 1),
+            energy_remaining_kwh=round(energy_needed, 2),
+        )
+
+    def _pv_only(self, ctx: ChargingContext) -> ChargingDecision:
+        """PV Only mode — never uses grid, charges from solar surplus only.
+
+        Adds a multi-day completion estimate based on hourly PV forecast.
+        """
+        pv = self._pv_surplus(ctx)
+
+        # Compute estimated_completion_days from hourly forecast
+        estimated_days = 0.0
+        energy_needed = ctx.energy_needed_kwh
+        if energy_needed > 0 and (
+            ctx.pv_hourly_forecast or ctx.pv_forecast_tomorrow_hourly
+        ):
+            # Sum daily PV kWh from today's remaining + tomorrow's forecast
+            today_kwh = 0.0
+            tomorrow_kwh = 0.0
+            now_hour = ctx.now.hour
+
+            if ctx.pv_hourly_forecast:
+                for slot in ctx.pv_hourly_forecast:
+                    if slot.get("hour", 0) >= now_hour:
+                        today_kwh += float(slot.get("kwh", 0.0))
+            else:
+                # Fall back to daily forecast remaining
+                today_kwh = ctx.pv_forecast_remaining_kwh
+
+            if ctx.pv_forecast_tomorrow_hourly:
+                for slot in ctx.pv_forecast_tomorrow_hourly:
+                    tomorrow_kwh += float(slot.get("kwh", 0.0))
+            else:
+                tomorrow_kwh = ctx.pv_forecast_tomorrow_kwh
+
+            today_usable = today_kwh * self.charger_efficiency
+            tomorrow_usable = tomorrow_kwh * self.charger_efficiency
+
+            if today_usable >= energy_needed:
+                estimated_days = 0.0
+            elif today_usable + tomorrow_usable >= energy_needed:
+                remaining_after_today = energy_needed - today_usable
+                if tomorrow_usable > 0:
+                    fraction_of_tomorrow = remaining_after_today / tomorrow_usable
+                    estimated_days = 1.0 + fraction_of_tomorrow
+                else:
+                    estimated_days = 2.0
+            else:
+                # More than 2 days
+                daily_avg = (today_usable + tomorrow_usable) / 2.0
+                if daily_avg > 0:
+                    estimated_days = energy_needed / daily_avg
+                else:
+                    estimated_days = 99.0
+
+        # Relabel reason as PV Only
+        reason = pv.reason
+        if reason.startswith("PV surplus"):
+            reason = "PV Only: " + reason
+        elif not reason.startswith("PV Only"):
+            reason = f"PV Only: {reason}"
+
+        if estimated_days > 0.01:
+            reason = f"{reason} (est. completion: {estimated_days:.1f} days)"
+
+        return ChargingDecision(
+            pv.target_power_w,
+            reason,
+            pv_surplus_w=pv.pv_surplus_w,
+            battery_assist_w=pv.battery_assist_w,
+            battery_assist_reason=pv.battery_assist_reason,
+            drain_boost_w=pv.drain_boost_w,
+            drain_boost_reason=pv.drain_boost_reason,
+            estimated_completion_days=round(estimated_days, 2),
         )
 
     def _grid_export_prevention(
