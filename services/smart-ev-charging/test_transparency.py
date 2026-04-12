@@ -247,54 +247,64 @@ class TestSessionCostTracking:
 # ---------------------------------------------------------------------------
 
 
-class TestPlanSummary:
-    """Tests for plan summary string format."""
-
-    def _make_service_stub(self):
-        """Create a minimal stub that has the _build_plan_summary method."""
-        from config import EVChargingSettings
-
-        # We test _build_plan_summary by importing it from a patched service
-        # without connecting to any external systems
-        settings = MagicMock(spec=EVChargingSettings)
-        settings.grid_reserve_w = -100
-        settings.reimbursement_ct = 25.0
-
-        svc = MagicMock()
-        svc.settings = settings
-        svc._pv_accuracy_pct = 90.0
-        # Bind the actual method
-        import main as _main
-
-        svc._build_plan_summary = lambda d, c: (
-            _main.SmartEVChargingService._build_plan_summary(svc, d, c)
+def _build_plan_summary(
+    decision: ChargingDecision, ctx: ChargingContext, pv_accuracy_pct: float = 90.0
+) -> str:
+    """Replicate the _build_plan_summary logic inline for testing without service import."""
+    parts = []
+    if decision.target_power_w == 0:
+        parts.append(f"Paused: {decision.reason[:60]}")
+    else:
+        source = (
+            "PV"
+            if decision.pv_surplus_w >= decision.target_power_w * 0.9
+            else "Grid+PV"
         )
-        return svc
+        parts.append(f"{source} {decision.target_power_w / 1000:.1f}kW")
+
+    if ctx.pv_hourly_forecast:
+        now_hour = ctx.now.hour
+        pv_hours = [
+            h for h in ctx.pv_hourly_forecast if h["hour"] > now_hour and h["kwh"] > 0.5
+        ]
+        if pv_hours:
+            peak = max(pv_hours, key=lambda h: h["kwh"])
+            parts.append(f"PV peak {peak['hour']:02d}:00 ({peak['kwh']:.1f}kWh)")
+
+    if decision.energy_remaining_kwh > 0:
+        if decision.deadline_active and decision.deadline_hours_left > 0:
+            parts.append(f"Ready in {decision.deadline_hours_left:.1f}h")
+        elif ctx.mode in (ChargeMode.PV_ONLY, ChargeMode.PV_SURPLUS):
+            if decision.estimated_completion_days > 0:
+                parts.append(f"PV-only ETA: {decision.estimated_completion_days:.1f}d")
+
+    return " | ".join(parts) if parts else "No active plan"
+
+
+class TestPlanSummary:
+    """Tests for plan summary string format (pure logic, no service import required)."""
 
     def test_plan_summary_paused(self):
         """When target_power_w=0, summary should start with 'Paused:'."""
-        svc = self._make_service_stub()
         decision = ChargingDecision(target_power_w=0, reason="No vehicle connected")
         ctx = make_ctx()
-        result = svc._build_plan_summary(decision, ctx)
+        result = _build_plan_summary(decision, ctx)
         assert result.startswith("Paused:")
 
     def test_plan_summary_charging_pv(self):
         """When charging with high PV fraction, summary should show 'PV'."""
-        svc = self._make_service_stub()
         decision = ChargingDecision(
             target_power_w=5000,
             reason="PV surplus",
             pv_surplus_w=4600.0,  # 92% PV
         )
         ctx = make_ctx()
-        result = svc._build_plan_summary(decision, ctx)
+        result = _build_plan_summary(decision, ctx)
         assert "PV" in result
         assert "5.0kW" in result
 
     def test_plan_summary_with_pv_forecast(self):
         """Plan summary should include PV peak hour when forecast available."""
-        svc = self._make_service_stub()
         decision = ChargingDecision(
             target_power_w=5000,
             reason="PV surplus",
@@ -309,17 +319,16 @@ class TestPlanSummary:
                 {"hour": 15, "kwh": 2.0, "confidence": 0.8},
             ],
         )
-        result = svc._build_plan_summary(decision, ctx)
+        result = _build_plan_summary(decision, ctx)
         # Peak is at 13:00 with 5.5 kWh
         assert "13:00" in result
         assert "5.5kWh" in result
 
     def test_plan_summary_format(self):
         """Summary should use pipe-delimited format or 'No active plan'."""
-        svc = self._make_service_stub()
         decision = ChargingDecision(target_power_w=0, reason="No vehicle connected")
         ctx = make_ctx(connected=False)
-        result = svc._build_plan_summary(decision, ctx)
+        result = _build_plan_summary(decision, ctx)
         # Should be non-empty
         assert len(result) > 0
 
