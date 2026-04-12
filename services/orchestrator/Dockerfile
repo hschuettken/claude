@@ -9,6 +9,7 @@ COPY services/orchestrator/llm/ /app/llm/
 COPY services/orchestrator/channels/ /app/channels/
 COPY services/orchestrator/api/ /app/api/
 COPY services/orchestrator/tooling/ /app/tooling/
+COPY services/orchestrator/companion/ /app/companion/
 
 # Keep shared libs in image as fallback (compose also bind-mounts ./shared)
 # Copy to both layouts so imports work whether PYTHONPATH contains /app or /app/shared.
