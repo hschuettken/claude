@@ -74,6 +74,14 @@ class SolarDaylightWindow(BaseModel):
     timestamp: str
 
 
+class PVHourlyForecast(BaseModel):
+    """energy.pv.hourly_forecast — published on each forecast cycle"""
+
+    today: list[dict]  # [{hour: int (0-23), kwh: float, confidence: float}]
+    tomorrow: list[dict]
+    timestamp: str  # ISO format
+
+
 class PVForecastAccuracyResult(BaseModel):
     """Published after accuracy check, subject: energy.pv.accuracy_checked"""
 
@@ -171,3 +179,25 @@ class EVDrainRefillComplete(BaseModel):
     battery_soc_pct: float
     refill_duration_minutes: float
     timestamp: str
+
+
+class EVDailyPlan(BaseModel):
+    """One day in the 7-day weekly plan."""
+
+    date: str  # YYYY-MM-DD
+    trips: list[dict]  # [{destination, km, departure_time, energy_kwh}]
+    energy_needed_kwh: float
+    pv_expected_kwh: float  # from pv-forecast if available, else 0
+    grid_needed_kwh: float  # max(0, energy_needed - pv_expected)
+    target_soc_start_of_day: float  # % SoC car should have at day start
+    charge_source_recommendation: str  # "pv_only" | "pv_plus_grid" | "grid_required"
+
+
+class EVWeeklyPlan(BaseModel):
+    """energy.ev.weekly_plan — 7-day forward plan."""
+
+    days: list[EVDailyPlan]
+    current_soc_pct: float
+    consumption_kwh_per_100km: float
+    battery_capacity_kwh: float
+    timestamp: str  # ISO format

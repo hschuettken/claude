@@ -30,6 +30,7 @@ from shared.energy_events import (
     PVDriftDetected,
     PVForecastAccuracyResult,
     PVForecastUpdated,
+    PVHourlyForecast,
     PVModelRetrained,
     SolarDaylightWindow,
 )
@@ -213,6 +214,41 @@ class PVForecastService:
         finally:
             await self._shutdown()
 
+    def _build_hourly_list(self, forecast, day_key: str) -> list[dict]:
+        """Build hourly breakdown from FullForecast for a given day.
+
+        Args:
+            forecast: FullForecast object with east and west ArrayForecast
+            day_key: "today", "tomorrow", or "day_after"
+
+        Returns:
+            List of dicts: [{hour: int, kwh: float, confidence: float}]
+        """
+        result = []
+        east = forecast.east
+        west = forecast.west
+
+        # Get the day forecast from each array
+        east_day = getattr(east, day_key, None) if east else None
+        west_day = getattr(west, day_key, None) if west else None
+
+        # Merge east + west hourly data by hour
+        by_hour: dict[int, float] = {}
+        if east_day and east_day.hourly:
+            for h in east_day.hourly:
+                hour = h.time.hour
+                by_hour[hour] = by_hour.get(hour, 0) + h.kwh
+        if west_day and west_day.hourly:
+            for h in west_day.hourly:
+                hour = h.time.hour
+                by_hour[hour] = by_hour.get(hour, 0) + h.kwh
+
+        for hour in sorted(by_hour.keys()):
+            result.append(
+                {"hour": hour, "kwh": round(by_hour[hour], 3), "confidence": 0.8}
+            )
+        return result
+
     async def _train(self) -> None:
         """Train or retrain the models."""
         try:
@@ -361,6 +397,16 @@ class PVForecastService:
                 )
                 await self.nats.publish(
                     "energy.pv.forecast_updated", nats_event.model_dump()
+                )
+
+                # Publish hourly forecast breakdown
+                hourly_event = PVHourlyForecast(
+                    today=self._build_hourly_list(forecast, "today"),
+                    tomorrow=self._build_hourly_list(forecast, "tomorrow"),
+                    timestamp=forecast.timestamp.isoformat(),
+                )
+                await self.nats.publish(
+                    "energy.pv.hourly_forecast", hourly_event.model_dump()
                 )
 
         except Exception:

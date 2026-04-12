@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -39,14 +39,14 @@ class DayChargingRecommendation:
 
     date: date
     trips: list[Trip]
-    soc_needed_pct: float          # SoC needed at start of day
-    energy_needed_kwh: float       # Energy needed for the day's trips
-    energy_to_charge_kwh: float    # How much to charge (considering current SoC)
-    charge_mode: str               # Recommended charge mode
-    departure_time: time | None    # When car leaves
-    charge_by: time | None         # Must be charged by this time
-    urgency: str                   # "none" | "low" | "medium" | "high" | "critical"
-    reason: str                    # Human-readable explanation
+    soc_needed_pct: float  # SoC needed at start of day
+    energy_needed_kwh: float  # Energy needed for the day's trips
+    energy_to_charge_kwh: float  # How much to charge (considering current SoC)
+    charge_mode: str  # Recommended charge mode
+    departure_time: time | None  # When car leaves
+    charge_by: time | None  # Must be charged by this time
+    urgency: str  # "none" | "low" | "medium" | "high" | "critical"
+    reason: str  # Human-readable explanation
     cumulative_deficit_kwh: float = 0.0  # Running total of uncharged energy
 
     @property
@@ -148,7 +148,9 @@ class ChargingPlan:
                     "energy_needed_kwh": round(d.energy_needed_kwh, 1),
                     "energy_to_charge_kwh": round(d.energy_to_charge_kwh, 1),
                     "charge_mode": d.charge_mode,
-                    "departure_time": d.departure_time.strftime("%H:%M") if d.departure_time else None,
+                    "departure_time": d.departure_time.strftime("%H:%M")
+                    if d.departure_time
+                    else None,
                     "urgency": d.urgency,
                     "reason": d.reason,
                     "cumulative_deficit_kwh": round(d.cumulative_deficit_kwh, 1),
@@ -216,12 +218,20 @@ class ChargingPlanner:
         # Track running SoC and cumulative deficit through the planning horizon
         default_soc = self._default_assumed_soc
         running_soc = current_soc if current_soc is not None else default_soc
-        running_energy = current_energy if current_energy is not None else self._soc_to_kwh(default_soc)
+        running_energy = (
+            current_energy
+            if current_energy is not None
+            else self._soc_to_kwh(default_soc)
+        )
         cumulative_deficit = 0.0
 
         for i, day_plan in enumerate(day_plans):
             # Get PV forecast for this day if available
-            pv_forecast_day = pv_forecast_kwh[i] if pv_forecast_kwh and i < len(pv_forecast_kwh) else None
+            pv_forecast_day = (
+                pv_forecast_kwh[i]
+                if pv_forecast_kwh and i < len(pv_forecast_kwh)
+                else None
+            )
 
             rec = self._plan_day(
                 day_plan=day_plan,
@@ -243,7 +253,7 @@ class ChargingPlanner:
 
             # Update cumulative deficit
             if rec.energy_to_charge_kwh < rec.energy_needed_kwh:
-                cumulative_deficit += (rec.energy_needed_kwh - rec.energy_to_charge_kwh)
+                cumulative_deficit += rec.energy_needed_kwh - rec.energy_to_charge_kwh
 
         return plan
 
@@ -348,7 +358,9 @@ class ChargingPlanner:
                 if current_soc_val not in ("unavailable", "unknown", ""):
                     current_soc = float(current_soc_val)
                     last_soc = getattr(self, "_last_applied_target_soc", None)
-                    if current_soc != last_soc and current_soc > (plan.current_soc_pct + 1):
+                    if current_soc != last_soc and current_soc > (
+                        plan.current_soc_pct + 1
+                    ):
                         manual_target_soc = True
                         logger.info(
                             "manual_target_soc_override_detected",
@@ -366,36 +378,52 @@ class ChargingPlanner:
             # Target SoC % = (target energy / net_capacity) * 100
             current_energy_kwh = (plan.current_soc_pct / 100.0) * self._net_capacity
             target_energy_kwh = current_energy_kwh + immediate.energy_to_charge_kwh
-            target_soc_pct = min(100.0, (target_energy_kwh / self._net_capacity) * 100.0)
+            target_soc_pct = min(
+                100.0, (target_energy_kwh / self._net_capacity) * 100.0
+            )
             target_soc_pct = round(target_soc_pct)
 
         # Set charge mode
         try:
-            await self._ha.call_service("input_select", "select_option", {
-                "entity_id": charge_mode_entity,
-                "option": immediate.charge_mode,
-            })
+            await self._ha.call_service(
+                "input_select",
+                "select_option",
+                {
+                    "entity_id": charge_mode_entity,
+                    "option": immediate.charge_mode,
+                },
+            )
             self._last_applied_mode = immediate.charge_mode
         except Exception:
             logger.exception("set_charge_mode_failed")
 
         # Set full-by-morning (enable when Smart mode needs charging)
-        enable_fbm = immediate.charge_mode == "Smart" and immediate.energy_to_charge_kwh > 0
+        enable_fbm = (
+            immediate.charge_mode == "Smart" and immediate.energy_to_charge_kwh > 0
+        )
         try:
             service = "turn_on" if enable_fbm else "turn_off"
-            await self._ha.call_service("input_boolean", service, {
-                "entity_id": full_by_morning_entity,
-            })
+            await self._ha.call_service(
+                "input_boolean",
+                service,
+                {
+                    "entity_id": full_by_morning_entity,
+                },
+            )
         except Exception:
             logger.exception("set_full_by_morning_failed")
 
         # Set departure time (respect manual override)
         if immediate.departure_time and not manual_departure:
             try:
-                await self._ha.call_service("input_datetime", "set_datetime", {
-                    "entity_id": departure_time_entity,
-                    "time": immediate.departure_time.strftime("%H:%M:%S"),
-                })
+                await self._ha.call_service(
+                    "input_datetime",
+                    "set_datetime",
+                    {
+                        "entity_id": departure_time_entity,
+                        "time": immediate.departure_time.strftime("%H:%M:%S"),
+                    },
+                )
                 self._last_applied_departure = immediate.departure_time
             except Exception:
                 logger.exception("set_departure_time_failed")
@@ -405,17 +433,23 @@ class ChargingPlanner:
         # Set target energy
         if immediate.energy_to_charge_kwh > 0:
             try:
-                await self._ha.call_service("input_number", "set_value", {
-                    "entity_id": target_energy_entity,
-                    "value": min(self._net_capacity, round(immediate.energy_to_charge_kwh)),
-                })
+                await self._ha.call_service(
+                    "input_number",
+                    "set_value",
+                    {
+                        "entity_id": target_energy_entity,
+                        "value": min(
+                            self._net_capacity, round(immediate.energy_to_charge_kwh)
+                        ),
+                    },
+                )
             except Exception:
                 logger.exception("set_target_energy_failed")
 
         # Set Audi target SoC via audiconnect integration
         # Only when: plugged in AT HOME (wallbox) + AI-controlled mode (not Off)
         ai_controlled_modes = {"Smart", "PV Surplus", "Manual"}
-        
+
         # Check if car is plugged in at home wallbox
         plugged_in_at_home = False
         if wallbox_vehicle_state_entity and plan.vehicle_plugged_in:
@@ -425,22 +459,26 @@ class ChargingPlanner:
                 # Amtron states: 2=Connected, 3=Charging, 4=Charging with vent
                 plugged_in_at_home = wallbox_state in ["2", "3", "4"]
             except Exception:
-                logger.warning("wallbox_state_check_failed", entity=wallbox_vehicle_state_entity)
-        
+                logger.warning(
+                    "wallbox_state_check_failed", entity=wallbox_vehicle_state_entity
+                )
+
         should_set_audi = (
             target_soc_pct is not None
             and audi_set_target_soc
             and plugged_in_at_home  # Must be at home wallbox, not away
             and immediate.charge_mode in ai_controlled_modes
         )
-        
+
         if should_set_audi:
             try:
                 service_data = {"target_soc": int(target_soc_pct)}
                 if audi_vin:
                     service_data["vin"] = audi_vin
-                
-                await self._ha.call_service("audiconnect", "set_target_soc", service_data)
+
+                await self._ha.call_service(
+                    "audiconnect", "set_target_soc", service_data
+                )
                 logger.info(
                     "audi_target_soc_set",
                     target_soc=int(target_soc_pct),
@@ -452,8 +490,10 @@ class ChargingPlanner:
                 logger.exception("set_audi_target_soc_failed")
         elif target_soc_pct is not None and audi_set_target_soc:
             # Log why we skipped
-            skip_reason = "mode_off" if immediate.charge_mode not in ai_controlled_modes else (
-                "not_at_home_wallbox" if not plugged_in_at_home else "unknown"
+            skip_reason = (
+                "mode_off"
+                if immediate.charge_mode not in ai_controlled_modes
+                else ("not_at_home_wallbox" if not plugged_in_at_home else "unknown")
             )
             logger.info(
                 "audi_target_soc_skipped",
@@ -468,7 +508,9 @@ class ChargingPlanner:
             mode=immediate.charge_mode,
             target_kwh=round(immediate.energy_to_charge_kwh, 1),
             audi_target_soc=int(target_soc_pct) if target_soc_pct else None,
-            departure=immediate.departure_time.strftime("%H:%M") if immediate.departure_time else "none",
+            departure=immediate.departure_time.strftime("%H:%M")
+            if immediate.departure_time
+            else "none",
             urgency=immediate.urgency,
             reason=immediate.reason,
         )
@@ -533,21 +575,34 @@ class ChargingPlanner:
         # We need to charge — determine urgency and mode
         if is_today:
             return self._plan_today(
-                day_plan, departure_time, deficit_kwh, required_soc,
-                energy_needed, running_soc, now, pv_forecast_kwh, cumulative_deficit,
+                day_plan,
+                departure_time,
+                deficit_kwh,
+                required_soc,
+                energy_needed,
+                running_soc,
+                now,
+                pv_forecast_kwh,
+                cumulative_deficit,
             )
 
         if is_tomorrow:
             return self._plan_tomorrow(
-                day_plan, departure_time, deficit_kwh, required_soc,
-                energy_needed, running_soc, pv_forecast_kwh, cumulative_deficit,
+                day_plan,
+                departure_time,
+                deficit_kwh,
+                required_soc,
+                energy_needed,
+                running_soc,
+                pv_forecast_kwh,
+                cumulative_deficit,
             )
 
         # Future days (3+ days out) — smarter charge mode decision
         # If cumulative deficit is large (>30 kWh) and day is within 3 days, use Smart mode
         # Otherwise if deficit is small and PV forecast good, keep PV Surplus
         days_out = (day_plan.date - now.date()).days
-        
+
         if cumulative_deficit > 30 and days_out <= 3:
             mode = "Smart"
             urgency = "medium"
@@ -565,7 +620,9 @@ class ChargingPlanner:
         else:
             mode = "Smart"
             urgency = "low"
-            reason = f"Future day — need {deficit_kwh:.1f} kWh, Smart mode for flexibility"
+            reason = (
+                f"Future day — need {deficit_kwh:.1f} kWh, Smart mode for flexibility"
+            )
 
         return DayChargingRecommendation(
             date=day_plan.date,
@@ -595,7 +652,9 @@ class ChargingPlanner:
     ) -> DayChargingRecommendation:
         """Plan charging for today based on time until departure."""
 
-        hours_until = self._hours_until_time(departure_time, now) if departure_time else 24.0
+        hours_until = (
+            self._hours_until_time(departure_time, now) if departure_time else 24.0
+        )
 
         # Already past departure — use Smart mode (not Fast) so the
         # overnight charging logic handles it with minimum power.
@@ -708,7 +767,9 @@ class ChargingPlanner:
     ) -> DayChargingRecommendation:
         """Plan charging for tomorrow (may need overnight charging)."""
 
-        early_departure = departure_time and departure_time.hour < self._early_departure_hour
+        early_departure = (
+            departure_time and departure_time.hour < self._early_departure_hour
+        )
 
         if early_departure:
             # Need to charge tonight — but check PV forecast for tomorrow
@@ -794,7 +855,10 @@ class ChargingPlanner:
 
     def _hours_until_time(self, target: time, now: datetime) -> float:
         target_dt = now.replace(
-            hour=target.hour, minute=target.minute, second=0, microsecond=0,
+            hour=target.hour,
+            minute=target.minute,
+            second=0,
+            microsecond=0,
         )
         if target_dt <= now:
             return 0.0  # Already past
