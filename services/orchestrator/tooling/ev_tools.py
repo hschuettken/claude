@@ -6,7 +6,6 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from shared.ha_client import HomeAssistantClient
-from shared.mqtt_client import MQTTClient
 from shared.log import get_logger
 from config import OrchestratorSettings
 from memory import Memory
@@ -131,7 +130,7 @@ class EVTools:
     def __init__(
         self,
         ha: HomeAssistantClient,
-        mqtt: MQTTClient,
+        nats: Any,
         settings: OrchestratorSettings,
         memory: Memory,
         ev_state: dict[str, Any] | None = None,
@@ -139,7 +138,7 @@ class EVTools:
         activity_tracker: Any = None,
     ) -> None:
         self.ha = ha
-        self.mqtt = mqtt
+        self.nats = nats
         self.settings = settings
         self.memory = memory
         self._ev_state = ev_state or {}
@@ -159,6 +158,7 @@ class EVTools:
 
     async def get_ev_charging_status(self) -> dict[str, Any]:
         import asyncio
+
         s = self.settings
         reads = await asyncio.gather(
             self.ha.get_state(s.ev_charge_mode_entity),
@@ -221,15 +221,19 @@ class EVTools:
         use_ev: bool,
         distance_km: float = 0,
     ) -> dict[str, Any]:
-        self.mqtt.publish("homelab/ev-forecast/trip-response", {
-            "event_id": event_id,
-            "use_ev": use_ev,
-            "distance_km": distance_km,
-        })
+        await self.nats.publish(
+            "energy.ev.forecast.trip_response",
+            {
+                "event_id": event_id,
+                "use_ev": use_ev,
+                "distance_km": distance_km,
+            },
+        )
 
         pending = self._ev_state.get("pending_clarifications", [])
         clarification = next(
-            (c for c in pending if c.get("event_id") == event_id), {},
+            (c for c in pending if c.get("event_id") == event_id),
+            {},
         )
         self._ev_state["pending_clarifications"] = [
             c for c in pending if c.get("event_id") != event_id
@@ -285,10 +289,11 @@ class EVTools:
         }
 
     async def request_service_refresh(
-        self, service: str, command: str = "refresh",
+        self,
+        service: str,
+        command: str = "refresh",
     ) -> dict[str, Any]:
-        topic = f"homelab/orchestrator/command/{service}"
-        self.mqtt.publish(topic, {"command": command})
+        await self.nats.publish(f"orchestrator.command.{service}", {"command": command})
         logger.info("service_command_sent", service=service, command=command)
         return {
             "success": True,

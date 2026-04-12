@@ -82,14 +82,12 @@ class OrchestratorService(BaseService):
         self._activity = ActivityTracker()
         self._service_states: dict[str, dict[str, Any]] = {}
         self._ev_state: dict = {"plan": None, "pending_clarifications": []}
-        self._ev_events: dict[str, dict[str, str]] = {}  # Track EV calendar events {date: {event_id, summary}}
+        self._ev_events: dict[
+            str, dict[str, str]
+        ] = {}  # Track EV calendar events {date: {event_id, summary}}
         self._gcal: GoogleCalendarClient | None = None
-        self._loop: asyncio.AbstractEventLoop | None = None  # Main event loop for cross-thread scheduling
 
     async def run(self) -> None:
-        self._loop = asyncio.get_running_loop()
-        self.mqtt.connect_background()
-
         memory = Memory(
             max_history=self.settings.max_conversation_history,
             max_decisions=self.settings.max_decisions,
@@ -98,7 +96,7 @@ class OrchestratorService(BaseService):
         knowledge: KnowledgeStore | None = None
         memory_doc: MemoryDocument | None = None
         if self.settings.enable_knowledge_store:
-            knowledge = KnowledgeStore(mqtt=self.mqtt)
+            knowledge = KnowledgeStore(nats=self.nats)
             memory_doc = MemoryDocument(max_size=self.settings.memory_document_max_size)
 
         gcal = GoogleCalendarClient(
@@ -118,7 +116,9 @@ class OrchestratorService(BaseService):
                 chroma = ChromaClient()
                 if not chroma.heartbeat():
                     raise RuntimeError("chroma_heartbeat_failed")
-                embedder = EmbeddingProvider(provider=self.settings.llm_provider, settings=self.settings)
+                embedder = EmbeddingProvider(
+                    provider=self.settings.llm_provider, settings=self.settings
+                )
                 semantic_memory = SemanticMemory(
                     chroma=chroma,
                     embedder=embedder,
@@ -131,12 +131,14 @@ class OrchestratorService(BaseService):
             except Exception as exc:
                 self.logger.warning("semantic_memory_disabled", error=str(exc))
         else:
-            self.logger.info("semantic_memory_disabled", reason="ENABLE_SEMANTIC_MEMORY=false")
+            self.logger.info(
+                "semantic_memory_disabled", reason="ENABLE_SEMANTIC_MEMORY=false"
+            )
 
         tool_executor = ToolExecutor(
             ha=self.ha,
             influx=self.influx,
-            mqtt=self.mqtt,
+            nats=self.nats,
             memory=memory,
             settings=self.settings,
             gcal=gcal if gcal.available else None,
@@ -147,10 +149,12 @@ class OrchestratorService(BaseService):
         )
         tool_executor._activity_tracker = self._activity
 
-        self.mqtt.subscribe("homelab/+/heartbeat", self._on_service_heartbeat)
-        self.mqtt.subscribe("homelab/+/updated", self._on_service_update)
-        self.mqtt.subscribe("homelab/ev-forecast/plan", self._on_ev_plan)
-        self.mqtt.subscribe("homelab/ev-forecast/clarification-needed", self._on_ev_clarification)
+        await self.nats.subscribe_json("heartbeat.>", self._on_service_heartbeat)
+        await self.nats.subscribe_json("services.>.updated", self._on_service_update)
+        await self.nats.subscribe_json("energy.ev.forecast.plan", self._on_ev_plan)
+        await self.nats.subscribe_json(
+            "energy.ev.forecast.clarification_needed", self._on_ev_clarification
+        )
 
         api_task: asyncio.Task | None = None
         if self.settings.orchestrator_api_key:
@@ -170,9 +174,13 @@ class OrchestratorService(BaseService):
                     shutdown_event=self._shutdown_event,
                 ),
             )
-            self.logger.info("api_server_started", port=self.settings.orchestrator_api_port)
+            self.logger.info(
+                "api_server_started", port=self.settings.orchestrator_api_port
+            )
         else:
-            self.logger.info("api_server_disabled", reason="ORCHESTRATOR_API_KEY not set")
+            self.logger.info(
+                "api_server_disabled", reason="ORCHESTRATOR_API_KEY not set"
+            )
 
         self.logger.info("orchestrator_ready", mode="headless")
         self._touch_healthcheck()
@@ -198,7 +206,7 @@ class OrchestratorService(BaseService):
 
         self.logger.info("orchestrator_stopped")
 
-    def _on_service_heartbeat(self, topic: str, payload: dict) -> None:
+    async def _on_service_heartbeat(self, subject: str, payload: dict) -> None:
         service = payload.get("service", "unknown")
         status = payload.get("status", "unknown")
         self._service_states[service] = {
@@ -207,33 +215,28 @@ class OrchestratorService(BaseService):
             "last_seen": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
 
-    def _on_service_update(self, topic: str, payload: dict) -> None:
+    async def _on_service_update(self, subject: str, payload: dict) -> None:
         self._touch_healthcheck()
 
-    def _on_ev_plan(self, topic: str, payload: dict) -> None:
+    async def _on_ev_plan(self, subject: str, payload: dict) -> None:
         self._ev_state["plan"] = payload
-        # Update calendar events asynchronously
-        # Note: MQTT callbacks run in a separate thread, so we must use
-        # call_soon_threadsafe to schedule the coroutine on the main event loop.
-        if self._gcal and self.settings.google_calendar_orchestrator_id and self._loop:
-            self._loop.call_soon_threadsafe(
-                self._loop.create_task,
-                self._update_ev_calendar_events(payload),
-            )
+        # NATS callbacks run in the asyncio event loop — can await directly.
+        if self._gcal and self.settings.google_calendar_orchestrator_id:
+            asyncio.create_task(self._update_ev_calendar_events(payload))
 
-    def _on_ev_clarification(self, topic: str, payload: dict) -> None:
+    async def _on_ev_clarification(self, subject: str, payload: dict) -> None:
         self._ev_state["pending_clarifications"] = payload.get("clarifications", [])
 
     async def _load_existing_ev_events(self) -> None:
         """Load existing EV calendar events from Google Calendar.
-        
+
         Populates self._ev_events dict to prevent creating duplicates on restart.
         """
         try:
             cal_id = self.settings.google_calendar_orchestrator_id
             # Get events for next 14 days
             events = await self._gcal.get_events(cal_id, days_ahead=14, max_results=50)
-            
+
             for event in events:
                 summary = event.get("summary", "")
                 if summary.startswith("EV:"):
@@ -241,15 +244,17 @@ class OrchestratorService(BaseService):
                     if start:  # start is YYYY-MM-DD for all-day events
                         self._ev_events[start] = {
                             "event_id": event.get("id", ""),
-                            "summary": summary
+                            "summary": summary,
                         }
-                        self.logger.info("ev_calendar_event_loaded", date=start, summary=summary)
+                        self.logger.info(
+                            "ev_calendar_event_loaded", date=start, summary=summary
+                        )
         except Exception:
             self.logger.exception("failed_to_load_existing_ev_events")
 
     async def _update_ev_calendar_events(self, plan_data: dict[str, Any]) -> None:
         """Create/update calendar events for significant EV charging needs.
-        
+
         Called when the ev-forecast service publishes a new plan via MQTT.
         Creates all-day events on the orchestrator calendar.
         """
@@ -293,13 +298,20 @@ class OrchestratorService(BaseService):
                         cal_id, days_ahead=14, max_results=50
                     )
                     for evt in cal_events:
-                        if evt.get("start") == date_str and evt.get("summary") == summary:
+                        if (
+                            evt.get("start") == date_str
+                            and evt.get("summary") == summary
+                        ):
                             # Found duplicate in calendar - update our dict and skip
                             self._ev_events[date_str] = {
                                 "event_id": evt.get("id", ""),
-                                "summary": summary
+                                "summary": summary,
                             }
-                            self.logger.info("ev_calendar_event_exists_skipped", date=date_str, summary=summary)
+                            self.logger.info(
+                                "ev_calendar_event_exists_skipped",
+                                date=date_str,
+                                summary=summary,
+                            )
                             existing = self._ev_events[date_str]
                             break
                     if existing.get("summary") == summary:
@@ -340,7 +352,9 @@ class OrchestratorService(BaseService):
                         "event_id": event.get("id", ""),
                         "summary": summary,
                     }
-                    self.logger.info("ev_calendar_event_created", date=date_str, summary=summary)
+                    self.logger.info(
+                        "ev_calendar_event_created", date=date_str, summary=summary
+                    )
                 except Exception:
                     self.logger.exception("ev_calendar_event_failed", date=date_str)
 

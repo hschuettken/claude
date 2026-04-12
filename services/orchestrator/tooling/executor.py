@@ -8,7 +8,6 @@ from typing import Any
 
 from shared.ha_client import HomeAssistantClient
 from shared.influx_client import InfluxClient
-from shared.mqtt_client import MQTTClient
 from shared.log import get_logger
 
 from gcal import GoogleCalendarClient
@@ -40,7 +39,7 @@ class ToolExecutor:
         self,
         ha: HomeAssistantClient,
         influx: InfluxClient,
-        mqtt: MQTTClient,
+        nats: Any,
         memory: Memory,
         settings: OrchestratorSettings,
         gcal: GoogleCalendarClient | None = None,
@@ -52,7 +51,7 @@ class ToolExecutor:
     ) -> None:
         self.ha = ha
         self.influx = influx
-        self.mqtt = mqtt
+        self.nats = nats
         self.memory = memory
         self.settings = settings
         self.gcal = gcal
@@ -67,10 +66,12 @@ class ToolExecutor:
         # Domain handler instances — wired up below; activity_tracker set later
         self._ha_tools = HATools(ha=ha, memory=memory)
         self._energy_tools = EnergyTools(ha=ha, influx=influx, settings=settings)
-        self._calendar_tools = CalendarTools(gcal=gcal, settings=settings, memory=memory)
+        self._calendar_tools = CalendarTools(
+            gcal=gcal, settings=settings, memory=memory
+        )
         self._ev_tools = EVTools(
             ha=ha,
-            mqtt=mqtt,
+            nats=nats,
             settings=settings,
             memory=memory,
             ev_state=self._ev_state,
@@ -82,7 +83,9 @@ class ToolExecutor:
             knowledge=knowledge,
             memory_doc=memory_doc,
         )
-        self._notification_tools = NotificationTools(send_notification_fn=send_notification_fn)
+        self._notification_tools = NotificationTools(
+            send_notification_fn=send_notification_fn
+        )
         self._orbit_tools = OrbitTools()
         self._hems_tools = HEMSTools()
 
@@ -93,15 +96,29 @@ class ToolExecutor:
     def _register_handlers(self) -> None:
         """Build the tool-name → handler dispatch table."""
         # HA tools
-        for name in ("get_entity_state", "list_ha_entities", "list_ha_services", "call_ha_service"):
+        for name in (
+            "get_entity_state",
+            "list_ha_entities",
+            "list_ha_services",
+            "call_ha_service",
+        ):
             self._dispatch[name] = (self._ha_tools, name)
 
         # Energy tools
-        for name in ("get_home_energy_summary", "get_pv_forecast", "get_energy_prices", "query_energy_history"):
+        for name in (
+            "get_home_energy_summary",
+            "get_pv_forecast",
+            "get_energy_prices",
+            "query_energy_history",
+        ):
             self._dispatch[name] = (self._energy_tools, name)
 
         # Calendar tools
-        for name in ("get_calendar_events", "check_household_availability", "create_calendar_event"):
+        for name in (
+            "get_calendar_events",
+            "check_household_availability",
+            "create_calendar_event",
+        ):
             self._dispatch[name] = (self._calendar_tools, name)
 
         # EV tools
@@ -128,7 +145,10 @@ class ToolExecutor:
             self._dispatch[name] = (self._memory_tools, name)
 
         # Notification tools
-        self._dispatch["send_notification"] = (self._notification_tools, "send_notification")
+        self._dispatch["send_notification"] = (
+            self._notification_tools,
+            "send_notification",
+        )
 
         # Orbit tools
         for name in (
@@ -190,12 +210,16 @@ class ToolExecutor:
         try:
             sig = inspect.signature(handler)
             params = sig.parameters
-            if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            if not any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            ):
                 valid_names = set(params.keys())
                 filtered = {k: v for k, v in arguments.items() if k in valid_names}
                 if len(filtered) != len(arguments):
                     dropped = set(arguments) - valid_names
-                    logger.warning("tool_args_filtered", tool=tool_name, dropped=list(dropped))
+                    logger.warning(
+                        "tool_args_filtered", tool=tool_name, dropped=list(dropped)
+                    )
                 arguments = filtered
 
             result = await handler(**arguments)

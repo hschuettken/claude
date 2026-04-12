@@ -79,8 +79,8 @@ class KnowledgeStore:
         times_used  — how often the fact has been looked up
     """
 
-    def __init__(self, mqtt: Any = None) -> None:
-        self._mqtt = mqtt
+    def __init__(self, nats: Any = None) -> None:
+        self._nats = nats
         self._facts: list[dict[str, Any]] = []
         self._load()
 
@@ -96,7 +96,9 @@ class KnowledgeStore:
     ) -> str:
         """Store a structured fact.  Returns the fact ID."""
         if fact_type not in FACT_TYPES:
-            raise ValueError(f"Invalid fact type '{fact_type}', must be one of {FACT_TYPES}")
+            raise ValueError(
+                f"Invalid fact type '{fact_type}', must be one of {FACT_TYPES}"
+            )
 
         norm_key = key.lower().strip()
 
@@ -137,7 +139,9 @@ class KnowledgeStore:
             self._save()
         return fact
 
-    def search(self, fact_type: str | None = None, query: str = "") -> list[dict[str, Any]]:
+    def search(
+        self, fact_type: str | None = None, query: str = ""
+    ) -> list[dict[str, Any]]:
         """Fuzzy search across facts.  Matches query against key and data values."""
         query_lower = query.lower().strip()
         results: list[dict[str, Any]] = []
@@ -190,21 +194,24 @@ class KnowledgeStore:
         return None
 
     def _publish_update(self, action: str, fact: dict[str, Any]) -> None:
-        """Publish knowledge update via MQTT so other services can consume."""
-        if not self._mqtt:
+        """Publish knowledge update via NATS so other services can consume."""
+        if not self._nats:
             return
         try:
-            self._mqtt.publish("homelab/orchestrator/knowledge-update", {
-                "action": action,
-                "type": fact["type"],
-                "key": fact["key"],
-                "data": fact["data"],
-                "confidence": fact["confidence"],
-                "source": fact["source"],
-                "timestamp": fact["timestamp"],
-            })
+            self._nats.publish_sync(
+                "orchestrator.knowledge_update",
+                {
+                    "action": action,
+                    "type": fact["type"],
+                    "key": fact["key"],
+                    "data": fact["data"],
+                    "confidence": fact["confidence"],
+                    "source": fact["source"],
+                    "timestamp": fact["timestamp"],
+                },
+            )
         except Exception:
-            logger.debug("knowledge_mqtt_publish_failed")
+            logger.debug("knowledge_nats_publish_failed")
 
     def _load(self) -> None:
         try:
@@ -248,7 +255,7 @@ class MemoryDocument:
         """Return the current memory document content."""
         try:
             content = MEMORY_MD_FILE.read_text(encoding="utf-8")
-            return content[:self._max_size]
+            return content[: self._max_size]
         except FileNotFoundError:
             self._ensure_exists()
             return MEMORY_MD_SEED
@@ -261,7 +268,7 @@ class MemoryDocument:
                 original_len=len(content),
                 max_size=self._max_size,
             )
-            content = content[:self._max_size]
+            content = content[: self._max_size]
 
         DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -269,7 +276,9 @@ class MemoryDocument:
         if MEMORY_MD_FILE.exists():
             backup = MEMORY_MD_FILE.with_suffix(".md.bak")
             try:
-                backup.write_text(MEMORY_MD_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+                backup.write_text(
+                    MEMORY_MD_FILE.read_text(encoding="utf-8"), encoding="utf-8"
+                )
             except OSError:
                 pass
 
