@@ -68,6 +68,9 @@ class HotStateSubscriber:
             await self.nc.subscribe("synthesis.*", cb=self._handle_synthesis)
             await self.nc.subscribe("infra.alert.*", cb=self._handle_infra_alert)
             await self.nc.subscribe("calendar.*", cb=self._handle_calendar)
+            await self.nc.subscribe(
+                "hestia.presence.updated", cb=self._handle_hestia_presence
+            )
             logger.info("nats_subscriptions_started")
         except Exception as e:
             logger.error("nats_subscribe_failed", error=str(e))
@@ -235,3 +238,48 @@ class HotStateSubscriber:
             logger.warning("calendar_message_not_json", subject=msg.subject)
         except Exception as e:
             logger.error("handle_calendar_failed", subject=msg.subject, error=str(e))
+
+    async def _handle_hestia_presence(self, msg: nats.msg.Msg) -> None:
+        """Handle hestia.presence.updated — merge presence block into hot_state for each resident."""
+        try:
+            payload = json.loads(msg.data.decode())
+            users = payload.get("users", {})
+            house_state = payload.get("house_state", "unknown")
+            visitors = payload.get("visitors", {})
+            updated_at = payload.get("updated_at")
+
+            presence_data = {
+                "house_state": house_state,
+                "visitors_on_property": len(visitors),
+                "last_change": updated_at,
+                "users": {},
+            }
+
+            for uid, user_state in users.items():
+                presence_data["users"][uid] = {
+                    "state": user_state.get("state"),
+                    "confidence": user_state.get("confidence"),
+                    "last_seen_zone": user_state.get("last_seen_zone"),
+                    "last_seen_at": user_state.get("last_seen_at"),
+                }
+
+            # Update hot state for each known resident
+            for uid in users:
+                await self._update_hot_state(uid, "presence", presence_data)
+
+            # Also update the shared "default" slot so Kairos always has global context
+            if users:
+                await self._update_hot_state("default", "presence", presence_data)
+
+            logger.debug(
+                "hestia_presence_updated",
+                house_state=house_state,
+                residents=list(users.keys()),
+                visitors=len(visitors),
+            )
+        except json.JSONDecodeError:
+            logger.warning("hestia_presence_message_not_json", subject=msg.subject)
+        except Exception as e:
+            logger.error(
+                "handle_hestia_presence_failed", subject=msg.subject, error=str(e)
+            )
