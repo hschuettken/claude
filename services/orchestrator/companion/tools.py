@@ -37,7 +37,7 @@ class ToolRegistry:
 
     async def load(self) -> None:
         """Fetch catalog from Oracle, apply policy overrides, build registry."""
-        logger.info("loading_tool_registry", oracle_url=self.oracle_url)
+        logger.info("loading_tool_registry oracle_url=%s", self.oracle_url)
 
         # Fetch tool catalog from Oracle
         try:
@@ -46,7 +46,7 @@ class ToolRegistry:
                 resp.raise_for_status()
                 catalog = resp.json()
         except Exception as e:
-            logger.warning("oracle_tools_fetch_failed", error=str(e))
+            logger.warning("oracle_tools_fetch_failed error=%s", e)
             self.tools = {}
             self._loaded = True
             return
@@ -57,10 +57,10 @@ class ToolRegistry:
                 with open(self.policy_path, "r") as f:
                     policy_yaml = yaml.safe_load(f)
                     self.policy = policy_yaml.get("tools", {})
-                    logger.info("policy_loaded", path=self.policy_path)
+                    logger.info("policy_loaded path=%s", self.policy_path)
             except Exception as e:
                 logger.warning(
-                    "policy_load_failed", path=self.policy_path, error=str(e)
+                    "policy_load_failed path=%s error=%s", self.policy_path, e
                 )
                 self.policy = {}
 
@@ -90,7 +90,7 @@ class ToolRegistry:
                 "approval_default": approval_default,
             }
 
-        logger.info("tool_registry_loaded", count=len(self.tools))
+        logger.info("tool_registry_loaded count=%d", len(self.tools))
         self._loaded = True
 
     def get_tools_for_prompt(self) -> list[dict[str, Any]]:
@@ -229,7 +229,10 @@ class ToolRegistry:
             return {"result": result, "error": None}
         except Exception as e:
             logger.error(
-                "tool_execution_failed", tool=tool_name, endpoint=endpoint, error=str(e)
+                "tool_execution_failed tool=%s endpoint=%s error=%s",
+                tool_name,
+                endpoint,
+                e,
             )
             return {"result": None, "error": str(e)}
 
@@ -278,10 +281,13 @@ class ToolRegistry:
                 resp.raise_for_status()
                 return resp.json()
         except httpx.HTTPError as e:
-            logger.error("http_call_failed", url=url, method=method, error=str(e))
+            logger.error("http_call_failed url=%s method=%s error=%s", url, method, e)
             raise
         except Exception as e:
             logger.error(
-                "tool_call_failed", tool=tool_name, endpoint=endpoint_path, error=str(e)
+                "tool_call_failed tool=%s endpoint=%s error=%s",
+                tool_name,
+                endpoint_path,
+                e,
             )
             raise
