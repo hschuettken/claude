@@ -52,12 +52,35 @@ import asyncio
 from shared.service import BaseService
 
 
+async def _register_with_oracle() -> None:
+    """Best-effort Oracle registration. Non-critical."""
+    import httpx
+    try:
+        manifest = {
+            "service_name": "${SERVICE_NAME}",
+            "port": 8000,
+            "project": "claude",
+            "health_endpoint": "/health",
+            "description": "SERVICE_DESCRIPTION_PLACEHOLDER",
+            "endpoints": [],
+            "nats_subjects": [],
+            "guidance": [],
+        }
+        async with httpx.AsyncClient(timeout=5) as c:
+            await c.post("http://192.168.0.50:8225/oracle/register", json=manifest)
+    except Exception:
+        pass  # Oracle registration is non-critical
+
+
 class ${CLASS_NAME}Service(BaseService):
     name = "${SERVICE_NAME}"
 
     async def run(self) -> None:
         self.logger.info("service_started")
         self.mqtt.connect_background()
+
+        # Best-effort Oracle registration
+        asyncio.create_task(_register_with_oracle())
 
         # TODO: implement your service logic here
 
