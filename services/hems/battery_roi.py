@@ -13,13 +13,13 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from shared.influx_client import InfluxClient
+from shared.nats_client import NatsPublisher
 
 logger = logging.getLogger("hems.battery_roi")
 
@@ -35,6 +35,17 @@ INFLUXDB_URL = os.getenv("INFLUXDB_URL", "http://192.168.0.50:8086")
 INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN", "")
 INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "nb9")
 INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "hems")
+NATS_URL = os.getenv("NATS_URL", "nats://192.168.0.50:4222")
+
+# Module-level NATS publisher
+_nats: NatsPublisher | None = None
+
+
+def _get_nats() -> NatsPublisher:
+    global _nats
+    if _nats is None:
+        _nats = NatsPublisher(url=NATS_URL)
+    return _nats
 
 
 class BatteryROITracker:
@@ -199,25 +210,16 @@ from(bucket: "{INFLUXDB_BUCKET}")
 
                 # Compute yesterday's ROI
                 roi = await self.compute_daily_roi()
-                logger.info("Daily ROI computed: %s", json.dumps(roi))
+                logger.info("Daily ROI computed: %s", roi)
 
-                # Publish to MQTT (optional)
+                # Publish to NATS
                 try:
-                    import paho.mqtt.publish as publish
-
-                    topic = "homelab/hems/battery_roi"
-                    loop = asyncio.get_event_loop()
-                    await loop.run_in_executor(
-                        None,
-                        lambda: publish.single(
-                            topic,
-                            payload=json.dumps(roi),
-                            hostname=os.getenv("MQTT_HOST", "192.168.0.73"),
-                            port=int(os.getenv("MQTT_PORT", "1883")),
-                        ),
-                    )
+                    pub = _get_nats()
+                    if not pub.connected:
+                        await pub.connect()
+                    await pub.publish("energy.hems.battery_roi", roi)
                 except Exception as exc:
-                    logger.warning("Failed to publish ROI to MQTT: %s", exc)
+                    logger.warning("Failed to publish ROI to NATS: %s", exc)
 
             except Exception as exc:
                 logger.error(

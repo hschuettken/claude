@@ -1,19 +1,23 @@
 """Home Assistant UFH (Underfloor Heating) per-circuit power sensors.
 
-Creates MQTT-based power sensors for each UFH circuit room (wohnzimmer, schlafzimmer,
-kinderzimmer, buero, kueche, esszimmer, bad, flur) via Home Assistant MQTT auto-discovery.
+Creates NATS-based power sensors for each UFH circuit room (wohnzimmer, schlafzimmer,
+kinderzimmer, buero, kueche, esszimmer, bad, flur) via Home Assistant MQTT auto-discovery
+forwarded through the nats-mqtt-bridge.
 
-Publishes current power consumption to `homelab/hems/circuits/{circuit_id}/power` (watts).
+Publishes current power consumption to NATS subject
+`energy.hems.circuits.{circuit_id}.power` (watts).
+
+HA auto-discovery payloads are published to `ha.discovery.sensor.{object_id}.config`
+and forwarded to MQTT `homeassistant/sensor/...` by the nats-mqtt-bridge.
 
 Usage:
     from ha_ufh_sensors import UFHSensorProvisioner
-    from shared.mqtt_client import MQTTClient
-    from config import HEMSSettings
+    from shared.nats_client import NatsPublisher
 
-    settings = HEMSSettings()
-    mqtt = MQTTClient(host="192.168.0.73", port=1883, client_id="hems")
+    publisher = NatsPublisher(url="nats://192.168.0.50:4222")
+    await publisher.connect()
 
-    provisioner = UFHSensorProvisioner(mqtt)
+    provisioner = UFHSensorProvisioner(publisher)
     sensor_ids = await provisioner.provision_template_sensors()
 
     # Later, publish power reading
@@ -23,10 +27,14 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
+from typing import Any
 
-from shared.mqtt_client import MQTTClient
+from shared.nats_client import NatsPublisher
 
 logger = logging.getLogger("hems.ha_ufh_sensors")
+
+NATS_URL = os.getenv("NATS_URL", "nats://192.168.0.50:4222")
 
 # UFH circuit definitions: 8 rooms with friendly names and climate entity IDs
 CIRCUIT_DEFINITIONS = [
@@ -74,19 +82,19 @@ CIRCUIT_DEFINITIONS = [
 
 
 class UFHSensorProvisioner:
-    """Provisions UFH power sensors in Home Assistant via MQTT discovery."""
+    """Provisions UFH power sensors in Home Assistant via NATS auto-discovery."""
 
-    def __init__(self, mqtt_client: MQTTClient) -> None:
-        """Initialize provisioner with MQTT client.
+    def __init__(self, nats_publisher: NatsPublisher) -> None:
+        """Initialize provisioner with NATS publisher.
 
         Args:
-            mqtt_client: Connected MQTTClient for publishing auto-discovery configs
+            nats_publisher: Connected NatsPublisher for publishing auto-discovery configs
         """
-        self.mqtt = mqtt_client
+        self.nats = nats_publisher
         self._created_sensors: list[str] = []
 
     async def provision_template_sensors(self) -> list[str]:
-        """Create UFH power sensors via MQTT auto-discovery.
+        """Create UFH power sensors via NATS → HA MQTT auto-discovery.
 
         For each circuit, publishes an HA MQTT sensor discovery message that:
         - Listens to homelab/hems/circuits/{circuit_id}/power
@@ -101,11 +109,12 @@ class UFHSensorProvisioner:
         for circuit in CIRCUIT_DEFINITIONS:
             circuit_id = circuit["id"]
             friendly_name = circuit["name"]
+            object_id = f"ufh_{circuit_id}_power"
 
             # Build HA MQTT discovery message
-            discovery_payload = {
+            discovery_payload: dict[str, Any] = {
                 "name": f"{friendly_name} Power",
-                "unique_id": f"ufh_{circuit_id}_power",
+                "unique_id": object_id,
                 "unit_of_measurement": "W",
                 "device_class": "power",
                 "state_class": "measurement",
@@ -122,17 +131,17 @@ class UFHSensorProvisioner:
                 },
             }
 
-            discovery_topic = f"homeassistant/sensor/ufh_{circuit_id}_power/config"
+            subject = f"ha.discovery.sensor.{object_id}.config"
 
             try:
-                self.mqtt.publish(discovery_topic, discovery_payload)
-                entity_id = f"sensor.ufh_{circuit_id}_power"
+                self.nats.publish_sync(subject, discovery_payload)
+                entity_id = f"sensor.{object_id}"
                 self._created_sensors.append(entity_id)
                 logger.info(
                     "ufh_sensor_published",
                     circuit_id=circuit_id,
                     entity_id=entity_id,
-                    topic=discovery_topic,
+                    subject=subject,
                 )
             except Exception as exc:
                 logger.exception(
@@ -143,16 +152,18 @@ class UFHSensorProvisioner:
 
         return self._created_sensors
 
-    def publish_circuit_power(self, circuit_id: str, watts: float) -> None:
-        """Publish current power consumption for a circuit.
+    async def publish_circuit_power(self, circuit_id: str, watts: float) -> None:
+        """Publish current power consumption for a circuit via NATS.
 
         Args:
             circuit_id: Circuit identifier (e.g., "wohnzimmer")
             watts: Power consumption in watts (float)
         """
-        topic = f"homelab/hems/circuits/{circuit_id}/power"
+        subject = f"energy.hems.circuits.{circuit_id}.power"
         try:
-            self.mqtt.publish(topic, str(watts))
+            if not self.nats.connected:
+                await self.nats.connect()
+            await self.nats.publish(subject, {"watts": watts, "circuit_id": circuit_id})
             logger.debug("circuit_power_published", circuit_id=circuit_id, watts=watts)
         except Exception as exc:
             logger.exception(

@@ -16,14 +16,25 @@ import httpx
 
 from dry_run import gate_actuation
 from schedule_manager import ScheduleManager
+from shared.nats_client import NatsPublisher
 
 logger = logging.getLogger("hems.decision_loop")
 
 HA_URL = os.getenv("HA_URL", "http://192.168.0.40:8123")
 HA_TOKEN = os.getenv("HA_TOKEN", "")
-MQTT_BROKER = os.getenv("MQTT_HOST", "192.168.0.73")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
+NATS_URL = os.getenv("NATS_URL", "nats://192.168.0.50:4222")
 DELTA_THRESHOLD = 0.5  # °C
+
+# Module-level NATS publisher
+_nats: NatsPublisher | None = None
+
+
+def _get_nats() -> NatsPublisher:
+    global _nats
+    if _nats is None:
+        _nats = NatsPublisher(url=NATS_URL)
+    return _nats
+
 
 # Optional import — decision_logger may not yet exist
 try:
@@ -75,33 +86,21 @@ class HEMSDecisionLoop:
             return None
 
     # ------------------------------------------------------------------
-    # MQTT helpers
+    # NATS helpers
     # ------------------------------------------------------------------
 
     async def _publish_command(self, room: str, setpoint: float) -> None:
-        """Publish a heating command for a room via MQTT."""
-        import json
-
-        import paho.mqtt.publish as publish
-
-        topic = f"homelab/hems/commands/{room}"
-        payload = json.dumps(
-            {
-                "room": room,
-                "setpoint": setpoint,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: publish.single(
-                topic,
-                payload=payload,
-                hostname=MQTT_BROKER,
-                port=MQTT_PORT,
-            ),
-        )
+        """Publish a heating command for a room via NATS."""
+        subject = f"energy.hems.commands.{room}"
+        payload = {
+            "room": room,
+            "setpoint": setpoint,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        pub = _get_nats()
+        if not pub.connected:
+            await pub.connect()
+        await pub.publish(subject, payload)
         logger.info(
             "Published heating command for room=%s setpoint=%.1f", room, setpoint
         )

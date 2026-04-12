@@ -13,13 +13,14 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
+
+from shared.nats_client import NatsPublisher
 
 logger = logging.getLogger("hems.wood_oven_detector")
 
@@ -30,8 +31,17 @@ HA_TEMP_SENSOR = os.getenv("HEMS_OVEN_TEMP_SENSOR", "sensor.wohnzimmer_temperatu
 HA_CO_SENSOR = os.getenv("HEMS_OVEN_CO_SENSOR", "sensor.wohnzimmer_co2")
 OVEN_TEMP_THRESHOLD = float(os.getenv("HEMS_OVEN_TEMP_THRESHOLD", "24.0"))
 OVEN_RAPID_RISE_K_PER_MIN = float(os.getenv("HEMS_OVEN_RISE_RATE", "0.3"))
-MQTT_HOST = os.getenv("MQTT_HOST", "192.168.0.73")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
+NATS_URL = os.getenv("NATS_URL", "nats://192.168.0.50:4222")
+
+# Module-level NATS publisher
+_nats: NatsPublisher | None = None
+
+
+def _get_nats() -> NatsPublisher:
+    global _nats
+    if _nats is None:
+        _nats = NatsPublisher(url=NATS_URL)
+    return _nats
 
 
 class WoodOvenDetector:
@@ -118,29 +128,21 @@ class WoodOvenDetector:
             "co_ppm": co_ppm,
         }
 
-    async def _publish_mqtt(self, payload: dict) -> None:
-        """Publish wood oven state change to MQTT.
+    async def _publish_nats(self, payload: dict) -> None:
+        """Publish wood oven state change to NATS.
 
         Args:
             payload: Dict with at least "active" and "timestamp" keys.
         """
-        import paho.mqtt.publish as publish
-
-        topic = "homelab/hems/wood_oven"
+        subject = "energy.hems.wood_oven"
         try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                lambda: publish.single(
-                    topic,
-                    payload=json.dumps(payload),
-                    hostname=MQTT_HOST,
-                    port=MQTT_PORT,
-                ),
-            )
+            pub = _get_nats()
+            if not pub.connected:
+                await pub.connect()
+            await pub.publish(subject, payload)
             logger.info("Published wood oven state: active=%s", payload["active"])
         except Exception as exc:
-            logger.error("Failed to publish MQTT: %s", exc)
+            logger.error("Failed to publish to NATS: %s", exc)
 
     async def run_detection_loop(self, interval_s: int = 300) -> None:
         """Run detection loop, publishing state changes.
@@ -160,7 +162,7 @@ class WoodOvenDetector:
                 # State transition: inactive → active
                 if is_active and not self._oven_active:
                     self._oven_active = True
-                    await self._publish_mqtt(
+                    await self._publish_nats(
                         {
                             "active": True,
                             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -172,7 +174,7 @@ class WoodOvenDetector:
                 # State transition: active → inactive
                 elif not is_active and self._oven_active:
                     self._oven_active = False
-                    await self._publish_mqtt(
+                    await self._publish_nats(
                         {
                             "active": False,
                             "timestamp": datetime.now(timezone.utc).isoformat(),

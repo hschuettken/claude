@@ -9,17 +9,27 @@ Integrates with iCal calendars to automatically switch heating modes:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 from datetime import datetime, timezone
 from typing import Optional
 
+from shared.nats_client import NatsPublisher
+
 logger = logging.getLogger(__name__)
 
 HEMS_CALENDAR_URL = os.getenv("HEMS_CALENDAR_URL", "")
-MQTT_HOST = os.getenv("MQTT_HOST", "192.168.0.73")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
+NATS_URL = os.getenv("NATS_URL", "nats://192.168.0.50:4222")
+
+# Module-level NATS publisher
+_nats: NatsPublisher | None = None
+
+
+def _get_nats() -> NatsPublisher:
+    global _nats
+    if _nats is None:
+        _nats = NatsPublisher(url=NATS_URL)
+    return _nats
 
 
 class CalendarModeSwitcher:
@@ -28,12 +38,8 @@ class CalendarModeSwitcher:
     def __init__(
         self,
         calendar_url: str = HEMS_CALENDAR_URL,
-        mqtt_host: str = MQTT_HOST,
-        mqtt_port: int = MQTT_PORT,
     ):
         self.calendar_url = calendar_url
-        self.mqtt_host = mqtt_host
-        self.mqtt_port = mqtt_port
         self._current_mode: Optional[str] = None
         self._last_mode_publish_time: float = 0.0
 
@@ -248,7 +254,7 @@ class CalendarModeSwitcher:
                 # Only publish if mode changed
                 if mode != self._current_mode:
                     self._current_mode = mode
-                    await self._publish_mode_to_mqtt(mode)
+                    await self._publish_mode_to_nats(mode)
                     logger.info("HEMS mode switched to: %s", mode or "None")
 
             except Exception as e:
@@ -267,32 +273,19 @@ class CalendarModeSwitcher:
             else:
                 await asyncio.sleep(check_interval_seconds)
 
-    async def _publish_mode_to_mqtt(self, mode: Optional[str]) -> None:
-        """Publish HEMS mode change to MQTT topic."""
+    async def _publish_mode_to_nats(self, mode: Optional[str]) -> None:
+        """Publish HEMS mode change to NATS subject."""
         try:
-            import paho.mqtt.publish as publish
-
-            payload = json.dumps(
-                {
-                    "mode": mode,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "source": "calendar",
-                }
-            )
-
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                lambda: publish.single(
-                    "homelab/hems/mode",
-                    payload=payload,
-                    hostname=self.mqtt_host,
-                    port=self.mqtt_port,
-                    qos=1,
-                    retain=False,
-                ),
-            )
-            logger.debug("Published mode to MQTT: %s", mode)
+            payload = {
+                "mode": mode,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "source": "calendar",
+            }
+            pub = _get_nats()
+            if not pub.connected:
+                await pub.connect()
+            await pub.publish("energy.hems.mode", payload)
+            logger.debug("Published mode to NATS: %s", mode)
 
         except Exception as e:
-            logger.warning("Failed to publish mode to MQTT: %s", e)
+            logger.warning("Failed to publish mode to NATS: %s", e)

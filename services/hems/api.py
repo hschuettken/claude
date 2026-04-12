@@ -15,10 +15,8 @@ All endpoints are async and optimized for InfluxDB + PostgreSQL.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
@@ -34,6 +32,8 @@ from fastapi import (
 )
 from pydantic import BaseModel, Field
 
+from shared.nats_client import NatsPublisher
+
 if TYPE_CHECKING:
     from influxdb_client.client.query_api import QueryApi
 
@@ -42,10 +42,8 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 _HEMS_API_KEY = os.getenv("HEMS_API_KEY", "hems_internal_key")
-_executor = ThreadPoolExecutor(max_workers=4)
 
-MQTT_HOST = os.getenv("MQTT_HOST", "192.168.0.73")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
+NATS_URL = os.getenv("NATS_URL", "nats://192.168.0.50:4222")
 HA_URL = os.getenv("HA_URL", "http://homeassistant:8123")
 HA_TOKEN = os.getenv("HA_TOKEN", os.getenv("HEMS_HA_TOKEN", ""))
 HEMS_BOILER_ENTITY = os.getenv("HEMS_BOILER_ENTITY", "sensor.boiler_temperature")
@@ -57,6 +55,17 @@ INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "nb9")
 INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "hems")
 
 logger = logging.getLogger("hems.api")
+
+# Module-level NATS publisher (shared singleton for this module)
+_nats: NatsPublisher | None = None
+
+
+def _get_nats() -> NatsPublisher:
+    global _nats
+    if _nats is None:
+        _nats = NatsPublisher(url=NATS_URL)
+    return _nats
+
 
 router = APIRouter(prefix="/api", tags=["internal"])
 
@@ -75,27 +84,12 @@ def _require_auth(x_api_key: Optional[str]) -> None:
         )
 
 
-def _mqtt_publish_sync(topic: str, payload: dict) -> None:
-    """Publish a JSON payload to an MQTT topic (synchronous, for executor use)."""
-    try:
-        import paho.mqtt.publish as publish
-
-        publish.single(
-            topic,
-            payload=json.dumps(payload),
-            hostname=MQTT_HOST,
-            port=MQTT_PORT,
-            qos=1,
-            retain=False,
-        )
-    except Exception as exc:
-        logger.warning("MQTT publish to %s failed: %s", topic, exc)
-
-
-async def _mqtt_publish(topic: str, payload: dict) -> None:
-    """Async wrapper around synchronous MQTT publish."""
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(_executor, _mqtt_publish_sync, topic, payload)
+async def _nats_publish(subject: str, payload: dict) -> None:
+    """Publish a JSON payload to a NATS subject."""
+    pub = _get_nats()
+    if not pub.connected:
+        await pub.connect()
+    await pub.publish(subject, payload)
 
 
 # ============================================================================
@@ -476,12 +470,12 @@ async def set_room_target(
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(hours=1)
 
-    topic = f"homelab/hems/rooms/{room_id}/target_override"
+    subject = f"energy.hems.rooms.{room_id}.target_override"
     payload: dict[str, Any] = {
         "target": body.target_temp,
         "expires_at": expires_at.isoformat(),
     }
-    await _mqtt_publish(topic, payload)
+    await _nats_publish(subject, payload)
 
     return {
         "room_id": room_id,
@@ -516,7 +510,7 @@ async def set_mode(
         )
 
     now_iso = datetime.now(timezone.utc).isoformat()
-    await _mqtt_publish("homelab/hems/mode", {"mode": mode, "set_at": now_iso})
+    await _nats_publish("energy.hems.mode", {"mode": mode, "set_at": now_iso})
 
     return {"mode": mode, "active": True}
 
@@ -610,7 +604,7 @@ async def retrain_model(
     _require_auth(x_api_key)
 
     now_iso = datetime.now(timezone.utc).isoformat()
-    await _mqtt_publish("homelab/hems/commands/retrain", {"full": False})
+    await _nats_publish("energy.hems.commands.retrain", {"full": False})
     return {"triggered": True, "timestamp": now_iso}
 
 
@@ -634,12 +628,12 @@ async def override_flow_temp(
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(minutes=body.duration_minutes)
 
-    mqtt_payload: dict[str, Any] = {
+    nats_payload: dict[str, Any] = {
         "flow_temp": body.flow_temp,
         "duration_minutes": body.duration_minutes,
         "expires_at": expires_at.isoformat(),
     }
-    await _mqtt_publish("homelab/hems/boiler/flow_override", mqtt_payload)
+    await _nats_publish("energy.hems.boiler.flow_override", nats_payload)
 
     return {
         "flow_temp": body.flow_temp,
