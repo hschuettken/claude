@@ -419,6 +419,7 @@ class EVForecastService:
                                 "date": d.date.isoformat(),
                                 "urgency": d.urgency,
                                 "charge_mode": d.charge_mode,
+                                "energy_needed_kwh": round(d.energy_needed_kwh, 2),
                                 "energy_to_charge_kwh": round(
                                     d.energy_to_charge_kwh, 2
                                 ),
@@ -430,6 +431,7 @@ class EVForecastService:
                         ],
                         "urgency": plan.days[0].urgency if plan.days else "none",
                         "mode": plan.days[0].charge_mode if plan.days else "PV Surplus",
+                        "current_soc_pct": vehicle.soc_pct,
                         "timestamp": datetime.now(self._tz).isoformat(),
                     },
                 )

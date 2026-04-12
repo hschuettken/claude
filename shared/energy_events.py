@@ -104,6 +104,7 @@ class EVPlanUpdated(BaseModel):
     urgency: str  # none/low/medium/high/critical
     mode: str
     timestamp: str
+    current_soc_pct: float | None = None  # EV SoC at time of plan generation
 
 
 class EVChargingStarted(BaseModel):
