@@ -36,7 +36,6 @@ from shared.energy_events import (
 from shared.ha_client import HomeAssistantClient
 from shared.influx_client import InfluxClient
 from shared.log import get_logger
-from shared.mqtt_client import MQTTClient
 from shared.nats_client import NatsPublisher
 
 HEALTHCHECK_FILE = Path("/app/data/healthcheck")
@@ -64,13 +63,6 @@ class PVForecastService:
             self.settings.influxdb_token,
             self.settings.influxdb_org,
         )
-        self.mqtt = MQTTClient(
-            host=self.settings.mqtt_host,
-            port=self.settings.mqtt_port,
-            client_id="pv-forecast",
-            username=self.settings.mqtt_username,
-            password=self.settings.mqtt_password,
-        )
 
         self._start_time = time.monotonic()
 
@@ -91,9 +83,8 @@ class PVForecastService:
         self._data_days: dict[str, int] = {"east": 0, "west": 0}
         self._forecast_solar_today: dict[str, float] = {}
         self._last_forecast_summary: str = ""
-        self._loop: asyncio.AbstractEventLoop | None = None
 
-        # --- NATS ---
+        # --- NATS publisher (initialized in start()) ---
         self.nats: NatsPublisher | None = None
 
         # --- Accuracy / anomaly tracking ---
@@ -150,18 +141,15 @@ class PVForecastService:
         self.engine.longitude = self.longitude
         self.publisher = HASensorPublisher(self.ha, self.settings.ha_sensor_prefix)
 
-        # Connect MQTT for broadcasting events
-        self.mqtt.connect_background()
+        # Register entities in HA via NATS ha.discovery (bridge forwards to MQTT for HA)
+        await self._register_ha_discovery()
 
-        # Register entities in HA via MQTT auto-discovery
-        self._register_ha_discovery()
-
-        # Subscribe to orchestrator commands
-        self._loop = asyncio.get_event_loop()
-        self.mqtt.subscribe(
-            "homelab/orchestrator/command/pv-forecast",
-            self._on_orchestrator_command,
-        )
+        # Subscribe to orchestrator commands via NATS
+        if self.nats and self.nats.connected:
+            await self.nats.subscribe_json(
+                "orchestrator.command.pv-forecast",
+                self._on_orchestrator_command,
+            )
 
         # Calculate sunrise/sunset and publish daylight window
         await self._update_daylight_window()
@@ -251,9 +239,12 @@ class PVForecastService:
                 "training_time": self._last_training_time,
                 "data_days": self._data_days,
             }
-            self.mqtt.publish("homelab/pv-forecast/model-trained", enriched_results)
+            if self.nats and self.nats.connected:
+                await self.nats.publish(
+                    "energy.pv.forecast.model_trained", enriched_results
+                )
 
-            # Publish NATS event
+            # Publish NATS typed event
             if self.nats and self.nats.connected and results:
                 east = results.get("east", {})
                 west = results.get("west", {})
@@ -339,9 +330,10 @@ class PVForecastService:
                 ),
                 "reasoning": self._last_forecast_summary,
             }
-            self.mqtt.publish("homelab/pv-forecast/updated", summary)
+            if self.nats and self.nats.connected:
+                await self.nats.publish("energy.pv.forecast.updated", summary)
 
-            # Publish NATS event
+            # Publish NATS typed event
             if self.nats and self.nats.connected:
                 east_r2 = self._last_training_results.get("east", {}).get("r2", 0.0)
                 west_r2 = self._last_training_results.get("west", {}).get("r2", 0.0)
@@ -461,20 +453,18 @@ class PVForecastService:
                 tags={"date": today_str},
             )
 
-            # Publish MQTT accuracy message for HA discovery sensor
-            self.mqtt.publish(
-                "homelab/pv-forecast/accuracy",
-                {
-                    "accuracy_pct": round(accuracy_pct, 1),
-                    "forecast_kwh": round(total_forecast, 2),
-                    "actual_kwh": round(total_actual, 2),
-                    "delta_pct": round(total_delta_pct, 2),
-                    "date": today_str,
-                },
-            )
-
-            # Publish NATS accuracy event
+            # Publish NATS accuracy event — bridge forwards to MQTT for HA discovery sensor
             if self.nats and self.nats.connected:
+                await self.nats.publish(
+                    "energy.pv.forecast.accuracy",
+                    {
+                        "accuracy_pct": round(accuracy_pct, 1),
+                        "forecast_kwh": round(total_forecast, 2),
+                        "actual_kwh": round(total_actual, 2),
+                        "delta_pct": round(total_delta_pct, 2),
+                        "date": today_str,
+                    },
+                )
                 accuracy_event = PVForecastAccuracyResult(
                     date=today_str,
                     east_forecast_kwh=round(east_forecast, 3),
@@ -701,20 +691,34 @@ class PVForecastService:
     # Orchestrator command handler
     # ------------------------------------------------------------------
 
-    def _on_orchestrator_command(self, topic: str, payload: dict) -> None:
-        """Handle commands from the orchestrator service."""
+    async def _on_orchestrator_command(self, subject: str, payload: dict) -> None:
+        """Handle commands from the orchestrator service (NATS callback)."""
         command = payload.get("command", "")
         logger.info("orchestrator_command", command=command)
 
-        if command == "refresh" and self._loop:
-            asyncio.run_coroutine_threadsafe(self._forecast(), self._loop)
-        elif command == "retrain" and self._loop:
-            asyncio.run_coroutine_threadsafe(self._train(), self._loop)
+        if command == "refresh":
+            await self._forecast()
+        elif command == "retrain":
+            await self._train()
         else:
             logger.debug("unknown_command", command=command)
 
-    def _register_ha_discovery(self) -> None:
-        """Register service entities in HA via MQTT auto-discovery."""
+    async def _publish_ha_discovery(
+        self, component: str, object_id: str, config: dict, node_id: str = ""
+    ) -> None:
+        """Publish HA auto-discovery config via NATS (bridge forwards to MQTT for HA)."""
+        if not (self.nats and self.nats.connected):
+            return
+        if "unique_id" not in config:
+            config["unique_id"] = f"{node_id}_{object_id}" if node_id else object_id
+        if node_id:
+            subject = f"ha.discovery.{component}.{node_id}.{object_id}.config"
+        else:
+            subject = f"ha.discovery.{component}.{object_id}.config"
+        await self.nats.publish(subject, config)
+
+    async def _register_ha_discovery(self) -> None:
+        """Register service entities in HA via NATS ha.discovery subjects."""
         device = {
             "identifiers": ["homelab_pv_forecast"],
             "name": "PV AI Forecast",
@@ -727,7 +731,7 @@ class PVForecastService:
         trained_topic = "homelab/pv-forecast/model-trained"  # noqa: F841
 
         # --- Connectivity & uptime ---
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "binary_sensor",
             "status",
             node_id=node,
@@ -744,7 +748,7 @@ class PVForecastService:
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "uptime",
             node_id=node,
@@ -761,7 +765,7 @@ class PVForecastService:
         )
 
         # --- Core forecast sensors ---
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "today_kwh",
             node_id=node,
@@ -776,7 +780,7 @@ class PVForecastService:
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "today_remaining_kwh",
             node_id=node,
@@ -791,7 +795,7 @@ class PVForecastService:
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "tomorrow_kwh",
             node_id=node,
@@ -806,7 +810,7 @@ class PVForecastService:
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "day_after_kwh",
             node_id=node,
@@ -822,7 +826,7 @@ class PVForecastService:
         )
 
         # --- Per-array breakdown sensors ---
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "east_today_kwh",
             node_id=node,
@@ -837,7 +841,7 @@ class PVForecastService:
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "west_today_kwh",
             node_id=node,
@@ -852,7 +856,7 @@ class PVForecastService:
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "east_tomorrow_kwh",
             node_id=node,
@@ -867,7 +871,7 @@ class PVForecastService:
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "west_tomorrow_kwh",
             node_id=node,
@@ -883,7 +887,7 @@ class PVForecastService:
         )
 
         # --- Model quality & training sensors ---
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "east_model_type",
             node_id=node,
@@ -897,7 +901,7 @@ class PVForecastService:
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "west_model_type",
             node_id=node,
@@ -911,7 +915,7 @@ class PVForecastService:
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "east_model_r2",
             node_id=node,
@@ -925,7 +929,7 @@ class PVForecastService:
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "west_model_r2",
             node_id=node,
@@ -939,7 +943,7 @@ class PVForecastService:
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "east_model_mae",
             node_id=node,
@@ -954,7 +958,7 @@ class PVForecastService:
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "west_model_mae",
             node_id=node,
@@ -969,7 +973,7 @@ class PVForecastService:
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "data_days_east",
             node_id=node,
@@ -984,7 +988,7 @@ class PVForecastService:
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "data_days_west",
             node_id=node,
@@ -999,7 +1003,7 @@ class PVForecastService:
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "last_training",
             node_id=node,
@@ -1015,7 +1019,7 @@ class PVForecastService:
         )
 
         # --- Forecast.Solar comparison ---
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "forecast_solar_today",
             node_id=node,
@@ -1031,7 +1035,7 @@ class PVForecastService:
         )
 
         # --- Decision reasoning (the key sensor) ---
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "forecast_reasoning",
             node_id=node,
@@ -1060,7 +1064,7 @@ class PVForecastService:
         )
 
         # --- Accuracy sensor ---
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "forecast_accuracy_today",
             node_id=node,
@@ -1082,22 +1086,26 @@ class PVForecastService:
 
         Runs independently of the asyncio event loop so it can't be blocked
         by long-running scheduler jobs (ML training, InfluxDB queries).
+        Uses NatsPublisher.publish_sync() which is thread-safe.
         """
         interval = self.settings.heartbeat_interval_seconds
-        # Small initial delay so MQTT has time to connect
+        # Small initial delay so NATS has time to connect
         self._heartbeat_stop.wait(min(5, interval))
 
         while not self._heartbeat_stop.is_set():
             self._touch_healthcheck()
             try:
-                self.mqtt.publish(
-                    "homelab/pv-forecast/heartbeat",
-                    {
-                        "status": "online",
-                        "service": "pv-forecast",
-                        "uptime_seconds": round(time.monotonic() - self._start_time, 1),
-                    },
-                )
+                if self.nats:
+                    self.nats.publish_sync(
+                        "heartbeat.pv-forecast",
+                        {
+                            "status": "online",
+                            "service": "pv-forecast",
+                            "uptime_seconds": round(
+                                time.monotonic() - self._start_time, 1
+                            ),
+                        },
+                    )
             except Exception:
                 logger.debug("heartbeat_publish_failed")
             self._heartbeat_stop.wait(interval)
@@ -1118,7 +1126,6 @@ class PVForecastService:
         self.scheduler.shutdown(wait=False)
         await self.ha.close()
         self.influx.close()
-        self.mqtt.disconnect()
         if self.nats:
             await self.nats.close()
         if self.weather:

@@ -21,7 +21,6 @@ from datetime import datetime, time as dt_time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from shared.nats_client import NatsPublisher
 from shared.service import BaseService
 
 from charger import WallboxController
@@ -66,8 +65,8 @@ class SmartEVChargingService(BaseService):
         self._last_cycle_completed_at: float = time.monotonic()
         self._watchdog_task: asyncio.Task | None = None
 
-        # --- NATS publisher ---
-        self.nats: NatsPublisher | None = None
+        # Note: self.nats (NatsPublisher) is provided by BaseService and connected
+        # in start() before run() is called. Do not override it here.
 
         # --- Session tracking for NATS events ---
         self._session_start_time: float | None = None
@@ -99,20 +98,17 @@ class SmartEVChargingService(BaseService):
         self._influx_cycle_count: int = 0
 
     async def run(self) -> None:
-        self.mqtt.connect_background()
-        self._register_ha_discovery()
+        # NATS is already connected by BaseService.start() before run() is called.
+        # Register HA discovery entities via NATS ha.discovery subjects.
+        await self._register_ha_discovery()
 
-        # Connect NATS publisher
-        if self.settings.nats_enabled:
-            self.nats = NatsPublisher(url=self.settings.nats_url)
-            await self.nats.connect()
-
-        # Subscribe to orchestrator commands
+        # Subscribe to orchestrator commands via NATS
         self._force_cycle = asyncio.Event()
-        self.mqtt.subscribe(
-            "homelab/orchestrator/command/smart-ev-charging",
-            self._on_orchestrator_command,
-        )
+        if self.nats and self.nats.connected:
+            await self.nats.subscribe_json(
+                "orchestrator.command.smart-ev-charging",
+                self._on_orchestrator_command,
+            )
 
         charger = WallboxController(
             ha=self.ha,
@@ -206,9 +202,7 @@ class SmartEVChargingService(BaseService):
                 pass
 
     async def shutdown(self) -> None:
-        """Clean up resources including NATS."""
-        if self.nats:
-            await self.nats.close()
+        """Clean up resources. BaseService.shutdown() handles NATS close."""
         await super().shutdown()
 
     # ------------------------------------------------------------------
@@ -248,7 +242,7 @@ class SmartEVChargingService(BaseService):
 
                 # Publish MQTT alert so HA / monitoring can pick it up
                 try:
-                    self.publish(
+                    await self.publish(
                         "watchdog",
                         {
                             "status": "frozen",
@@ -261,7 +255,7 @@ class SmartEVChargingService(BaseService):
                         },
                     )
                 except Exception:
-                    self.logger.exception("watchdog_mqtt_publish_failed")
+                    self.logger.exception("watchdog_nats_publish_failed")
 
                 if self.settings.watchdog_restart_on_freeze:
                     self.logger.critical(
@@ -651,10 +645,10 @@ class SmartEVChargingService(BaseService):
                 )
             self._drain_mode_active = False
 
-        # --- Publish drain status MQTT ---
+        # --- Publish drain status via NATS (bridge forwards to MQTT for HA discovery) ---
         drain_remaining = max(0.0, self._drain_budget_kwh - self._drain_used_kwh)
-        self.mqtt.publish(
-            "homelab/smart-ev-charging/drain-status",
+        await self.publish(
+            "drain-status",
             {
                 "drain_mode_active": self._drain_mode_active,
                 "drain_budget_kwh": round(self._drain_budget_kwh, 2),
@@ -715,8 +709,8 @@ class SmartEVChargingService(BaseService):
         # --- R4: kwh_tocharge_left ---
         kwh_tocharge_left_val = ctx.kwh_tocharge_left
 
-        # Publish forecast sensors via MQTT
-        self.publish(
+        # Publish forecast sensors via NATS
+        await self.publish(
             "forecast",
             {
                 "ev_forecast_needed_kwh": round(self._forecast_needed_kwh, 1),
@@ -726,7 +720,7 @@ class SmartEVChargingService(BaseService):
         )
 
         # 4) Publish status
-        self._publish_status(
+        await self._publish_status(
             ctx,
             decision,
             house_power,
@@ -884,10 +878,10 @@ class SmartEVChargingService(BaseService):
             return dt_time(7, 0)
 
     # ------------------------------------------------------------------
-    # MQTT publishing
+    # NATS publishing
     # ------------------------------------------------------------------
 
-    def _publish_status(
+    async def _publish_status(
         self,
         ctx: ChargingContext,
         decision: ChargingDecision,
@@ -961,7 +955,7 @@ class SmartEVChargingService(BaseService):
                 ctx, decision, house_power, pv_available
             ),
         }
-        self.publish("status", payload)
+        await self.publish("status", payload)
 
     def _compose_reasoning(
         self,
@@ -1055,7 +1049,8 @@ class SmartEVChargingService(BaseService):
     # Orchestrator command handler
     # ------------------------------------------------------------------
 
-    def _on_orchestrator_command(self, topic: str, payload: dict) -> None:
+    async def _on_orchestrator_command(self, subject: str, payload: dict) -> None:
+        """Handle commands from orchestrator (NATS async callback)."""
         command = payload.get("command", "")
         self.logger.info("orchestrator_command", command=command)
 
@@ -1238,10 +1233,24 @@ class SmartEVChargingService(BaseService):
             self.logger.debug("influx_decision_write_failed")
 
     # ------------------------------------------------------------------
-    # MQTT auto-discovery
+    # NATS HA auto-discovery (bridge forwards to MQTT for HA)
     # ------------------------------------------------------------------
 
-    def _register_ha_discovery(self) -> None:
+    async def _publish_ha_discovery(
+        self, component: str, object_id: str, config: dict, node_id: str = ""
+    ) -> None:
+        """Publish HA auto-discovery config via NATS."""
+        if not self.nats.connected:
+            return
+        if "unique_id" not in config:
+            config["unique_id"] = f"{node_id}_{object_id}" if node_id else object_id
+        if node_id:
+            subject = f"ha.discovery.{component}.{node_id}.{object_id}.config"
+        else:
+            subject = f"ha.discovery.{component}.{object_id}.config"
+        await self.nats.publish(subject, config)
+
+    async def _register_ha_discovery(self) -> None:
         """Register entities in HA under the 'Smart EV Charging' device."""
         device = {
             "identifiers": ["homelab_smart_ev_charging"],
@@ -1254,7 +1263,7 @@ class SmartEVChargingService(BaseService):
         heartbeat_topic = f"homelab/{self.name}/heartbeat"
 
         # --- Connectivity & uptime ---
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "binary_sensor",
             "service_status",
             node_id=node,
@@ -1271,7 +1280,7 @@ class SmartEVChargingService(BaseService):
         )
 
         # --- Core charging sensors ---
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "charge_mode",
             node_id=node,
@@ -1284,7 +1293,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "target_power",
             node_id=node,
@@ -1300,7 +1309,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "actual_power",
             node_id=node,
@@ -1315,7 +1324,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "session_energy",
             node_id=node,
@@ -1330,7 +1339,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "pv_available",
             node_id=node,
@@ -1346,7 +1355,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "status_reason",
             node_id=node,
@@ -1359,7 +1368,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "battery_power",
             node_id=node,
@@ -1375,7 +1384,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "battery_soc",
             node_id=node,
@@ -1391,7 +1400,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "house_power",
             node_id=node,
@@ -1409,7 +1418,7 @@ class SmartEVChargingService(BaseService):
 
         # --- EV SoC sensors ---
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "ev_soc",
             node_id=node,
@@ -1429,7 +1438,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "energy_needed",
             node_id=node,
@@ -1446,7 +1455,7 @@ class SmartEVChargingService(BaseService):
 
         # --- Enhanced decision context sensors ---
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "pv_surplus",
             node_id=node,
@@ -1462,7 +1471,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "battery_assist",
             node_id=node,
@@ -1478,7 +1487,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "battery_assist_reason",
             node_id=node,
@@ -1492,7 +1501,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "pv_power",
             node_id=node,
@@ -1508,7 +1517,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "grid_power",
             node_id=node,
@@ -1524,7 +1533,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "pv_forecast_remaining",
             node_id=node,
@@ -1541,7 +1550,7 @@ class SmartEVChargingService(BaseService):
 
         # --- Deadline / Full-by-morning sensors ---
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "binary_sensor",
             "full_by_morning",
             node_id=node,
@@ -1556,7 +1565,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "binary_sensor",
             "drain_pv_battery",
             node_id=node,
@@ -1571,7 +1580,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "drain_boost_w",
             node_id=node,
@@ -1587,7 +1596,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "binary_sensor",
             "vehicle_connected",
             node_id=node,
@@ -1603,7 +1612,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "energy_remaining",
             node_id=node,
@@ -1618,7 +1627,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "target_energy",
             node_id=node,
@@ -1633,7 +1642,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "deadline_hours_left",
             node_id=node,
@@ -1648,7 +1657,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "deadline_required_power",
             node_id=node,
@@ -1666,7 +1675,7 @@ class SmartEVChargingService(BaseService):
 
         # --- Feature #5: kWh remaining & estimated completion ---
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "kwh_remaining",
             node_id=node,
@@ -1681,7 +1690,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "estimated_completion_time",
             node_id=node,
@@ -1700,7 +1709,7 @@ class SmartEVChargingService(BaseService):
 
         # --- Departure passed sensor ---
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "binary_sensor",
             "departure_passed",
             node_id=node,
@@ -1718,7 +1727,7 @@ class SmartEVChargingService(BaseService):
 
         # --- Phase 2: Solar defer sensors ---
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "binary_sensor",
             "solar_defer",
             node_id=node,
@@ -1733,7 +1742,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "solar_defer_pv_kwh",
             node_id=node,
@@ -1751,7 +1760,7 @@ class SmartEVChargingService(BaseService):
 
         # --- Decision reasoning ---
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "decision_reasoning",
             node_id=node,
@@ -1784,7 +1793,7 @@ class SmartEVChargingService(BaseService):
 
         # --- Watchdog sensor ---
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "binary_sensor",
             "watchdog_status",
             node_id=node,
@@ -1804,7 +1813,7 @@ class SmartEVChargingService(BaseService):
         # --- R1: Forecast sensors (read-only, from ev-forecast planner) ---
         forecast_topic = f"homelab/{self.name}/forecast"
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "ev_forecast_needed_kwh",
             node_id=node,
@@ -1819,7 +1828,7 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "ev_forecast_needed_soc",
             node_id=node,
@@ -1835,7 +1844,7 @@ class SmartEVChargingService(BaseService):
         )
 
         # --- R4: kWh to charge left sensor ---
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "ev_kwh_to_charge_left",
             node_id=node,
@@ -1853,7 +1862,7 @@ class SmartEVChargingService(BaseService):
         # --- Drain mode status sensors ---
         drain_state_topic = "homelab/smart-ev-charging/drain-status"
 
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "binary_sensor",
             "drain_mode_active",
             node_id=node,
@@ -1867,7 +1876,7 @@ class SmartEVChargingService(BaseService):
                 "icon": "mdi:battery-arrow-down",
             },
         )
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "drain_budget_kwh",
             node_id=node,
@@ -1881,7 +1890,7 @@ class SmartEVChargingService(BaseService):
                 "icon": "mdi:battery-arrow-down-outline",
             },
         )
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "drain_used_kwh",
             node_id=node,
@@ -1895,7 +1904,7 @@ class SmartEVChargingService(BaseService):
                 "icon": "mdi:battery-minus",
             },
         )
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "drain_remaining_kwh",
             node_id=node,
@@ -1909,7 +1918,7 @@ class SmartEVChargingService(BaseService):
                 "icon": "mdi:battery-charging-low",
             },
         )
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "drain_reason",
             node_id=node,
@@ -1921,7 +1930,7 @@ class SmartEVChargingService(BaseService):
                 "icon": "mdi:information-outline",
             },
         )
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "battery_refill_eta",
             node_id=node,

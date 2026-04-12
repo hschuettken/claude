@@ -1,10 +1,10 @@
 """Base service class that handles boilerplate setup.
 
 Every service can inherit from this to get config, logging, HA client,
-InfluxDB client, and MQTT set up automatically.
+InfluxDB client, and NATS publisher set up automatically.
 
-Includes automatic MQTT heartbeat — every service publishes its status
-to `homelab/{service-name}/heartbeat` periodically. Override `health_check()`
+Includes automatic NATS heartbeat — every service publishes its status
+to `heartbeat.{service-name}` periodically. Override `health_check()`
 to add custom health logic.
 
 Usage:
@@ -15,7 +15,7 @@ Usage:
         name = "my-service"
 
         async def run(self) -> None:
-            # self.settings, self.logger, self.ha, self.influx, self.mqtt
+            # self.settings, self.logger, self.ha, self.influx, self.nats
             # are all ready to use
             state = await self.ha.get_state("sensor.temperature")
             self.logger.info("temperature", value=state["state"])
@@ -38,7 +38,7 @@ from shared.config import Settings
 from shared.ha_client import HomeAssistantClient
 from shared.influx_client import InfluxClient
 from shared.log import get_logger
-from shared.mqtt_client import MQTTClient
+from shared.nats_client import NatsPublisher
 
 
 HEALTHCHECK_FILE = Path("/app/data/healthcheck")
@@ -66,13 +66,10 @@ class BaseService:
             token=self.settings.influxdb_token,
             org=self.settings.influxdb_org,
         )
-        self.mqtt = MQTTClient(
-            host=self.settings.mqtt_host,
-            port=self.settings.mqtt_port,
-            client_id=self.name,
-            username=self.settings.mqtt_username,
-            password=self.settings.mqtt_password,
-        )
+        self.nats = NatsPublisher(url=self.settings.nats_url)
+        # Backward-compat sentinel — individual services that were not yet
+        # migrated may reference self.mqtt; keep as None so attribute exists.
+        self.mqtt = None  # type: ignore[assignment]
 
     async def run(self) -> None:
         """Override this method with your service logic."""
@@ -87,6 +84,10 @@ class BaseService:
             loop.add_signal_handler(sig, self._handle_shutdown)
 
         self.logger.info("service_starting", service=self.name)
+
+        # Connect NATS
+        if self.settings.nats_enabled:
+            await self.nats.connect()
 
         # Start heartbeat in background
         if self.settings.heartbeat_interval_seconds > 0:
@@ -114,12 +115,12 @@ class BaseService:
                 pass
         # Publish offline status before disconnecting
         try:
-            self.publish("heartbeat", {"status": "offline", "service": self.name})
+            await self.publish("heartbeat", {"status": "offline", "service": self.name})
         except Exception:
             pass
         await self.ha.close()
         self.influx.close()
-        self.mqtt.disconnect()
+        await self.nats.close()
         self.logger.info("service_stopped")
 
     async def wait_for_shutdown(self) -> None:
@@ -141,10 +142,14 @@ class BaseService:
         except Exception:
             return False  # Fail open — if we can't check, allow actions
 
-    def publish(self, event_type: str, data: dict[str, Any]) -> None:
-        """Publish an event on the service's MQTT topic."""
-        topic = f"homelab/{self.name}/{event_type}"
-        self.mqtt.publish(topic, data)
+    async def publish(self, event_type: str, data: dict[str, Any]) -> None:
+        """Publish an event on the service's NATS subject.
+
+        Subject: services.{self.name}.{event_type}
+        The nats-mqtt-bridge translates retained subjects to MQTT for HA consumers.
+        """
+        subject = f"services.{self.name}.{event_type}"
+        await self.nats.publish(subject, data)
 
     # --- Debugger ---
 
@@ -160,6 +165,7 @@ class BaseService:
 
         try:
             import debugpy
+
             debugpy.listen(("0.0.0.0", 5678))
             self.logger.info(
                 "debugger_waiting",
@@ -213,13 +219,13 @@ class BaseService:
             pass
 
     async def _heartbeat_loop(self) -> None:
-        """Periodically publish heartbeat to MQTT."""
+        """Periodically publish heartbeat to NATS."""
         interval = self.settings.heartbeat_interval_seconds
-        # Small initial delay so the service has time to connect MQTT
+        # Small initial delay so the service has time to connect NATS
         await asyncio.sleep(min(5, interval))
 
         while not self._shutdown_event.is_set():
-            # Touch healthcheck FIRST — even if MQTT publish fails,
+            # Touch healthcheck FIRST — even if NATS publish fails,
             # Docker still sees the service as alive.
             self._touch_healthcheck()
 
@@ -235,14 +241,12 @@ class BaseService:
                 if custom:
                     payload.update(custom)
 
-                self.publish("heartbeat", payload)
+                await self.nats.publish(f"heartbeat.{self.name}", payload)
             except Exception:
                 self.logger.debug("heartbeat_publish_failed")
 
             try:
-                await asyncio.wait_for(
-                    self._shutdown_event.wait(), timeout=interval
-                )
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=interval)
                 break  # shutdown event was set
             except asyncio.TimeoutError:
                 pass  # normal — just means the interval elapsed

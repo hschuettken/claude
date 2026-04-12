@@ -39,7 +39,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from shared.ha_client import HomeAssistantClient
 from shared.influx_client import InfluxClient
 from shared.log import get_logger
-from shared.mqtt_client import MQTTClient
 from shared.nats_client import NatsPublisher
 
 from config import EVForecastSettings
@@ -80,13 +79,6 @@ class EVForecastService:
 
         # Clients
         self.ha = HomeAssistantClient(self.settings.ha_url, self.settings.ha_token)
-        self.mqtt = MQTTClient(
-            host=self.settings.mqtt_host,
-            port=self.settings.mqtt_port,
-            client_id="ev-forecast",
-            username=self.settings.mqtt_username,
-            password=self.settings.mqtt_password,
-        )
 
         # Vehicle monitor — reads HA sensors (single or dual account mode)
         vehicle_config = VehicleConfig(
@@ -216,35 +208,35 @@ class EVForecastService:
         # Load persisted state (before first vehicle read)
         self._load_state()
 
-        # Connect MQTT
-        self.mqtt.connect_background()
-
-        # Connect NATS (if enabled)
+        # Connect NATS
         if self.settings.nats_enabled:
             self.nats = NatsPublisher(url=self.settings.nats_url)
             await self.nats.connect()
 
         # Register HA auto-discovery entities
-        self._register_ha_discovery()
+        await self._register_ha_discovery()
 
-        # Subscribe to orchestrator trip clarification responses
-        self.mqtt.subscribe(
-            self.settings.orchestrator_response_topic,
-            self._on_trip_response,
-        )
+        # Subscribe to NATS subjects for orchestrator integration
+        if self.nats and self.nats.connected:
+            # Orchestrator trip clarification responses
+            await self.nats.subscribe_json(
+                "orchestrator.ev_forecast.trip_response",
+                self._on_trip_response,
+            )
+            # Orchestrator commands
+            await self.nats.subscribe_json(
+                "orchestrator.command.ev-forecast",
+                self._on_orchestrator_command,
+            )
 
-        # Subscribe to orchestrator commands
-        self._loop = asyncio.get_event_loop()
-        self.mqtt.subscribe(
-            "homelab/orchestrator/command/ev-forecast",
-            self._on_orchestrator_command,
-        )
+            # Learned knowledge updates from orchestrator (wrap sync handler)
+            async def _on_knowledge_update(subject: str, payload: dict) -> None:
+                self.learned_destinations.on_knowledge_update(subject, payload)
 
-        # Subscribe to learned knowledge from orchestrator
-        self.mqtt.subscribe(
-            self.settings.knowledge_update_topic,
-            self.learned_destinations.on_knowledge_update,
-        )
+            await self.nats.subscribe_json(
+                "orchestrator.knowledge.update",
+                _on_knowledge_update,
+            )
 
         # Initialize Google Calendar
         self._init_google_calendar()
@@ -340,7 +332,8 @@ class EVForecastService:
                 "consumption_measurements": self.consumption_tracker.measurement_count,
                 "timestamp": datetime.now(self._tz).isoformat(),
             }
-            self.mqtt.publish("homelab/ev-forecast/vehicle", payload)
+            if self.nats and self.nats.connected:
+                await self.nats.publish("energy.ev.forecast.vehicle", payload)
             self._save_state()
         except Exception:
             logger.exception("vehicle_update_failed")
@@ -404,10 +397,11 @@ class EVForecastService:
             )
             self._last_plan = plan
 
-            # Publish plan to MQTT (with reasoning for the rich sensor)
+            # Publish plan to NATS (bridge forwards to MQTT for HA discovery sensor)
             plan_payload = plan.to_dict()
             plan_payload["reasoning"] = self._compose_plan_reasoning(plan, vehicle)
-            self.mqtt.publish("homelab/ev-forecast/plan", plan_payload)
+            if self.nats and self.nats.connected:
+                await self.nats.publish("energy.ev.forecast.plan", plan_payload)
 
             # Publish plan to NATS event bus
             if self.nats and self.nats.connected:
@@ -454,11 +448,11 @@ class EVForecastService:
                     target_soc_entity=self.settings.target_soc_entity,
                 )
 
-            # Publish any pending clarifications to orchestrator
+            # Publish any pending clarifications to orchestrator via NATS
             clarifications = self.trips.get_pending_clarifications()
-            if clarifications:
-                self.mqtt.publish(
-                    "homelab/ev-forecast/clarification-needed",
+            if clarifications and self.nats and self.nats.connected:
+                await self.nats.publish(
+                    "energy.ev.forecast.clarification_needed",
                     {"clarifications": clarifications},
                 )
 
@@ -564,20 +558,20 @@ class EVForecastService:
     # MQTT callbacks
     # ------------------------------------------------------------------
 
-    def _on_orchestrator_command(self, topic: str, payload: dict) -> None:
-        """Handle commands from the orchestrator service."""
+    async def _on_orchestrator_command(self, subject: str, payload: dict) -> None:
+        """Handle commands from the orchestrator service (NATS async callback)."""
         command = payload.get("command", "")
         logger.info("orchestrator_command", command=command)
 
-        if command == "refresh" and self._loop:
-            asyncio.run_coroutine_threadsafe(self._update_plan(), self._loop)
-        elif command == "refresh_vehicle" and self._loop:
-            asyncio.run_coroutine_threadsafe(self._update_vehicle(), self._loop)
+        if command == "refresh":
+            await self._update_plan()
+        elif command == "refresh_vehicle":
+            await self._update_vehicle()
         else:
             logger.debug("unknown_command", command=command)
 
-    def _on_trip_response(self, topic: str, payload: dict[str, Any]) -> None:
-        """Handle trip clarification response from orchestrator."""
+    async def _on_trip_response(self, subject: str, payload: dict[str, Any]) -> None:
+        """Handle trip clarification response from orchestrator (NATS async callback)."""
         event_id = payload.get("event_id", "")
         use_ev = payload.get("use_ev", False)
         distance_km = payload.get("distance_km", 0)
@@ -591,8 +585,7 @@ class EVForecastService:
                 distance_km=distance_km,
             )
             # Trigger a plan update after clarification is resolved
-            if self._loop:
-                asyncio.run_coroutine_threadsafe(self._update_plan(), self._loop)
+            await self._update_plan()
 
     # ------------------------------------------------------------------
     # Google Calendar initialization
@@ -862,10 +855,24 @@ class EVForecastService:
             pass  # Not found or already deleted — fine
 
     # ------------------------------------------------------------------
-    # MQTT HA auto-discovery
+    # NATS HA auto-discovery (bridge forwards to MQTT for HA)
     # ------------------------------------------------------------------
 
-    def _register_ha_discovery(self) -> None:
+    async def _publish_ha_discovery(
+        self, component: str, object_id: str, config: dict, node_id: str = ""
+    ) -> None:
+        """Publish HA auto-discovery config via NATS."""
+        if not (self.nats and self.nats.connected):
+            return
+        if "unique_id" not in config:
+            config["unique_id"] = f"{node_id}_{object_id}" if node_id else object_id
+        if node_id:
+            subject = f"ha.discovery.{component}.{node_id}.{object_id}.config"
+        else:
+            subject = f"ha.discovery.{component}.{object_id}.config"
+        await self.nats.publish(subject, config)
+
+    async def _register_ha_discovery(self) -> None:
         """Register entities in HA under the 'EV Forecast' device."""
         device = {
             "identifiers": ["homelab_ev_forecast"],
@@ -876,7 +883,7 @@ class EVForecastService:
         node = "ev_forecast"
 
         # Service status
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "binary_sensor",
             "service_status",
             node_id=node,
@@ -896,7 +903,7 @@ class EVForecastService:
         plan_topic = "homelab/ev-forecast/plan"
 
         # EV SoC
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "ev_soc",
             node_id=node,
@@ -913,7 +920,7 @@ class EVForecastService:
         )
 
         # EV Range
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "ev_range",
             node_id=node,
@@ -928,7 +935,7 @@ class EVForecastService:
         )
 
         # Active Account
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "active_account",
             node_id=node,
@@ -942,7 +949,7 @@ class EVForecastService:
         )
 
         # Charging State
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "charging_state",
             node_id=node,
@@ -956,7 +963,7 @@ class EVForecastService:
         )
 
         # Plug State
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "plug_state",
             node_id=node,
@@ -970,7 +977,7 @@ class EVForecastService:
         )
 
         # Plan: Energy Needed Today
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "energy_needed_today",
             node_id=node,
@@ -990,7 +997,7 @@ class EVForecastService:
         )
 
         # Plan: Charge Mode
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "recommended_mode",
             node_id=node,
@@ -1008,7 +1015,7 @@ class EVForecastService:
         )
 
         # Plan: Next Trip
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "next_trip",
             node_id=node,
@@ -1033,7 +1040,7 @@ class EVForecastService:
         )
 
         # Plan: Departure Time
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "next_departure",
             node_id=node,
@@ -1052,7 +1059,7 @@ class EVForecastService:
         )
 
         # Plan: Status/Reason
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "plan_status",
             node_id=node,
@@ -1070,7 +1077,7 @@ class EVForecastService:
         )
 
         # Uptime (diagnostic)
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "uptime",
             node_id=node,
@@ -1087,7 +1094,7 @@ class EVForecastService:
         )
 
         # Consumption (dynamic kWh/100km)
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "consumption",
             node_id=node,
@@ -1107,7 +1114,7 @@ class EVForecastService:
         )
 
         # Rich reasoning sensor with full plan details as JSON attributes
-        self.mqtt.publish_ha_discovery(
+        await self._publish_ha_discovery(
             "sensor",
             "plan_reasoning",
             node_id=node,
@@ -1193,30 +1200,34 @@ class EVForecastService:
 
         Runs independently of the asyncio event loop so it can't be blocked
         by long-running scheduler jobs (HA API, Google Calendar, geocoding).
+        Uses NatsPublisher.publish_sync() which is thread-safe.
         """
         interval = self.settings.heartbeat_interval_seconds
-        # Small initial delay so MQTT has time to connect
+        # Small initial delay so NATS has time to connect
         self._heartbeat_stop.wait(min(5, interval))
 
         while not self._heartbeat_stop.is_set():
             self._touch_healthcheck()
             try:
                 vehicle = self.vehicle.last_state
-                self.mqtt.publish(
-                    "homelab/ev-forecast/heartbeat",
-                    {
-                        "status": "online",
-                        "service": "ev-forecast",
-                        "uptime_seconds": round(time.monotonic() - self._start_time, 1),
-                        "ev_soc_pct": vehicle.soc_pct,
-                        "active_account": vehicle.active_account or "single",
-                        "has_plan": self._last_plan is not None,
-                        "consumption_kwh_100km": self.consumption_tracker.consumption_kwh_per_100km,
-                        "consumption_source": "measured"
-                        if self.consumption_tracker.has_data
-                        else "default",
-                    },
-                )
+                if self.nats:
+                    self.nats.publish_sync(
+                        "heartbeat.ev-forecast",
+                        {
+                            "status": "online",
+                            "service": "ev-forecast",
+                            "uptime_seconds": round(
+                                time.monotonic() - self._start_time, 1
+                            ),
+                            "ev_soc_pct": vehicle.soc_pct,
+                            "active_account": vehicle.active_account or "single",
+                            "has_plan": self._last_plan is not None,
+                            "consumption_kwh_100km": self.consumption_tracker.consumption_kwh_per_100km,
+                            "consumption_source": "measured"
+                            if self.consumption_tracker.has_data
+                            else "default",
+                        },
+                    )
             except Exception:
                 logger.debug("heartbeat_publish_failed")
             self._heartbeat_stop.wait(interval)
@@ -1332,15 +1343,15 @@ class EVForecastService:
         if hasattr(self, "_heartbeat_stop"):
             self._heartbeat_stop.set()
         self.scheduler.shutdown(wait=False)
-        self.mqtt.publish(
-            "homelab/ev-forecast/heartbeat",
-            {
-                "status": "offline",
-                "service": "ev-forecast",
-            },
-        )
+        if self.nats and self.nats.connected:
+            await self.nats.publish(
+                "heartbeat.ev-forecast",
+                {
+                    "status": "offline",
+                    "service": "ev-forecast",
+                },
+            )
         await self.ha.close()
-        self.mqtt.disconnect()
         if self.nats:
             await self.nats.close()
         logger.info("shutdown_complete")
