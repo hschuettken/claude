@@ -25,7 +25,12 @@ from shared.service import BaseService
 
 from charger import WallboxController
 from config import EVChargingSettings
-from strategy import ChargeMode, ChargingContext, ChargingDecision, ChargingStrategy
+from strategy import (
+    ChargeMode,
+    ChargingContext,
+    ChargingDecision,
+    ChargingStrategy,
+)
 
 HEALTHCHECK_FILE = Path("/app/data/healthcheck")
 
@@ -103,6 +108,22 @@ class SmartEVChargingService(BaseService):
         # --- Counters ---
         self._surplus_publish_counter: int = 0
         self._influx_cycle_count: int = 0
+        self._timeline_publish_counter: int = 0
+
+        # --- FR #2118: Session cost tracking ---
+        self._session_pv_kwh: float = 0.0
+        self._session_grid_kwh: float = 0.0
+        self._session_cost_eur: float = 0.0
+        self._session_savings_eur: float = 0.0
+        self._session_reimbursement_eur: float = 0.0
+        self._cost_session_start_energy: float = 0.0  # detect session reset
+
+        # --- FR #2119: Decision log ---
+        self._decision_log: deque = deque(maxlen=5)
+        self._last_decision_reason: str = ""
+
+        # --- FR #2123: Mode change tracking ---
+        self._last_mode_change: dict | None = None
 
     async def run(self) -> None:
         # NATS is already connected by BaseService.start() before run() is called.
@@ -540,6 +561,74 @@ class SmartEVChargingService(BaseService):
                     "timestamp": now.isoformat(),
                 },
             )
+            # --- FR #2123: Track mode change details ---
+            self._last_mode_change = {
+                "timestamp": now.isoformat(),
+                "old_mode": old_mode,
+                "new_mode": new_mode_str,
+                "trigger": "ha_input_select_changed",
+                "context": (
+                    f"SoC: {round(ev_soc)}%, needed: {ctx.energy_needed_kwh:.1f}kWh"
+                    if ev_soc is not None
+                    else f"needed: {ctx.energy_needed_kwh:.1f}kWh"
+                ),
+            }
+            await self._nats_publish(
+                "energy.charging.mode_changed", self._last_mode_change
+            )
+
+        # --- FR #2119: Decision log (deduplicated) ---
+        if decision.reason != self._last_decision_reason:
+            self._last_decision_reason = decision.reason
+            self._decision_log.append(
+                {
+                    "timestamp": now.isoformat(),
+                    "reason": decision.reason,
+                    "target_power_w": decision.target_power_w,
+                    "mode": ctx.mode.value,
+                    "trigger": "cycle",
+                }
+            )
+
+        # --- FR #2118: Session cost tracking ---
+        if self._should_reset_cost_session(wallbox.session_energy_kwh):
+            self._reset_cost_session(wallbox.session_energy_kwh)
+        if decision.target_power_w > 0 and wallbox.current_power_w > 0:
+            actual_power_w = wallbox.current_power_w
+            pv_available = max(
+                0,
+                ctx.grid_power_w
+                + actual_power_w
+                + ctx.battery_power_w
+                - self.settings.grid_reserve_w,
+            )
+            pv_fraction = min(1.0, max(0.0, pv_available / actual_power_w))
+            cycle_seconds = float(self.settings.control_interval_seconds)
+            pv_kwh_cycle = actual_power_w * pv_fraction / 1000 * (cycle_seconds / 3600)
+            grid_kwh_cycle = (
+                actual_power_w * (1 - pv_fraction) / 1000 * (cycle_seconds / 3600)
+            )
+            self._session_pv_kwh += pv_kwh_cycle
+            self._session_grid_kwh += grid_kwh_cycle
+            grid_price = self.settings.grid_price_ct / 100
+            self._session_cost_eur = self._session_grid_kwh * grid_price
+            self._session_savings_eur = self._session_pv_kwh * grid_price
+            self._session_reimbursement_eur = (
+                (self._session_pv_kwh + self._session_grid_kwh)
+                * self.settings.reimbursement_ct
+                / 100
+            )
+
+        # --- FR #2123: NATS demand publish (every cycle) ---
+        await self._nats_publish(
+            "energy.ev.demand",
+            {
+                "demand_w": decision.demand_w,
+                "allocated_w": decision.allocated_w,
+                "mode": ctx.mode.value,
+                "timestamp": datetime.now(tz=self.tz).isoformat(),
+            },
+        )
 
         # --- Determine vehicle_charging state (post-decision for accuracy) ---
         is_now_charging = decision.target_power_w > 0 and wallbox.vehicle_connected
@@ -587,6 +676,8 @@ class SmartEVChargingService(BaseService):
                     mode=old_mode or self._current_mode,
                     battery_assist_kwh=self._session_battery_assist_kwh,
                 )
+                # FR #2118: Write session cost data to InfluxDB
+                self._write_session_cost_influx()
             self._session_start_time = None
             self._session_battery_assist_kwh = 0.0
 
@@ -699,6 +790,12 @@ class SmartEVChargingService(BaseService):
                 mode=self._current_mode,
                 reason_code=decision.reason[:50],
             )
+
+        # --- FR #2121: Charging timeline NATS publish (every 5 cycles ~2.5 min) ---
+        self._timeline_publish_counter += 1
+        if self._timeline_publish_counter >= 5:
+            self._timeline_publish_counter = 0
+            await self._publish_charging_timeline(ctx, decision, now)
 
         # 3) Apply to wallbox
         if not decision.skip_control:
@@ -1004,6 +1101,26 @@ class SmartEVChargingService(BaseService):
             "reasoning": self._compose_reasoning(
                 ctx, decision, house_power, pv_available
             ),
+            # --- FR #2118: Session cost ---
+            "session_cost_eur": round(self._session_cost_eur, 3),
+            "session_pv_fraction_pct": round(
+                self._session_pv_kwh
+                / max(0.001, self._session_pv_kwh + self._session_grid_kwh)
+                * 100,
+                1,
+            ),
+            "session_savings_eur": round(self._session_savings_eur, 3),
+            "session_reimbursement_eur": round(self._session_reimbursement_eur, 3),
+            # --- FR #2119: Decision log ---
+            "decision_log": list(self._decision_log),
+            "latest_reason": self._last_decision_reason[:255],
+            # --- FR #2120: Plan summary ---
+            "plan_summary": self._build_plan_summary(decision, ctx),
+            "plan_confidence_pct": round(self._pv_accuracy_pct, 1),
+            # --- FR #2123: Mode change ---
+            "last_mode_change": self._last_mode_change,
+            "demand_w": decision.demand_w,
+            "allocated_w": decision.allocated_w,
         }
         await self.publish("status", payload)
 
@@ -1094,6 +1211,173 @@ class SmartEVChargingService(BaseService):
         lines.append(f"Reason: {decision.reason}")
 
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # FR #2118: Session cost helpers
+    # ------------------------------------------------------------------
+
+    def _should_reset_cost_session(self, session_energy_kwh: float) -> bool:
+        """Return True when the wallbox session energy resets to ~0 (new session)."""
+        return session_energy_kwh < 0.05 and self._cost_session_start_energy > 0.1
+
+    def _reset_cost_session(self, session_energy_kwh: float) -> None:
+        """Reset cost accumulators for a new session."""
+        self._session_pv_kwh = 0.0
+        self._session_grid_kwh = 0.0
+        self._session_cost_eur = 0.0
+        self._session_savings_eur = 0.0
+        self._session_reimbursement_eur = 0.0
+        self._cost_session_start_energy = session_energy_kwh
+
+    def _write_session_cost_influx(self) -> None:
+        """Write session cost summary to InfluxDB on session completion."""
+        total_kwh = self._session_pv_kwh + self._session_grid_kwh
+        if total_kwh < 0.01:
+            return
+        try:
+            self.influx.write_point(
+                bucket="ev_analytics",
+                measurement="ev_session_cost",
+                fields={
+                    "pv_kwh": round(self._session_pv_kwh, 3),
+                    "grid_kwh": round(self._session_grid_kwh, 3),
+                    "total_kwh": round(total_kwh, 3),
+                    "cost_eur": round(self._session_cost_eur, 4),
+                    "savings_eur": round(self._session_savings_eur, 4),
+                    "reimbursement_eur": round(self._session_reimbursement_eur, 4),
+                    "pv_fraction_pct": round(self._session_pv_kwh / total_kwh * 100, 1),
+                },
+                tags={"service": "smart-ev-charging", "mode": self._current_mode},
+            )
+        except Exception:
+            self.logger.debug("influx_session_cost_write_failed")
+
+    # ------------------------------------------------------------------
+    # FR #2120: Plan summary
+    # ------------------------------------------------------------------
+
+    def _build_plan_summary(
+        self, decision: ChargingDecision, ctx: ChargingContext
+    ) -> str:
+        """Build human-readable plan summary for HA sensor."""
+        parts: list[str] = []
+
+        if decision.target_power_w == 0:
+            parts.append(f"Paused: {decision.reason[:60]}")
+        else:
+            pv_fraction = (
+                decision.pv_surplus_w / decision.target_power_w
+                if decision.target_power_w > 0
+                else 0.0
+            )
+            source = "PV" if pv_fraction >= 0.9 else "Grid+PV"
+            parts.append(f"{source} {decision.target_power_w / 1000:.1f}kW")
+
+        if ctx.pv_hourly_forecast:
+            now_hour = ctx.now.hour
+            pv_hours = [
+                h
+                for h in ctx.pv_hourly_forecast
+                if h.get("hour", 0) > now_hour and h.get("kwh", 0) > 0.5
+            ]
+            if pv_hours:
+                peak = max(pv_hours, key=lambda h: h.get("kwh", 0))
+                parts.append(
+                    f"PV peak {peak['hour']:02d}:00 ({peak.get('kwh', 0):.1f}kWh)"
+                )
+
+        if decision.energy_remaining_kwh > 0:
+            if decision.deadline_active and decision.deadline_hours_left > 0:
+                parts.append(f"Ready in {decision.deadline_hours_left:.1f}h")
+            elif ctx.mode in (ChargeMode.PV_ONLY, ChargeMode.PV_SURPLUS):
+                if decision.estimated_completion_days > 0:
+                    parts.append(
+                        f"PV-only ETA: {decision.estimated_completion_days:.1f}d"
+                    )
+
+        return " | ".join(parts) if parts else "No active plan"
+
+    # ------------------------------------------------------------------
+    # FR #2121: Charging timeline NATS publish
+    # ------------------------------------------------------------------
+
+    async def _publish_charging_timeline(
+        self,
+        ctx: ChargingContext,
+        decision: ChargingDecision,
+        now: datetime,
+    ) -> None:
+        """Build and publish 24h charging timeline to NATS."""
+        from datetime import timezone as _tz
+
+        UTC = _tz.utc
+        slots: list[ChargingSlot] = []
+
+        # Build PV slots from hourly forecast
+        if ctx.pv_hourly_forecast:
+            for entry in ctx.pv_hourly_forecast:
+                hour = entry.get("hour", -1)
+                kwh = float(entry.get("kwh", 0.0))
+                confidence = float(entry.get("confidence", 0.8))
+                if hour < 0 or kwh < 0.3:
+                    continue
+                if hour <= now.hour:
+                    continue  # skip past hours
+                slot_start = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+                slot_end = slot_start + timedelta(hours=1)
+                # Estimate charging power from PV kwh available in this hour
+                pv_power_est = min(
+                    self.settings.wallbox_max_power_w,
+                    int(kwh * 1000),  # rough: 1 kWh/h ≈ 1000W average
+                )
+                if pv_power_est >= self.settings.wallbox_min_power_w:
+                    slots.append(
+                        ChargingSlot(
+                            start=slot_start.isoformat(),
+                            end=slot_end.isoformat(),
+                            source="pv",
+                            power_w=pv_power_est,
+                            energy_kwh=round(kwh, 3),
+                            confidence=round(confidence, 2),
+                        )
+                    )
+
+        # Add overnight grid slot if mode suggests grid use
+        if ctx.mode in (ChargeMode.AUTO, ChargeMode.SMART, ChargeMode.READY_BY):
+            if ctx.energy_needed_kwh > 0:
+                grid_start = now.replace(hour=23, minute=0, second=0, microsecond=0)
+                if now.hour >= 23:
+                    grid_start = grid_start + timedelta(days=1)
+                grid_end = grid_start + timedelta(hours=6)
+                grid_kwh = min(
+                    ctx.energy_needed_kwh,
+                    self.settings.wallbox_max_power_w / 1000 * 6,
+                )
+                slots.append(
+                    ChargingSlot(
+                        start=grid_start.isoformat(),
+                        end=grid_end.isoformat(),
+                        source="grid",
+                        power_w=self.settings.wallbox_min_power_w,
+                        energy_kwh=round(grid_kwh, 3),
+                        confidence=0.7,
+                    )
+                )
+
+        # Estimate completion
+        estimated_completion_iso: str | None = None
+        if decision.target_power_w > 0 and ctx.energy_needed_kwh > 0:
+            hours = ctx.energy_needed_kwh / (decision.target_power_w / 1000.0)
+            estimated_completion_iso = (now + timedelta(hours=hours)).isoformat()
+
+        timeline_data = {
+            "slots": [asdict(s) for s in slots],
+            "current_soc_pct": ctx.ev_soc_pct,
+            "target_soc_pct": ctx.ev_target_soc_pct,
+            "estimated_completion": estimated_completion_iso,
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+        await self._nats_publish("energy.charging.timeline", timeline_data)
 
     # ------------------------------------------------------------------
     # Orchestrator command handler
@@ -2018,7 +2302,140 @@ class SmartEVChargingService(BaseService):
             },
         )
 
-        self.logger.info("ha_discovery_registered", entity_count=38)
+        # --- FR #2118: Session cost sensors ---
+        await self._publish_ha_discovery(
+            "sensor",
+            "session_cost_eur",
+            node_id=node,
+            config={
+                "name": "Session Cost",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.session_cost_eur }}",
+                "unit_of_measurement": "EUR",
+                "icon": "mdi:currency-eur",
+                "state_class": "measurement",
+                "entity_category": "diagnostic",
+            },
+        )
+        await self._publish_ha_discovery(
+            "sensor",
+            "session_pv_fraction_pct",
+            node_id=node,
+            config={
+                "name": "Session PV Fraction",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.session_pv_fraction_pct }}",
+                "unit_of_measurement": "%",
+                "icon": "mdi:solar-power",
+                "state_class": "measurement",
+                "entity_category": "diagnostic",
+            },
+        )
+        await self._publish_ha_discovery(
+            "sensor",
+            "session_savings_eur",
+            node_id=node,
+            config={
+                "name": "Session PV Savings",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.session_savings_eur }}",
+                "unit_of_measurement": "EUR",
+                "icon": "mdi:piggy-bank",
+                "state_class": "measurement",
+                "entity_category": "diagnostic",
+            },
+        )
+        await self._publish_ha_discovery(
+            "sensor",
+            "session_reimbursement_eur",
+            node_id=node,
+            config={
+                "name": "Session Reimbursement",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.session_reimbursement_eur }}",
+                "unit_of_measurement": "EUR",
+                "icon": "mdi:cash-plus",
+                "state_class": "measurement",
+                "entity_category": "diagnostic",
+            },
+        )
+
+        # --- FR #2119: Decision log sensor ---
+        await self._publish_ha_discovery(
+            "sensor",
+            "decision_log",
+            node_id=node,
+            config={
+                "name": "Decision Log",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.latest_reason[:255] }}",
+                "json_attributes_topic": status_topic,
+                "json_attributes_template": (
+                    '{{ {"decision_log": value_json.decision_log} | tojson }}'
+                ),
+                "icon": "mdi:text-box-search-outline",
+                "entity_category": "diagnostic",
+            },
+        )
+
+        # --- FR #2120: Plan summary sensors ---
+        await self._publish_ha_discovery(
+            "sensor",
+            "plan_summary",
+            node_id=node,
+            config={
+                "name": "Plan Summary",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.plan_summary }}",
+                "icon": "mdi:clipboard-text-outline",
+            },
+        )
+        await self._publish_ha_discovery(
+            "sensor",
+            "plan_confidence_pct",
+            node_id=node,
+            config={
+                "name": "Plan Confidence",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": "{{ value_json.plan_confidence_pct }}",
+                "unit_of_measurement": "%",
+                "icon": "mdi:gauge",
+                "state_class": "measurement",
+                "entity_category": "diagnostic",
+            },
+        )
+
+        # --- FR #2123: Mode change reason sensor ---
+        await self._publish_ha_discovery(
+            "sensor",
+            "last_mode_change_reason",
+            node_id=node,
+            config={
+                "name": "Last Mode Change",
+                "device": device,
+                "state_topic": status_topic,
+                "value_template": (
+                    "{{ value_json.last_mode_change.new_mode "
+                    "~ ' (from ' ~ value_json.last_mode_change.old_mode ~ ')' "
+                    "if value_json.last_mode_change else 'none' }}"
+                ),
+                "json_attributes_topic": status_topic,
+                "json_attributes_template": (
+                    '{{ {"last_mode_change": value_json.last_mode_change} | tojson }}'
+                ),
+                "icon": "mdi:swap-horizontal",
+                "entity_category": "diagnostic",
+            },
+        )
+
+        self.logger.info("ha_discovery_registered", entity_count=46)
 
     # ------------------------------------------------------------------
     # Healthcheck

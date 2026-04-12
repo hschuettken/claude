@@ -136,6 +136,22 @@ class ChargingDecision:
     # --- PV Only: multi-day completion estimate ---
     estimated_completion_days: float = 0.0  # 0 = today, 1.5 = 1.5 days from now
 
+    # --- HEMS demand split (FR #2123) ---
+    demand_w: int = 0  # what EV wants (pre-coordinator)
+    allocated_w: int = 0  # what it gets (= demand_w until HEMS coordinator exists)
+
+
+@dataclass
+class ChargingSlot:
+    """A single charging slot in the 24h timeline (FR #2121)."""
+
+    start: str  # ISO datetime
+    end: str  # ISO datetime
+    source: str  # "pv", "grid", "battery_assist", "idle"
+    power_w: int
+    energy_kwh: float
+    confidence: float  # 0–1
+
 
 class ChargingStrategy:
     """Calculates target charging power based on mode and conditions."""
@@ -329,6 +345,12 @@ class ChargingStrategy:
             self._charge_started_at = None
         self._was_pv_charging = decision.target_power_w > 0
         self._last_target_w = decision.target_power_w
+
+        # --- FR #2123: HEMS demand split ---
+        decision.demand_w = decision.target_power_w
+        decision.allocated_w = (
+            decision.target_power_w
+        )  # same until HEMS coordinator exists
 
         return decision
 
