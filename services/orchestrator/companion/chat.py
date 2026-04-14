@@ -108,6 +108,7 @@ class ChatEngine:
     ) -> dict[str, Any]:
         """Call LLM Router. Returns {content, tool_calls, usage}."""
         payload: dict[str, Any] = {
+            "model": "quality",
             "messages": messages,
             "stream": False,
             "latency_mode": "low",
@@ -120,12 +121,23 @@ class ChatEngine:
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
                 resp = await client.post(
-                    f"{self.llm_router_url}/chat",
+                    f"{self.llm_router_url}/v1/chat/completions",
                     json=payload,
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                return data
+
+            # Normalise OpenAI-compat response → flat {content, tool_calls, usage}
+            choices = data.get("choices") or []
+            if choices:
+                message = choices[0].get("message", {})
+                return {
+                    "content": message.get("content", "") or "",
+                    "tool_calls": message.get("tool_calls") or [],
+                    "usage": data.get("usage", {}),
+                }
+            # Fallback: router returned something unexpected — pass through as-is
+            return data
         except httpx.HTTPError as exc:
             logger.error("llm_router_http_error", error=str(exc))
             raise
