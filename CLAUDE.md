@@ -364,6 +364,7 @@ Full lifecycle for ambiguous trip resolution:
 ## Key Notes for AI Assistants
 
 0. **Oracle first** — Before any new feature, endpoint, or integration, query the Integration Oracle (`POST http://192.168.0.50:8225/oracle/query` with `{"intent": "..."}`) and validate code before committing (`POST /oracle/validate` with `{"code_snippet": "..."}`). See workspace CLAUDE.md for details.
+0b. **Oracle registration** — Every service MUST have `_register_with_oracle()` in its startup code. The manifest must list ALL NATS subjects (publish AND subscribe), all HTTP endpoints, and any MQTT translation routes. See `~/dev/CLAUDE.md` → "Oracle Registration" section for the full template and checklist. **If you add or remove a NATS subject, update the manifest in the same commit.**
 1. **Read before modifying** — Always read a file before proposing changes. For service-specific work, read the service's own `CLAUDE.md` first.
 2. **Minimal changes** — Only make changes directly requested. Avoid over-engineering.
 3. **Service template** — When creating new services, use `./scripts/new-service.sh` or copy `services/example-service/`.
