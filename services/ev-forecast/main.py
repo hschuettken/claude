@@ -43,7 +43,7 @@ from shared.nats_client import NatsPublisher
 
 from config import EVForecastSettings
 from learned_destinations import LearnedDestinations
-from planner import ChargingPlan, ChargingPlanner
+from planner import ChargingPlan, ChargingPlanner, WeeklyPlanBuilder
 from trips import GeoDistance, TripPredictor
 from vehicle import (
     ConsumptionTracker,
