@@ -53,6 +53,30 @@ logger = get_logger("pv-forecast")
 class PVForecastService:
     """Main service coordinating model training, forecasting, and publishing."""
 
+    async def _register_with_oracle(self) -> None:
+        """Best-effort Oracle registration. Non-critical — service must start even if Oracle is down."""
+        try:
+            manifest = {
+                "service_name": "pv-forecast",
+                "port": None,
+                "description": "PV production forecast from Solcast API",
+                "endpoints": [],
+                "nats_subjects": [
+                    "energy.pv.forecast.updated",
+                    "energy.pv.forecast.model_trained",
+                    "energy.daylight.window",
+                    "heartbeat.pv-forecast",
+                    "orchestrator.command.pv-forecast",
+                ],
+                "source_paths": [
+                    {"repo": "claude", "paths": ["services/pv-forecast/"]},
+                ],
+            }
+            async with httpx.AsyncClient(timeout=5) as c:
+                await c.post("http://192.168.0.50:8225/oracle/register", json=manifest)
+        except Exception:
+            pass
+
     def __init__(self) -> None:
         self.settings = PVForecastSettings()
         self.scheduler = AsyncIOScheduler()
@@ -122,6 +146,9 @@ class PVForecastService:
     async def start(self) -> None:
         """Initialize and start the service."""
         logger.info("service_starting")
+
+        # Register with Oracle (non-blocking)
+        asyncio.create_task(self._register_with_oracle())
 
         # Resolve location
         await self._resolve_location()

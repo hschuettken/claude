@@ -1,5 +1,6 @@
 """Marketing Agent FastAPI service — Phase 0 scaffold."""
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -20,11 +21,64 @@ logging.basicConfig(level=settings.log_level)
 logger = logging.getLogger(__name__)
 
 
+async def _register_with_oracle() -> None:
+    """Best-effort Oracle registration."""
+    import httpx
+
+    try:
+        manifest = {
+            "service_name": "marketing-agent",
+            "port": 8211,
+            "description": "Content marketing automation — Scout signals, Ghost publishing, Neo4j",
+            "endpoints": [
+                {"method": "GET", "path": "/health", "purpose": "Health check"},
+                {"method": "GET", "path": "/api/v1/signals", "purpose": "List signals"},
+                {"method": "GET", "path": "/api/v1/topics", "purpose": "List topics"},
+                {"method": "GET", "path": "/api/v1/drafts", "purpose": "List drafts"},
+                {
+                    "method": "POST",
+                    "path": "/api/v1/publish",
+                    "purpose": "Publish content",
+                },
+                {
+                    "method": "GET",
+                    "path": "/api/v1/scout/jobs",
+                    "purpose": "List Scout jobs",
+                },
+                {
+                    "method": "GET",
+                    "path": "/api/v1/synthesis/context",
+                    "purpose": "Get synthesis context",
+                },
+                {
+                    "method": "GET",
+                    "path": "/api/v1/knowledge-graph/search",
+                    "purpose": "Search KG",
+                },
+            ],
+            "nats_subjects": [
+                "marketing.signals.detected",
+                "marketing.draft.created",
+                "synthesis.context.snapshot",
+            ],
+            "source_paths": [
+                {"repo": "claude", "paths": ["services/marketing-agent/"]},
+            ],
+        }
+        async with httpx.AsyncClient(timeout=5) as c:
+            await c.post("http://192.168.0.50:8225/oracle/register", json=manifest)
+    except Exception:
+        pass  # Oracle down is not a startup blocker
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
     # Startup
     logger.info("Marketing Agent starting up...")
+
+    asyncio.create_task(_register_with_oracle())
+
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables initialized")
 
@@ -35,14 +89,16 @@ async def lifespan(app: FastAPI):
         settings.neo4j_user,
         settings.neo4j_password,
     )
-    
+
     if neo4j.connected:
         logger.info("Initializing KG schema...")
         await MarketingKGSchema.initialize(neo4j)
         logger.info("Seeding ContentPillar nodes...")
         await MarketingKGSchema.seed_pillars(neo4j)
     else:
-        logger.warning("Knowledge Graph unavailable — continuing with graceful degradation")
+        logger.warning(
+            "Knowledge Graph unavailable — continuing with graceful degradation"
+        )
 
     # Initialize Scout Engine
     if settings.scout_enabled:
@@ -64,6 +120,7 @@ async def lifespan(app: FastAPI):
         logger.info("Initializing SynthesisOS NATS consumer...")
         try:
             from app.consumers.synthesis import init_synthesis_consumer
+
             await init_synthesis_consumer()
             logger.info("SynthesisOS consumer started successfully")
         except Exception as e:
@@ -88,6 +145,7 @@ async def lifespan(app: FastAPI):
     # Stop SynthesisOS consumer
     try:
         from app.consumers.synthesis import close_synthesis_consumer
+
         await close_synthesis_consumer()
         logger.info("SynthesisOS consumer stopped")
     except Exception as e:

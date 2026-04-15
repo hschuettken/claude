@@ -40,6 +40,29 @@ class SmartEVChargingService(BaseService):
     name = "smart-ev-charging"
     HA_READ_TIMEOUT = 10
 
+    async def _register_with_oracle(self) -> None:
+        """Best-effort Oracle registration. Non-critical — service must start even if Oracle is down."""
+        try:
+            manifest = {
+                "service_name": "smart-ev-charging",
+                "port": None,
+                "description": "Smart EV charging — PV surplus, schedule optimization, mode control",
+                "endpoints": [],
+                "nats_subjects": [
+                    "energy.ev.charging.status",
+                    "heartbeat.smart-ev-charging",
+                    "orchestrator.command.smart-ev-charging",
+                    "energy.ev.weekly_plan",
+                ],
+                "source_paths": [
+                    {"repo": "claude", "paths": ["services/smart-ev-charging/"]},
+                ],
+            }
+            async with httpx.AsyncClient(timeout=5) as c:
+                await c.post("http://192.168.0.50:8225/oracle/register", json=manifest)
+        except Exception:
+            pass
+
     def __init__(self) -> None:
         super().__init__(settings=EVChargingSettings())
         self.settings: EVChargingSettings  # narrow type for IDE
@@ -127,6 +150,9 @@ class SmartEVChargingService(BaseService):
         self._last_mode_change: dict | None = None
 
     async def run(self) -> None:
+        # Register with Oracle (non-blocking)
+        asyncio.create_task(self._register_with_oracle())
+
         # NATS is already connected by BaseService.start() before run() is called.
         # Register HA discovery entities via NATS ha.discovery subjects.
         await self._register_ha_discovery()
