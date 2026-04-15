@@ -53,23 +53,33 @@ from shared.service import BaseService
 
 
 async def _register_with_oracle() -> None:
-    """Best-effort Oracle registration. Non-critical."""
+    """Best-effort Oracle registration. Non-critical — service must start even if Oracle is down."""
     import httpx
     try:
         manifest = {
             "service_name": "${SERVICE_NAME}",
             "port": 8000,
-            "project": "claude",
-            "health_endpoint": "/health",
-            "description": "SERVICE_DESCRIPTION_PLACEHOLDER",
-            "endpoints": [],
-            "nats_subjects": [],
-            "guidance": [],
+            "description": "TODO: one-line description of this service",
+            "endpoints": [
+                {"method": "GET", "path": "/health", "purpose": "Health check"},
+                # TODO: add all HTTP endpoints
+            ],
+            "nats_subjects": [
+                # TODO: list ALL subjects this service publishes AND subscribes to
+                # e.g. "${SERVICE_NAME}.item.created",  # published
+                # e.g. "orbit.task.completed",           # subscribed
+            ],
+            "translation_routes": [
+                # TODO: add if this service needs NATS↔MQTT bridge translation for HA
+            ],
+            "guidance": [
+                # TODO: add integration rules other services should follow
+            ],
         }
         async with httpx.AsyncClient(timeout=5) as c:
             await c.post("http://192.168.0.50:8225/oracle/register", json=manifest)
     except Exception:
-        pass  # Oracle registration is non-critical
+        pass  # Oracle down is not a startup blocker
 
 
 class ${CLASS_NAME}Service(BaseService):

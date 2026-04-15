@@ -21,23 +21,22 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 import httpx
 import influxdb_client
+from api import router as api_router
+from boiler_manager import BoilerManager
+from circulation_pump import CirculationPumpScheduler
+from database import HEMSDatabase
 from fastapi import FastAPI, HTTPException, status
 from influxdb_client.client.write_api import SYNCHRONOUS
-from pydantic import BaseModel
-
-from boiler_manager import BoilerManager, BoilerState
-from circulation_pump import CirculationPumpScheduler, PumpState
-from config import HEMSSettings
-from database import HEMSDatabase
 from mixer_controller import MixerController
+from pydantic import BaseModel
 from routes import router
-from api import router as api_router
+
+from config import HEMSSettings
 
 HEALTHCHECK_FILE = Path(os.environ.get("HEMS_DATA_DIR", "/app/data")) / "healthcheck"
 
@@ -49,14 +48,14 @@ logger = logging.getLogger("hems")
 
 
 # Global state
-_control_loop_task: Optional[asyncio.Task] = None
-_thermal_collector_task: Optional[asyncio.Task] = None  # Phase 3: Thermal data collector
-_mixer_controller: Optional[MixerController] = None
-_boiler_manager: Optional[BoilerManager] = None
-_circulation_pump: Optional[CirculationPumpScheduler] = None
-_influxdb_client: Optional[influxdb_client.InfluxDBClient] = None
+_control_loop_task: asyncio.Task | None = None
+_thermal_collector_task: asyncio.Task | None = None  # Phase 3: Thermal data collector
+_mixer_controller: MixerController | None = None
+_boiler_manager: BoilerManager | None = None
+_circulation_pump: CirculationPumpScheduler | None = None
+_influxdb_client: influxdb_client.InfluxDBClient | None = None
 _influxdb_write_api = None
-_hems_db: Optional[HEMSDatabase] = None
+_hems_db: HEMSDatabase | None = None
 
 # Sensor state tracking for graceful degradation
 _sensor_cache: dict[str, float] = {}  # Last known values
@@ -77,21 +76,21 @@ class ControlDecisionResponse(BaseModel):
     circulation_pump_on: bool
     circulation_pump_state: str
     circulation_pump_runtime_hours: float
-    setpoint_c: Optional[float] = None
-    measured_flow_temp_c: Optional[float] = None
-    demand_w: Optional[float] = None
-    error_message: Optional[str] = None
+    setpoint_c: float | None = None
+    measured_flow_temp_c: float | None = None
+    demand_w: float | None = None
+    error_message: str | None = None
     degraded: bool = False  # True if operating with fallback values
     is_available: dict[str, bool] = {}  # Per-sensor availability
 
 
 class SensorHealth(BaseModel):
     entity_id: str
-    room_id: Optional[str] = None
+    room_id: str | None = None
     available: bool
-    last_value: Optional[float] = None
-    last_update_unix: Optional[float] = None
-    error_message: Optional[str] = None
+    last_value: float | None = None
+    last_update_unix: float | None = None
+    error_message: str | None = None
 
 
 class HEMSHealthResponse(BaseModel):
@@ -108,16 +107,16 @@ class HEMSHealthResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _update_sensor_state(entity_id: str, value: Optional[float], available: bool = True) -> None:
+def _update_sensor_state(entity_id: str, value: float | None, available: bool = True) -> None:
     """Update sensor cache and availability state.
-    
+
     Args:
         entity_id: HA entity ID (e.g., 'sensor.heating_flow_temperature')
         value: Measured value, or None if unavailable
         available: Whether sensor is online
     """
     _sensor_availability[entity_id] = available
-    
+
     if available and value is not None:
         _sensor_cache[entity_id] = value
         _sensor_last_update[entity_id] = time.time()
@@ -128,7 +127,7 @@ def _update_sensor_state(entity_id: str, value: Optional[float], available: bool
 
 def _get_sensor_value(entity_id: str, default: float = 0.0) -> tuple[float, bool]:
     """Get sensor value with fallback to last known value.
-    
+
     Returns:
         (value, is_available) - value is last known or default if never seen
     """
@@ -155,7 +154,7 @@ def _get_all_sensor_health() -> dict[str, SensorHealth]:
 # ---------------------------------------------------------------------------
 
 
-def _init_influxdb(settings: HEMSSettings) -> tuple[Optional[influxdb_client.InfluxDBClient], Optional[object]]:
+def _init_influxdb(settings: HEMSSettings) -> tuple[influxdb_client.InfluxDBClient | None, object | None]:
     """Initialize InfluxDB client and write API."""
     if not settings.influxdb_token:
         logger.warning("InfluxDB token not set — telemetry disabled")
@@ -176,14 +175,14 @@ def _init_influxdb(settings: HEMSSettings) -> tuple[Optional[influxdb_client.Inf
 
 
 def _write_hems_decision_to_influx(
-    write_api: Optional[object],
+    write_api: object | None,
     settings: HEMSSettings,
     valve_position: float,
     boiler_state: str,
     boiler_should_fire: bool,
-    setpoint: Optional[float] = None,
-    measured: Optional[float] = None,
-    demand: Optional[float] = None,
+    setpoint: float | None = None,
+    measured: float | None = None,
+    demand: float | None = None,
 ) -> None:
     """Write control decision to InfluxDB."""
     if not write_api:
@@ -212,7 +211,7 @@ def _write_hems_decision_to_influx(
 
 
 def _write_circulation_pump_to_influx(
-    write_api: Optional[object],
+    write_api: object | None,
     settings: HEMSSettings,
     pump_should_run: bool,
     pump_state: str,
@@ -239,17 +238,17 @@ def _write_circulation_pump_to_influx(
 
 async def _publish_pump_schedule_to_ha(
     in_scheduled_window: bool,
-    time_windows: Optional[list] = None,
+    time_windows: list | None = None,
 ) -> bool:
     """Publish circulation pump schedule state to Home Assistant.
-    
+
     Updates switch.circulation_pump_schedule_active entity via orchestrator.
     Also logs time windows for debugging.
-    
+
     Args:
         in_scheduled_window: Whether currently in a scheduled pump window
         time_windows: Optional list of TimeWindow objects for logging
-        
+
     Returns:
         True if published successfully, False otherwise.
     """
@@ -279,7 +278,7 @@ async def _publish_pump_schedule_to_ha(
             else:
                 logger.warning("Orchestrator returned status %d when setting pump schedule", response.status_code)
                 return False
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("Timeout publishing circulation pump schedule to HA")
         return False
     except Exception as e:
@@ -292,14 +291,14 @@ async def _publish_pump_schedule_to_ha(
 # ---------------------------------------------------------------------------
 
 
-async def _fetch_flow_temperature() -> tuple[Optional[float], bool]:
+async def _fetch_flow_temperature() -> tuple[float | None, bool]:
     """Fetch current flow temperature from Home Assistant via orchestrator.
 
     Returns:
         (temperature, is_available) - temperature in °C, or None if unavailable.
     """
     entity_id = "sensor.heating_flow_temperature"
-    
+
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             # Call orchestrator /tools/execute to fetch HA entity
@@ -315,7 +314,7 @@ async def _fetch_flow_temperature() -> tuple[Optional[float], bool]:
             if response.status_code == 200:
                 data = response.json()
                 state = data.get("state")
-                
+
                 # Handle None, "unavailable", "unknown", or non-numeric values
                 if state is None or state == "unavailable" or state == "unknown":
                     _update_sensor_state(entity_id, None, available=False)
@@ -323,7 +322,7 @@ async def _fetch_flow_temperature() -> tuple[Optional[float], bool]:
                     # Return cached value if available
                     cached, _ = _get_sensor_value(entity_id, default=50.0)
                     return cached, False
-                
+
                 try:
                     temp = float(state)
                     _update_sensor_state(entity_id, temp, available=True)
@@ -340,7 +339,7 @@ async def _fetch_flow_temperature() -> tuple[Optional[float], bool]:
                 # Return cached value
                 cached, _ = _get_sensor_value(entity_id, default=50.0)
                 return cached, False
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("Timeout fetching flow temperature from orchestrator")
         _update_sensor_state(entity_id, None, available=False)
         cached, _ = _get_sensor_value(entity_id, default=50.0)
@@ -353,7 +352,7 @@ async def _fetch_flow_temperature() -> tuple[Optional[float], bool]:
         return cached, False
 
 
-async def _fetch_heating_demand() -> Optional[float]:
+async def _fetch_heating_demand() -> float | None:
     """Fetch current heating demand in watts.
 
     Reads from DB schedule table to determine if we need heating now.
@@ -362,17 +361,17 @@ async def _fetch_heating_demand() -> Optional[float]:
         Demand in watts, or None if unavailable.
     """
     global _hems_db
-    
+
     if not _hems_db:
         return 0.0
-    
+
     # For Phase 1, we fetch the current schedule target for a primary room
     # and derive demand from it. In Phase 2, we'll use a more sophisticated model.
     try:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         dow = now.weekday()
         current_time = now.time()
-        
+
         # Check primary room (living_room)
         schedule = await _hems_db.get_current_schedule("living_room", dow, current_time)
         if schedule:
@@ -381,7 +380,7 @@ async def _fetch_heating_demand() -> Optional[float]:
             return float(schedule.target_temp)
     except Exception as e:
         logger.warning("Error fetching demand from schedule: %s", e)
-    
+
     return 0.0
 
 
@@ -390,7 +389,7 @@ async def control_loop(settings: HEMSSettings) -> None:
 
     Reads schedule/demand, fetches flow temp from HA, calls MixerController,
     BoilerManager, and CirculationPumpScheduler, writes decisions to InfluxDB.
-    
+
     Gracefully handles unavailable sensors by using cached/default values.
     """
     global _mixer_controller, _boiler_manager, _circulation_pump, _influxdb_write_api
@@ -441,7 +440,7 @@ async def control_loop(settings: HEMSSettings) -> None:
             try:
                 # Attempt to get primary room schedule
                 if _hems_db:
-                    now = datetime.now(timezone.utc)
+                    now = datetime.now(UTC)
                     dow = now.weekday()
                     current_time = now.time()
                     schedule = await _hems_db.get_current_schedule("living_room", dow, current_time)
@@ -451,7 +450,7 @@ async def control_loop(settings: HEMSSettings) -> None:
                         room_actuals["living_room"] = _sensor_cache.get("sensor.room_temperature", 20.0)
             except Exception as e:
                 logger.warning("Could not fetch room schedule for circulation pump: %s", e)
-            
+
             # Determine if pump should run
             pump_should_run = _circulation_pump.should_pump(
                 boiler_active=boiler_should_fire,
@@ -556,11 +555,7 @@ async def thermal_data_collector(settings: HEMSSettings) -> None:
                     if outside_temp is not None:
                         point = point.field("outside_temp", float(outside_temp))
 
-                    _influxdb_write_api.write(
-                        bucket=settings.influxdb_bucket,
-                        org=settings.influxdb_org,
-                        record=point
-                    )
+                    _influxdb_write_api.write(bucket=settings.influxdb_bucket, org=settings.influxdb_org, record=point)
 
                     logger.debug(
                         "Thermal snapshot logged: flow=%.1f°C, room=%.1f°C, sp=%.1f°C, heating=%s",
@@ -584,10 +579,49 @@ async def thermal_data_collector(settings: HEMSSettings) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _register_with_oracle() -> None:
+    """Best-effort Oracle registration."""
+    try:
+        manifest = {
+            "service_name": "hems",
+            "port": 8210,
+            "description": "Heating energy management — room schedules, boiler, demand, thermal model",
+            "endpoints": [
+                {"method": "GET", "path": "/health", "purpose": "Health check"},
+                {"method": "GET", "path": "/api/v1/hems/status", "purpose": "HEMS status"},
+                {"method": "GET", "path": "/api/v1/hems/schedule", "purpose": "Get schedule"},
+                {"method": "POST", "path": "/api/v1/hems/schedule", "purpose": "Set schedule"},
+                {"method": "GET", "path": "/api/v1/hems/mode", "purpose": "Get mode"},
+                {"method": "POST", "path": "/api/v1/hems/mode", "purpose": "Set mode"},
+            ],
+            "nats_subjects": [
+                "hems.schedule.created",
+                "hems.schedule.cancelled",
+                "hems.mode.changed",
+            ],
+            "source_paths": [
+                {"repo": "claude", "paths": ["services/hems/"]},
+            ],
+        }
+        async with httpx.AsyncClient(timeout=5) as c:
+            await c.post("http://192.168.0.50:8225/oracle/register", json=manifest)
+    except Exception:
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _control_loop_task, _thermal_collector_task, _mixer_controller, _boiler_manager, _circulation_pump, _influxdb_client, _influxdb_write_api, _hems_db
+    global \
+        _control_loop_task, \
+        _thermal_collector_task, \
+        _mixer_controller, \
+        _boiler_manager, \
+        _circulation_pump, \
+        _influxdb_client, \
+        _influxdb_write_api, \
+        _hems_db
 
+    asyncio.create_task(_register_with_oracle())
     settings: HEMSSettings = app.state.settings
     logger.info("HEMS starting up — mode=%s", settings.hems_mode)
 
@@ -671,7 +705,7 @@ def create_app() -> FastAPI:
     @app.post("/api/v1/hems/control/tick", response_model=ControlDecisionResponse, tags=["hems"])
     async def control_tick() -> ControlDecisionResponse:
         """Execute a single control iteration (test endpoint).
-        
+
         Returns 200 with degraded=true if sensors are unavailable (not 503).
         """
         global _mixer_controller, _boiler_manager, _circulation_pump
@@ -717,7 +751,7 @@ def create_app() -> FastAPI:
             room_actuals = {}
             try:
                 if _hems_db:
-                    now = datetime.now(timezone.utc)
+                    now = datetime.now(UTC)
                     dow = now.weekday()
                     current_time = now.time()
                     schedule = await _hems_db.get_current_schedule("living_room", dow, current_time)
@@ -726,7 +760,7 @@ def create_app() -> FastAPI:
                         room_actuals["living_room"] = _sensor_cache.get("sensor.room_temperature", 20.0)
             except Exception as e:
                 logger.debug("Could not fetch room schedule for pump in control_tick: %s", e)
-            
+
             pump_should_run = _circulation_pump.should_pump(
                 boiler_active=boiler_should_fire,
                 room_targets=room_targets,
@@ -756,7 +790,7 @@ def create_app() -> FastAPI:
                 )
 
             return ControlDecisionResponse(
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 valve_position_pct=valve_pos,
                 boiler_should_fire=boiler_should_fire,
                 boiler_state=boiler_state,
@@ -777,7 +811,7 @@ def create_app() -> FastAPI:
         except Exception as e:
             logger.error("Error in control tick: %s", e, exc_info=True)
             return ControlDecisionResponse(
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 valve_position_pct=0.0,
                 boiler_should_fire=False,
                 boiler_state="error",
@@ -788,20 +822,20 @@ def create_app() -> FastAPI:
                 degraded=True,
                 is_available={},
             )
-    
+
     # Add health check endpoint
     @app.get("/api/v1/hems/health", response_model=HEMSHealthResponse, tags=["hems"])
     async def hems_health() -> HEMSHealthResponse:
         """Get HEMS service health including sensor availability.
-        
+
         Returns detailed per-sensor status and identifies degraded rooms.
         """
         sensor_health = _get_all_sensor_health()
-        
+
         # Determine overall status
         num_sensors = len(sensor_health)
         available_count = sum(1 for s in sensor_health.values() if s.available)
-        
+
         if num_sensors == 0:
             status = "healthy"  # No sensors known yet
         elif available_count == num_sensors:
@@ -810,15 +844,15 @@ def create_app() -> FastAPI:
             status = "degraded"
         else:
             status = "critical"
-        
+
         # List degraded rooms (missing flow temp, etc.)
         degraded_rooms = []
         if not _sensor_availability.get("sensor.heating_flow_temperature", False):
             degraded_rooms.append("heating_system")
-        
+
         return HEMSHealthResponse(
             status=status,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             sensors=sensor_health,
             degraded_rooms=degraded_rooms,
             control_loop_active=_control_loop_task is not None and not _control_loop_task.done(),
