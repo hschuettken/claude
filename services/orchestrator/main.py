@@ -101,7 +101,56 @@ class OrchestratorService(BaseService):
         ] = {}  # Track EV calendar events {date: {event_id, summary}}
         self._gcal: GoogleCalendarClient | None = None
 
+    async def _register_with_oracle(self) -> None:
+        """Best-effort Oracle registration. Non-critical — service must start even if Oracle is down."""
+        try:
+            manifest = {
+                "service_name": "orchestrator",
+                "port": 8050,
+                "description": "AI brain — 23+ LLM-callable tools, MCP server, HA/energy/calendar control",
+                "endpoints": [
+                    {"method": "GET", "path": "/_health", "purpose": "Health check"},
+                    {
+                        "method": "GET",
+                        "path": "/api/v1/status",
+                        "purpose": "Service status and activity",
+                    },
+                    {
+                        "method": "GET",
+                        "path": "/api/v1/tools",
+                        "purpose": "List all available tools",
+                    },
+                    {
+                        "method": "POST",
+                        "path": "/api/v1/tools/execute",
+                        "purpose": "Execute a tool directly",
+                    },
+                    {
+                        "method": "POST",
+                        "path": "/api/v1/chat",
+                        "purpose": "Full chat with Brain reasoning",
+                    },
+                    {"method": "GET", "path": "/mcp", "purpose": "MCP SSE endpoint"},
+                ],
+                "nats_subjects": [
+                    "heartbeat.orchestrator",
+                    "services.orchestrator.activity",
+                    "heartbeat.>",
+                    "services.>.updated",
+                    "energy.ev.forecast.plan",
+                    "energy.ev.forecast.clarification_needed",
+                ],
+                "source_paths": [
+                    {"repo": "claude", "paths": ["services/orchestrator/"]},
+                ],
+            }
+            async with httpx.AsyncClient(timeout=5) as c:
+                await c.post("http://192.168.0.50:8225/oracle/register", json=manifest)
+        except Exception:
+            pass
+
     async def run(self) -> None:
+        asyncio.create_task(self._register_with_oracle())
         memory = Memory(
             max_history=self.settings.max_conversation_history,
             max_decisions=self.settings.max_decisions,

@@ -71,6 +71,31 @@ except ImportError:
 class EVForecastService:
     """Main service: vehicle monitoring + trip prediction + charging planner."""
 
+    async def _register_with_oracle(self) -> None:
+        """Best-effort Oracle registration. Non-critical — service must start even if Oracle is down."""
+        try:
+            manifest = {
+                "service_name": "ev-forecast",
+                "port": None,
+                "description": "EV charging demand forecast",
+                "endpoints": [],
+                "nats_subjects": [
+                    "energy.ev.forecast.vehicle",
+                    "energy.ev.forecast.plan",
+                    "energy.ev.forecast.clarification_needed",
+                    "heartbeat.ev-forecast",
+                    "orchestrator.command.ev-forecast",
+                    "orchestrator.knowledge-update",
+                ],
+                "source_paths": [
+                    {"repo": "claude", "paths": ["services/ev-forecast/"]},
+                ],
+            }
+            async with httpx.AsyncClient(timeout=5) as c:
+                await c.post("http://192.168.0.50:8225/oracle/register", json=manifest)
+        except Exception:
+            pass
+
     def __init__(self) -> None:
         self.settings = EVForecastSettings()
         self.scheduler = AsyncIOScheduler()
@@ -179,6 +204,9 @@ class EVForecastService:
             audi_single_account=self.settings.audi_single_account,
             default_consumption=self.settings.ev_consumption_kwh_per_100km,
         )
+
+        # Register with Oracle (non-blocking)
+        asyncio.create_task(self._register_with_oracle())
 
         # Resolve home location (for geocoding)
         await self._resolve_home_location()

@@ -161,6 +161,58 @@ def _get_memory_mb() -> float:
 
 
 # ---------------------------------------------------------------------------
+# Oracle Registration
+# ---------------------------------------------------------------------------
+
+
+async def _register_with_oracle() -> None:
+    """Best-effort Oracle registration. Non-critical — service must start even if Oracle is down."""
+    try:
+        manifest = {
+            "service_name": "energy-dashboard",
+            "port": 8085,
+            "description": "NiceGUI energy cockpit — PV, EV, grid, battery visualization",
+            "endpoints": [
+                {"method": "GET", "path": "/_health", "purpose": "Health check"},
+                {"method": "GET", "path": "/", "purpose": "Dashboard home page"},
+                {
+                    "method": "GET",
+                    "path": "/services",
+                    "purpose": "Services status page",
+                },
+                {
+                    "method": "GET",
+                    "path": "/controls",
+                    "purpose": "EV charging controls page",
+                },
+                {
+                    "method": "GET",
+                    "path": "/chat",
+                    "purpose": "Chat with orchestrator page",
+                },
+            ],
+            "nats_subjects": [
+                "heartbeat.dashboard",
+                "heartbeat.>",
+                "energy.pv.forecast.updated",
+                "energy.ev.charging.status",
+                "energy.ev.forecast.plan",
+                "energy.ev.forecast.vehicle",
+                "services.orchestrator.activity",
+                "services.health-monitor.status",
+                "services.dashboard.chat_response",
+            ],
+            "source_paths": [
+                {"repo": "claude", "paths": ["services/dashboard/"]},
+            ],
+        }
+        async with httpx.AsyncClient(timeout=5) as c:
+            await c.post("http://192.168.0.50:8225/oracle/register", json=manifest)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # HA NATS auto-discovery
 # ---------------------------------------------------------------------------
 
@@ -215,6 +267,9 @@ async def _register_ha_discovery() -> None:
 @app.on_startup
 async def on_startup() -> None:
     logger.info("dashboard_starting", port=settings.dashboard_port)
+
+    # Register with Oracle (non-blocking)
+    asyncio.create_task(_register_with_oracle())
 
     # Connect NATS and set up subscriptions
     await nats.connect()
