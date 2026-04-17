@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2026-04-17] — PR 4: Orchestrator Brain → LLM Router (feat/brain-llm-router-pr4)
+
+### Fixed
+- **orchestrator/llm**: Anthropic path now routes through llm-router (:8070) instead of
+  calling the Anthropic SDK directly. This fixes the Opus 4.7 `temperature=` 400 error —
+  the router normalises parameters per model capability and never forwards `temperature`
+  to models that reject it.
+
+### Changed
+- **orchestrator/config**: `anthropic_model` default changed from the hallucinated
+  `claude-sonnet-4-20250514` to the router alias `"sonnet"`. Router resolves this to the
+  current claude-sonnet generation without the orchestrator needing to track model versions.
+- **orchestrator/llm**: `create_provider("anthropic")` now returns `RouterLLMProvider`
+  (new `llm/router_llm.py`) instead of `AnthropicProvider`. The `anthropic` package is
+  still in requirements.txt for non-Brain use; it is no longer imported by the factory.
+
+### Added
+- **orchestrator/llm/router_llm.py**: New `RouterLLMProvider` — delegates to
+  `llm-router /v1/chat/completions`, converts between unified `Message`/`LLMResponse`
+  types and OpenAI-compat wire format, raises `httpx.HTTPStatusError` on router errors.
+- **orchestrator/tests/test_router_llm.py**: 7 new tests — happy path, no-temperature
+  assertion, tool call parsing, 503 error handling, factory routing, and message conversion.
+
+### Scope decisions (documented)
+- Gemini/OpenAI/Ollama provider paths left as direct-provider calls for this PR (they
+  accept `temperature`; router migration for them deferred to a later PR to keep the
+  blast radius minimal).
+
 ## [2026-03-10] — NB9OS Dev Team Session 2
 
 ### Fixed
