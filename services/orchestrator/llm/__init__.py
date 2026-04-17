@@ -11,7 +11,14 @@ if TYPE_CHECKING:
 
 
 def create_provider(settings: OrchestratorSettings) -> LLMProvider:
-    """Factory — instantiate the configured LLM provider."""
+    """Factory — instantiate the configured LLM provider.
+
+    The ``anthropic`` path always routes through llm-router (:8070) so that
+    Opus 4.7's temperature restriction is handled transparently by the router.
+    Gemini, OpenAI, and Ollama paths remain as direct-provider calls for now
+    (those providers accept temperature; router migration for them is deferred
+    to a later PR — scope kept minimal per PR 4 brief).
+    """
     name = settings.llm_provider.lower()
 
     if name == "gemini":
@@ -33,12 +40,13 @@ def create_provider(settings: OrchestratorSettings) -> LLMProvider:
         )
 
     if name == "anthropic":
-        from llm.anthropic_llm import AnthropicProvider
+        # Route through llm-router — never pass temperature directly.
+        # Opus 4.7 returns 400 on temperature=; the router strips it per model.
+        from llm.router_llm import RouterLLMProvider
 
-        return AnthropicProvider(
-            api_key=settings.anthropic_api_key,
+        return RouterLLMProvider(
+            router_url=settings.llm_router_url,
             model=settings.anthropic_model,
-            temperature=settings.llm_temperature,
             max_tokens=settings.llm_max_tokens,
         )
 
@@ -52,7 +60,9 @@ def create_provider(settings: OrchestratorSettings) -> LLMProvider:
             base_url=f"{settings.ollama_url}/v1",
         )
 
-    raise ValueError(f"Unknown LLM provider: {name!r}. Use gemini|openai|anthropic|ollama.")
+    raise ValueError(
+        f"Unknown LLM provider: {name!r}. Use gemini|openai|anthropic|ollama."
+    )
 
 
 __all__ = [

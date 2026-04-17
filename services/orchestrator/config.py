@@ -15,7 +15,9 @@ class OrchestratorSettings(BaseSettings):
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.0-flash"
     openai_model: str = "gpt-4o"
-    anthropic_model: str = "claude-sonnet-4-20250514"
+    anthropic_model: str = (
+        "sonnet"  # router alias; maps to current claude-sonnet generation
+    )
     ollama_model: str = "llama3"
     llm_max_tool_rounds: int = 10
     llm_temperature: float = 0.7
