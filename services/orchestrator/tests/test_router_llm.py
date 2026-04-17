@@ -249,3 +249,43 @@ def test_convert_messages_system_becomes_system_role():
     assert converted[0]["role"] == "system"
     assert converted[0]["content"] == "You are a helpful assistant."
     assert converted[1]["role"] == "user"
+
+
+# ---------------------------------------------------------------------------
+# Empty choices — no crash, no logger TypeError
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_empty_choices_returns_empty_response_no_crash():
+    """Router returns empty choices [] → LLMResponse with no content, no crash.
+
+    Before the fix, logger.warning(..., raw=...) raised TypeError because stdlib
+    logging doesn't accept keyword arguments. This test verifies the warning fires
+    without an exception and the function returns a valid LLMResponse.
+    """
+    provider = RouterLLMProvider(router_url="http://llm-router:8070", model="sonnet")
+    messages = [Message(role="user", content="Hello")]
+
+    empty_choices_resp = {
+        "id": "chatcmpl-empty",
+        "choices": [],  # empty — triggers the warning branch
+        "usage": {"prompt_tokens": 5, "completion_tokens": 0},
+    }
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = empty_choices_resp
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_resp)
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        # Must not raise TypeError or any other exception
+        result = await provider.chat(messages)
+
+    assert result.content is None
+    assert result.tool_calls == []

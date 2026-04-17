@@ -30,6 +30,27 @@ All notable changes to this project will be documented in this file.
   accept `temperature`; router migration for them deferred to a later PR to keep the
   blast radius minimal).
 
+## [2026-04-17] — QA round 1 fixes (feat/brain-llm-router-pr4)
+
+### Fixed
+
+**router_llm.py: stdlib logger kwargs crash in empty-choices branch**
+
+`logger.warning("router_llm_empty_choices", raw=str(data)[:200])` raised
+`TypeError: Logger._log() got an unexpected keyword argument 'raw'` because the
+orchestrator uses stdlib `logging`, not structlog. All other warning/error calls in
+the file already use positional `%s` format args — this one was inconsistent.
+
+Fix: `logger.warning("router_llm_empty_choices raw=%.200s", str(data))`
+
+Also changed `LLMResponse(content=None)` → `LLMResponse(content=None, tool_calls=[])`
+to be explicit (though the default_factory already initialises the field to `[]`).
+
+1 new test in `tests/test_router_llm.py`:
+- `test_empty_choices_returns_empty_response_no_crash` — mocks router response with
+  `{"choices": []}`, asserts no exception is raised and result has `content=None`,
+  `tool_calls=[]`.
+
 ## [2026-03-10] — NB9OS Dev Team Session 2
 
 ### Fixed

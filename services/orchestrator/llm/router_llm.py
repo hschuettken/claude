@@ -123,8 +123,8 @@ class RouterLLMProvider(LLMProvider):
         """Parse OpenAI-compat response into our unified LLMResponse."""
         choices = data.get("choices") or []
         if not choices:
-            logger.warning("router_llm_empty_choices", raw=str(data)[:200])
-            return LLMResponse(content=None)
+            logger.warning("router_llm_empty_choices raw=%.200s", str(data))
+            return LLMResponse(content=None, tool_calls=[])
 
         message = choices[0].get("message", {})
         content: str | None = message.get("content") or None
