@@ -23,6 +23,7 @@ import threading
 import time
 from pathlib import Path
 
+import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from shared.energy_events import (

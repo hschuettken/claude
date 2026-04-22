@@ -22,6 +22,7 @@ from datetime import datetime, time as dt_time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import httpx
 from shared.service import BaseService
 
 from charger import WallboxController

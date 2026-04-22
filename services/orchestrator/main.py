@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import httpx
 from shared.chroma_client import ChromaClient
 from shared.service import BaseService
 

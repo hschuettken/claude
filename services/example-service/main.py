@@ -2,9 +2,9 @@
 
 This service demonstrates:
   - Inheriting from BaseService for automatic setup
-  - Subscribing to MQTT topics
+  - Subscribing to NATS subjects
   - Querying Home Assistant
-  - Publishing MQTT events
+  - Publishing NATS events
   - Healthcheck file for Docker HEALTHCHECK
   - Listening to orchestrator commands
   - Graceful shutdown
@@ -21,22 +21,12 @@ class ExampleService(BaseService):
     async def run(self) -> None:
         self.logger.info("example_service_started")
 
-        # Connect MQTT in background thread
-        self.mqtt.connect_background()
-
-        # Subscribe to a topic
-        self.mqtt.subscribe(
-            "homelab/#",
-            lambda topic, payload: self.logger.info(
-                "mqtt_message", topic=topic, payload=payload
-            ),
-        )
-
-        # Listen to orchestrator commands
-        self.mqtt.subscribe(
-            "homelab/orchestrator/command/example-service",
-            self._on_orchestrator_command,
-        )
+        # Subscribe to orchestrator commands via NATS
+        if self.nats and self.nats.connected:
+            await self.nats.subscribe_json(
+                "orchestrator.command.example-service",
+                self._on_orchestrator_command,
+            )
 
         # Example: read a HA sensor on startup
         # state = await self.ha.get_state("sensor.temperature_living_room")
@@ -51,8 +41,8 @@ class ExampleService(BaseService):
         # for r in records:
         #     self.logger.info("influx_record", time=r["_time"], value=r["_value"])
 
-        # Example: publish an event
-        self.publish("started", {"status": "ok"})
+        # Example: publish an event to NATS
+        await self.publish("started", {"status": "ok"})
 
         # Touch healthcheck on startup (also auto-called from BaseService heartbeat)
         self._touch_healthcheck()
@@ -60,7 +50,7 @@ class ExampleService(BaseService):
         # Keep running until shutdown signal
         await self.wait_for_shutdown()
 
-    def _on_orchestrator_command(self, topic: str, payload: dict) -> None:
+    async def _on_orchestrator_command(self, subject: str, payload: dict) -> None:
         """Handle commands from the orchestrator service."""
         command = payload.get("command", "")
         self.logger.info("orchestrator_command", command=command)

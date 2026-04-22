@@ -31,6 +31,7 @@ from boiler_manager import BoilerManager
 from circulation_pump import CirculationPumpScheduler
 from database import HEMSDatabase
 from fastapi import FastAPI, HTTPException, status
+from heartbeat import HeartbeatPublisher
 from influxdb_client.client.write_api import SYNCHRONOUS
 from mixer_controller import MixerController
 from pydantic import BaseModel
@@ -50,6 +51,7 @@ logger = logging.getLogger("hems")
 # Global state
 _control_loop_task: asyncio.Task | None = None
 _thermal_collector_task: asyncio.Task | None = None  # Phase 3: Thermal data collector
+_heartbeat_task: asyncio.Task | None = None
 _mixer_controller: MixerController | None = None
 _boiler_manager: BoilerManager | None = None
 _circulation_pump: CirculationPumpScheduler | None = None
@@ -595,9 +597,10 @@ async def _register_with_oracle() -> None:
                 {"method": "POST", "path": "/api/v1/hems/mode", "purpose": "Set mode"},
             ],
             "nats_subjects": [
-                "hems.schedule.created",
-                "hems.schedule.cancelled",
-                "hems.mode.changed",
+                "heartbeat.hems",
+                "energy.hems.mode",
+                "energy.hems.commands.retrain",
+                "energy.hems.boiler.flow_override",
             ],
             "source_paths": [
                 {"repo": "claude", "paths": ["services/hems/"]},
@@ -614,6 +617,7 @@ async def lifespan(app: FastAPI):
     global \
         _control_loop_task, \
         _thermal_collector_task, \
+        _heartbeat_task, \
         _mixer_controller, \
         _boiler_manager, \
         _circulation_pump, \
@@ -658,6 +662,11 @@ async def lifespan(app: FastAPI):
     _thermal_collector_task = asyncio.create_task(thermal_data_collector(settings))
     logger.info("Thermal data collector task started")
 
+    # Start NATS heartbeat
+    _heartbeat_publisher = HeartbeatPublisher()
+    _heartbeat_task = asyncio.create_task(_heartbeat_publisher.run_forever())
+    logger.info("NATS heartbeat task started")
+
     yield
 
     logger.info("HEMS shutting down")
@@ -675,6 +684,14 @@ async def lifespan(app: FastAPI):
         _thermal_collector_task.cancel()
         try:
             await _thermal_collector_task
+        except asyncio.CancelledError:
+            pass
+
+    # Cancel NATS heartbeat
+    if _heartbeat_task:
+        _heartbeat_task.cancel()
+        try:
+            await _heartbeat_task
         except asyncio.CancelledError:
             pass
 
