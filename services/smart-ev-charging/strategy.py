@@ -449,7 +449,7 @@ class ChargingStrategy:
             drain_boost, drain_reason = self._calc_drain_boost(ctx)
 
         available = (
-            pv_only + assist * self.charger_efficiency + hold_boost + drain_boost
+            pv_only + (assist + hold_boost + drain_boost) * self.charger_efficiency
         )
 
         ev_soc_low = ctx.ev_soc_pct is not None and ctx.ev_soc_pct < 50
