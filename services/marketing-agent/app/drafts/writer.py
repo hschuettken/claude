@@ -87,7 +87,7 @@ class DraftWriter:
             # Generate outline
             logger.info("Generating outline...")
             outline = await asyncio.wait_for(
-                self._generate_outline(topic, signals_text, kg_context),
+                self._generate_outline(topic, signals_text, kg_context, signals=signals),
                 timeout=timeout,
             )
             if not outline:
@@ -327,7 +327,7 @@ class DraftWriter:
             logger.error(f"Error building KG context: {e}", exc_info=True)
             return {}
 
-    async def _generate_outline(self, topic: Topic, signals_text: str, kg_context: Optional[Dict] = None) -> Optional[Dict]:
+    async def _generate_outline(self, topic: Topic, signals_text: str, kg_context: Optional[Dict] = None, signals: Optional[List] = None) -> Optional[Dict]:
         """Generate blog outline with optional KG context enrichment."""
         # Build KG context block if provided
         kg_context_block = ""
@@ -361,9 +361,18 @@ class DraftWriter:
                 kg_context_block = "\n\n" + "## Knowledge Graph Context\n" + "\n\n".join(sections)
 
         # Build prompt with optional KG context
+        # Derive a short summary: prefer score_breakdown['summary'] if stored,
+        # otherwise use first signal snippet, else fall back to topic name.
+        breakdown = topic.score_breakdown or {}
+        topic_summary = (
+            breakdown.get("summary")
+            or (signals[0].snippet[:200] if signals else None)
+            or topic.name
+        )
+        signals = signals or []
         prompt = BLOG_OUTLINE_PROMPT.format(
             title=topic.name,
-            summary=topic.name,  # TODO: use actual summary
+            summary=topic_summary,
             signals=signals_text,
         )
         

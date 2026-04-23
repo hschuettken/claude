@@ -131,6 +131,22 @@ async def update_topic(topic_id: int, update: TopicUpdate, db: Session = Depends
     return topic
 
 
+async def _run_refresh_and_auto_draft(days: int, min_score: float, db: Session) -> None:
+    """Background: cluster topics then dispatch draft generation for high-score ones."""
+    from app.drafts.writer import DraftWriter
+
+    service = TopicService(db)
+    await service.refresh_topics(days, min_score)
+    auto_ids = service.pop_auto_draft_ids()
+    if auto_ids:
+        writer = DraftWriter(db)
+        for topic_id in auto_ids:
+            try:
+                await writer.generate_blog_draft(topic_id)
+            except Exception as e:
+                logger.error(f"Auto-draft failed for topic {topic_id}: {e}")
+
+
 @router.post("/refresh", status_code=202)
 async def refresh_topics(
     days: int = Query(7, ge=1, le=30),
@@ -138,14 +154,11 @@ async def refresh_topics(
     background_tasks: BackgroundTasks = None,
     db: Session = Depends(get_db),
 ):
-    """Refresh topics from recent signals (background task)."""
-    service = TopicService(db)
-    
+    """Refresh topics from recent signals; auto-draft any topic scoring > 0.8."""
     if background_tasks:
-        background_tasks.add_task(service.refresh_topics, days, min_score)
+        background_tasks.add_task(_run_refresh_and_auto_draft, days, min_score, db)
     else:
-        # Fallback: run synchronously
         import asyncio
-        asyncio.run(service.refresh_topics(days, min_score))
-    
-    return {"status": "refreshing", "message": "Topic refresh started in background"}
+        asyncio.run(_run_refresh_and_auto_draft(days, min_score, db))
+
+    return {"status": "refreshing", "message": "Topic refresh + auto-draft started in background"}

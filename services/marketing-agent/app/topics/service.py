@@ -18,6 +18,12 @@ class TopicService:
 
     def __init__(self, db: Session):
         self.db = db
+        self._auto_draft_ids: List[int] = []
+
+    def pop_auto_draft_ids(self) -> List[int]:
+        """Return topic IDs queued for auto-drafting and clear the queue."""
+        ids, self._auto_draft_ids = self._auto_draft_ids, []
+        return ids
 
     async def refresh_topics(self, days: int = 7, min_score: float = 0.4) -> List[Topic]:
         """
@@ -131,9 +137,8 @@ class TopicService:
                         )
                         
                         if not recent_draft:
-                            logger.info(f"Auto-triggering draft for high-score topic: {cluster.title} (score: {topic_score.total})")
-                            # TODO: Integrate with draft writer to auto-generate
-                            # For now, just log the intent
+                            logger.info(f"Auto-triggering draft for high-score topic: {cluster.title} (score: {topic_score.total:.3f})")
+                            self._auto_draft_ids.append(db_topic.id)
 
         if created_topics:
             self.db.commit()
@@ -194,27 +199,48 @@ class TopicService:
 
     def _build_scoring_context(self) -> ScoringContext:
         """Build scoring context from database."""
-        # Load voice rules
-        from models import VoiceRule
+        from models import VoiceRule, PerformanceSnapshot, BlogPost, Draft, Topic as TopicModel
+
         voice_rules_db = self.db.query(VoiceRule).all()
         voice_rules = {vr.rule_type: vr.content for vr in voice_rules_db}
 
-        # Load performance history
-        from models import PerformanceSnapshot
-        perf_history = self.db.query(PerformanceSnapshot).all()
+        # Load published posts with pillar via BlogPost → Draft → Topic join
+        published_posts_raw = (
+            self.db.query(BlogPost, Draft, TopicModel)
+            .join(Draft, BlogPost.draft_id == Draft.id)
+            .outerjoin(TopicModel, Draft.topic_id == TopicModel.id)
+            .all()
+        )
+        published_posts = [
+            {
+                "post_id": bp.id,
+                "title": d.title,
+                "pillar_id": t.pillar_id if t else None,
+                "published_at": bp.published_at.isoformat() if bp.published_at else None,
+            }
+            for bp, d, t in published_posts_raw
+        ]
+
+        # Load performance history with pillar via same join
+        perf_history = (
+            self.db.query(PerformanceSnapshot, Draft, TopicModel)
+            .join(Draft, PerformanceSnapshot.post_id == Draft.id, isouter=True)
+            .outerjoin(TopicModel, Draft.topic_id == TopicModel.id)
+            .all()
+        )
         performance_history = [
             {
                 "post_id": p.post_id,
                 "platform": p.platform,
                 "engagement_rate": p.engagement_rate,
-                "pillar_id": 1,  # TODO: link to actual pillar
+                "pillar_id": t.pillar_id if t else None,
             }
-            for p in perf_history
+            for p, d, t in perf_history
         ]
 
         return ScoringContext(
             audience_segments=["technical", "enterprise", "developers"],
             voice_rules=voice_rules,
-            published_posts=[],  # TODO: load from blog_posts
+            published_posts=published_posts,
             performance_history=performance_history,
         )
