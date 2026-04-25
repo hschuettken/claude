@@ -365,6 +365,7 @@ Full lifecycle for ambiguous trip resolution:
 
 0. **Oracle first** — Before any new feature, endpoint, or integration, query the Integration Oracle (`POST http://192.168.0.50:8225/oracle/query` with `{"intent": "..."}`) and validate code before committing (`POST /oracle/validate` with `{"code_snippet": "..."}`). See workspace CLAUDE.md for details.
 0b. **Oracle registration** — Every service MUST have `_register_with_oracle()` in its startup code. The manifest must list ALL NATS subjects (publish AND subscribe), all HTTP endpoints, and any MQTT translation routes. See `~/dev/CLAUDE.md` → "Oracle Registration" section for the full template and checklist. **If you add or remove a NATS subject, update the manifest in the same commit.**
+0c. **Code KG (MCP SSE)** — The Oracle exposes 5 code knowledge graph tools via MCP SSE at `http://192.168.0.50:8225/mcp/sse`: `get_code_impact` (blast radius for changed files), `get_review_context` (focused code snippets within token budget), `query_code_graph` (function relationships by name or NL), `suggest_integrations` (NATS publisher gap finder), `rebuild_code_graph` (re-index trigger). Use `get_code_impact` before any multi-file refactor.
 1. **Read before modifying** — Always read a file before proposing changes. For service-specific work, read the service's own `CLAUDE.md` first.
 2. **Minimal changes** — Only make changes directly requested. Avoid over-engineering.
 3. **Service template** — When creating new services, use `./scripts/new-service.sh` or copy `services/example-service/`.
