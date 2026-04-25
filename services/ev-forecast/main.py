@@ -960,9 +960,9 @@ class EVForecastService:
         if "unique_id" not in config:
             config["unique_id"] = f"{node_id}_{object_id}" if node_id else object_id
         if node_id:
-            subject = f"ha.discovery.{component}.{node_id}.{object_id}.config"
+            subject = f"ha.discovery.{component}.{node_id}.{object_id}"
         else:
-            subject = f"ha.discovery.{component}.{object_id}.config"
+            subject = f"ha.discovery.{component}.{object_id}"
         await self.nats.publish(subject, config)
 
     async def _register_ha_discovery(self) -> None:

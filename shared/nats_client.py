@@ -112,6 +112,30 @@ class NatsPublisher:
         await self._nc.subscribe(subject, cb=_wrapper)  # type: ignore[union-attr]
         logger.info("nats_subscribed", subject=subject)
 
+    async def publish_ha_discovery(
+        self,
+        component: str,
+        object_id: str,
+        node_id: str,
+        config: dict[str, Any],
+    ) -> None:
+        """Publish HA auto-discovery config via NATS.
+
+        Subject: ha.discovery.{component}.{node_id}.{object_id}
+        The nats-mqtt-bridge appends /config when forwarding to the MQTT broker,
+        producing homeassistant/{component}/{node_id}/{object_id}/config.
+        Pass node_id="" to omit the node segment.
+        """
+        if node_id:
+            subject = f"ha.discovery.{component}.{node_id}.{object_id}"
+        else:
+            subject = f"ha.discovery.{component}.{object_id}"
+        await self.publish(subject, config)
+
+    async def publish_status(self, service_name: str, data: dict[str, Any]) -> None:
+        """Publish service status to energy.{service_name}.status."""
+        await self.publish(f"energy.{service_name}.status", data)
+
     def publish_sync(self, subject: str, data: dict[str, Any]) -> None:
         """Synchronous wrapper for publish().
 
