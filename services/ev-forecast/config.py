@@ -98,6 +98,14 @@ class EVForecastSettings(BaseSettings):
     min_arrival_soc_pct: float = 15.0  # Min SoC when arriving at destination
     default_assumed_soc_pct: float = 50.0  # Assumed SoC when actual is unknown
 
+    # HA helper that controls the WeeklyPlanBuilder's min_arrival floor (S2).
+    # Entity name reflects its origin in the Ready By mode design, but it
+    # applies globally as the planner's "what SoC must be left after a trip"
+    # buffer. Read each plan cycle; if the entity is missing, the
+    # WeeklyPlanBuilder falls back to its own MIN_ARRIVAL_SOC_PCT class
+    # constant (25%).
+    min_arrival_soc_entity: str = "input_number.ev_ready_by_min_soc_pct"
+
     # How far ahead to plan (days)
     planning_horizon_days: int = 7
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, time, timedelta
 
+import pytest
 
 from planner import WeeklyPlanBuilder
 from trips import Trip
@@ -99,6 +100,62 @@ def test_low_soc_commute_with_pv_no_grid():
     # PV (30 kWh) > deficit (~21 kWh) → grid 0, source = pv_only.
     assert tomorrow_plan.grid_needed_kwh == 0.0
     assert tomorrow_plan.charge_source_recommendation == "pv_only"
+
+
+def test_min_arrival_soc_pct_override_changes_deficit():
+    """Higher min_arrival_soc_pct floor → more buffer → larger deficit at low SoC.
+
+    Confirms the WeeklyPlanBuilder honors the min_arrival_soc_pct parameter
+    that ev-forecast threads through from the HA helper
+    `input_number.ev_ready_by_min_soc_pct`.
+    """
+    today = date(2026, 4, 28)
+    tomorrow = today + timedelta(days=1)
+    args = dict(
+        trips=[_commute_trip(tomorrow)],
+        current_soc_pct=30.0,  # 22.8 kWh
+        battery_capacity_kwh=NET_KWH,
+        consumption_kwh_per_100km=CONSUMPTION_KWH_PER_100KM,
+        pv_forecast_by_date={tomorrow.isoformat(): 0.0},
+        today=today,
+    )
+
+    plan_25 = WeeklyPlanBuilder().build(**args, min_arrival_soc_pct=25.0)
+    plan_40 = WeeklyPlanBuilder().build(**args, min_arrival_soc_pct=40.0)
+
+    total_25 = sum(d.grid_needed_kwh for d in plan_25.days)
+    total_40 = sum(d.grid_needed_kwh for d in plan_40.days)
+
+    # 40% buffer = 30.4 kWh; 25% buffer = 19 kWh; trip = 9.7 kWh.
+    # At 22.8 kWh starting, the 40% scenario must demand more grid.
+    assert total_40 > total_25, (
+        f"Expected higher min_arrival to increase grid demand. "
+        f"25%: {total_25:.2f} kWh, 40%: {total_40:.2f} kWh"
+    )
+    # Sanity: gap should be ~ (40-25)% × 76 = 11.4 kWh
+    assert (total_40 - total_25) > 8.0
+
+
+def test_min_arrival_soc_pct_default_is_25():
+    """Default (no override) uses WeeklyPlanBuilder.MIN_ARRIVAL_SOC_PCT (25%)."""
+    today = date(2026, 4, 28)
+    tomorrow = today + timedelta(days=1)
+    args = dict(
+        trips=[_commute_trip(tomorrow)],
+        current_soc_pct=30.0,
+        battery_capacity_kwh=NET_KWH,
+        consumption_kwh_per_100km=CONSUMPTION_KWH_PER_100KM,
+        pv_forecast_by_date={tomorrow.isoformat(): 0.0},
+        today=today,
+    )
+    default_plan = WeeklyPlanBuilder().build(**args)
+    explicit_25 = WeeklyPlanBuilder().build(**args, min_arrival_soc_pct=25.0)
+
+    default_total = sum(d.grid_needed_kwh for d in default_plan.days)
+    explicit_total = sum(d.grid_needed_kwh for d in explicit_25.days)
+    assert default_total == pytest.approx(explicit_total, abs=0.01), (
+        "Default min_arrival_soc_pct should equal MIN_ARRIVAL_SOC_PCT class constant"
+    )
 
 
 def test_no_trips_no_charge():

@@ -641,6 +641,23 @@ class EVForecastService:
                 # Days 0+1 use cached values; days 2-6 default to 0.0
                 pv_by_date: dict[str, float] = dict(self._pv_forecast_cache)
 
+                # User-controllable min-arrival SoC floor via HA helper
+                # (input_number.ev_ready_by_min_soc_pct). Falls back to the
+                # builder's MIN_ARRIVAL_SOC_PCT if HA is unavailable.
+                min_arrival_soc: float | None = None
+                try:
+                    state = await self.ha.get_state(
+                        self.settings.min_arrival_soc_entity
+                    )
+                    raw = state.get("state") if state else None
+                    if raw not in (None, "", "unknown", "unavailable"):
+                        min_arrival_soc = float(raw)
+                except Exception:
+                    logger.debug(
+                        "min_arrival_soc_read_failed",
+                        entity=self.settings.min_arrival_soc_entity,
+                    )
+
                 weekly_plan = self._weekly_builder.build(
                     trips=all_trips,
                     current_soc_pct=vehicle.soc_pct or 50.0,
@@ -648,6 +665,7 @@ class EVForecastService:
                     consumption_kwh_per_100km=self.consumption_tracker.consumption_kwh_per_100km,
                     pv_forecast_by_date=pv_by_date,
                     timestamp=datetime.now(self._tz).isoformat(),
+                    min_arrival_soc_pct=min_arrival_soc,
                 )
                 await self.nats.publish(
                     "energy.ev.weekly_plan",
