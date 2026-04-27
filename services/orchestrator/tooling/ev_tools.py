@@ -93,6 +93,43 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "set_ev_ready_by",
+            "description": (
+                "Set the EV to be ready by a specific time with a target state of charge. "
+                "Use when the user says something like 'I need to leave at 06:30 with 80%'. "
+                "Switches the charger into Ready By mode, sets the deadline + target SoC HA "
+                "helpers, triggers an immediate replan in ev-forecast, and returns confirmation "
+                "plus the resulting plan summary once acknowledged."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "deadline_local": {
+                        "type": "string",
+                        "description": (
+                            "Departure time, ISO local (Europe/Berlin), e.g. "
+                            "'2026-04-28T06:30:00+02:00' or '2026-04-28T06:30:00'."
+                        ),
+                    },
+                    "target_soc_pct": {
+                        "type": "integer",
+                        "description": "Target SoC % (10–100, typically 80).",
+                        "minimum": 10,
+                        "maximum": 100,
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Why this override is being applied (optional).",
+                        "default": "user said so",
+                    },
+                },
+                "required": ["deadline_local", "target_soc_pct"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "request_service_refresh",
             "description": (
                 "Send a command to one of the homelab services to trigger an immediate refresh. "
@@ -203,6 +240,61 @@ class EVTools:
         if self._activity_tracker:
             self._activity_tracker.record_decision(decision_text)
         return {"success": True, "mode": mode}
+
+    async def set_ev_ready_by(
+        self,
+        deadline_local: str,
+        target_soc_pct: int,
+        reason: str = "user said so",
+    ) -> dict[str, Any]:
+        """S4.1: Publish energy.ev.command.set_ready_by for ev-forecast to apply.
+
+        ev-forecast subscribes, sets the HA Ready-By helpers, journals the
+        override, replans, and acks via energy.ev.command.acknowledged. The
+        orchestrator's main.py forwards the ack to Telegram.
+        """
+        import uuid
+        from datetime import datetime as _dt
+
+        trace_id = uuid.uuid4().hex[:12]
+        payload = {
+            "deadline_local": deadline_local,
+            "target_soc_pct": int(target_soc_pct),
+            "reason": reason,
+            "trace_id": trace_id,
+            "issued_at": _dt.now(self._tz).isoformat(),
+        }
+        try:
+            await self.nats.publish("energy.ev.command.set_ready_by", payload)
+        except Exception:
+            logger.exception("set_ev_ready_by_publish_failed", trace_id=trace_id)
+            return {
+                "success": False,
+                "error": "NATS publish failed",
+                "trace_id": trace_id,
+            }
+
+        decision_text = f"EV Ready-By override → {deadline_local} @ {target_soc_pct}%"
+        self.memory.log_decision(
+            context="EV Ready-By override",
+            decision=decision_text,
+            reasoning=f"{reason} (trace_id={trace_id})",
+        )
+        if self._activity_tracker:
+            self._activity_tracker.record_decision(decision_text)
+
+        return {
+            "status": "issued",
+            "trace_id": trace_id,
+            "deadline_local": deadline_local,
+            "target_soc_pct": int(target_soc_pct),
+            "reason": reason,
+            "note": (
+                "Override published to ev-forecast. The plan summary will be "
+                "forwarded to Telegram once ev-forecast acknowledges via "
+                "energy.ev.command.acknowledged."
+            ),
+        }
 
     async def get_ev_forecast_plan(self) -> dict[str, Any]:
         plan = self._ev_state.get("plan")

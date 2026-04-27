@@ -146,6 +146,10 @@ class OrchestratorService(BaseService):
                     "energy.pv.forecast.hourly",  # subscribe — PV forecast feed
                     "energy.allocation.ev",  # publish — advisory hint to EV
                     "energy.allocation.heating",  # publish — advisory hint to HEMS
+                    # S4: manual override + LLM narration + nudges
+                    "energy.ev.command.set_ready_by",  # publish from set_ev_ready_by tool
+                    "energy.ev.command.acknowledged",  # subscribe to ev-forecast ack
+                    "energy.ev.decision.plan",  # subscribe for narrator + nudges
                 ],
                 "source_paths": [
                     {"repo": "claude", "paths": ["services/orchestrator/"]},
@@ -224,6 +228,10 @@ class OrchestratorService(BaseService):
         await self.nats.subscribe_json("energy.ev.forecast.plan", self._on_ev_plan)
         await self.nats.subscribe_json(
             "energy.ev.forecast.clarification_needed", self._on_ev_clarification
+        )
+        # S4.1: receive ev-forecast's ack of a set_ev_ready_by override
+        await self.nats.subscribe_json(
+            "energy.ev.command.acknowledged", self._on_ev_command_ack
         )
 
         # --- S3b: Energy Allocator (advisory PV-surplus arbitration) ---
@@ -459,6 +467,31 @@ class OrchestratorService(BaseService):
 
     async def _on_ev_clarification(self, subject: str, payload: dict) -> None:
         self._ev_state["pending_clarifications"] = payload.get("clarifications", [])
+
+    async def _on_ev_command_ack(self, subject: str, payload: dict) -> None:
+        """S4.1: receive ev-forecast's ack of a set_ready_by override.
+
+        Caches the latest ack on the ev_state dict so the Brain LLM can read it
+        on the next user turn ("did the override apply?"). The plan summary is
+        also surfaced via Telegram when ChatBot is wired (see proactive engine).
+        """
+        from datetime import datetime as _dt
+
+        try:
+            self._ev_state["last_command_ack"] = {
+                "trace_id": payload.get("trace_id"),
+                "status": payload.get("status"),
+                "plan_summary": payload.get("plan_summary", ""),
+                "error": payload.get("error"),
+                "received_at": _dt.now().isoformat(),
+            }
+            self.logger.info(
+                "ev_command_acked",
+                trace_id=payload.get("trace_id"),
+                status=payload.get("status"),
+            )
+        except Exception:
+            self.logger.exception("ev_command_ack_handler_failed")
 
     async def _load_existing_ev_events(self) -> None:
         """Load existing EV calendar events from Google Calendar.

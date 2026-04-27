@@ -127,6 +127,7 @@ class ToolExecutor:
         for name in (
             "get_ev_charging_status",
             "set_ev_charge_mode",
+            "set_ev_ready_by",  # S4.1
             "get_ev_forecast_plan",
             "respond_to_ev_trip_clarification",
             "request_service_refresh",
