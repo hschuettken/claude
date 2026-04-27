@@ -45,6 +45,7 @@ HEALTHCHECK_FILE = Path("/app/data/healthcheck")
 from config import PVForecastSettings
 from data import PVDataCollector
 from forecast import ForecastEngine
+from forecast_history import ForecastHistoryLogger
 from ha_sensors import HASensorPublisher
 from weather import OpenMeteoClient
 
@@ -172,7 +173,9 @@ class PVForecastService:
 
         # Initialize components
         self.weather = OpenMeteoClient(self.latitude, self.longitude)
-        self.data_collector = PVDataCollector(self.influx, self.weather, self.settings)
+        self.data_collector = PVDataCollector(
+            self.influx, self.weather, self.settings, influx_admin=self.influx_admin
+        )
         self.engine = ForecastEngine(
             self.settings, self.data_collector, self.weather, self.ha
         )
@@ -180,6 +183,18 @@ class PVForecastService:
         self.engine.latitude = self.latitude
         self.engine.longitude = self.longitude
         self.publisher = HASensorPublisher(self.ha, self.settings.ha_sensor_prefix)
+
+        # Forecast history logger — captures rolling forecasts to analytics bucket
+        # so the model can later learn from forecast revisions/volatility.
+        self.history = ForecastHistoryLogger(
+            influx_admin=self.influx_admin,
+            analytics_bucket=self.settings.influxdb_analytics_bucket,
+            latitude=self.latitude,
+            longitude=self.longitude,
+            ha_client=self.ha,
+            forecast_solar_east_entity=self.settings.forecast_solar_east_entity_id,
+            forecast_solar_west_entity=self.settings.forecast_solar_west_entity_id,
+        )
 
         # Register entities in HA via NATS ha.discovery (bridge forwards to MQTT for HA)
         await self._register_ha_discovery()
@@ -226,6 +241,23 @@ class PVForecastService:
             hour=4,
             minute=30,
             id="daylight_window",
+        )
+        # Hourly: log Open-Meteo rolling forecast to analytics bucket (Phase 1).
+        # Runs at :05 to capture state slightly before the forecast cycle at :10.
+        self.scheduler.add_job(
+            self._log_rolling_forecasts,
+            "cron",
+            minute=5,
+            id="log_rolling_forecasts",
+        )
+        # Daily at 06:00 UTC: pull D-2's actual hourly weather from Open-Meteo
+        # archive (lags reality by ~2 days) → pv_weather_actual measurement.
+        self.scheduler.add_job(
+            self._log_actuals_archive,
+            "cron",
+            hour=6,
+            minute=0,
+            id="log_actuals_archive",
         )
         self.scheduler.start()
 
@@ -448,10 +480,58 @@ class PVForecastService:
                     "energy.pv.hourly_forecast", hourly_event.model_dump()
                 )
 
+            # Log this forecast cycle's pv-ai output to analytics bucket
+            # (rolling history for forecast-revision learning).
+            try:
+                await self.history.log_pv_ai_forecast(
+                    today_east_kwh=summary["east_today_kwh"],
+                    today_west_kwh=summary["west_today_kwh"],
+                    tomorrow_east_kwh=summary["east_tomorrow_kwh"],
+                    tomorrow_west_kwh=summary["west_tomorrow_kwh"],
+                    day_after_east_kwh=(
+                        forecast.east.day_after.total_kwh
+                        if forecast.east and forecast.east.day_after
+                        else 0.0
+                    ),
+                    day_after_west_kwh=(
+                        forecast.west.day_after.total_kwh
+                        if forecast.west and forecast.west.day_after
+                        else 0.0
+                    ),
+                )
+            except Exception:
+                logger.warning("history_log_pv_ai_failed", exc_info=True)
+
         except Exception:
             logger.exception("forecast_failed")
         finally:
             self._touch_healthcheck()
+
+    async def _log_rolling_forecasts(self) -> None:
+        """Hourly: pull a fresh Open-Meteo forecast and log Forecast.Solar state
+        to the analytics bucket. Runs at :05 each hour."""
+        try:
+            records = await self.weather.get_solar_forecast(forecast_days=4)
+            if records:
+                await self.history.log_open_meteo_forecast(records)
+        except Exception:
+            logger.warning("history_log_open_meteo_failed", exc_info=True)
+        try:
+            await self.history.log_forecast_solar_state()
+        except Exception:
+            logger.warning("history_log_forecast_solar_failed", exc_info=True)
+
+    async def _log_actuals_archive(self) -> None:
+        """Daily 06:00 UTC: log D-2 hourly actuals from Open-Meteo's archive."""
+        from datetime import date, timedelta
+
+        target = date.today() - timedelta(days=2)
+        try:
+            await self.history.log_actuals_for_date(target)
+        except Exception:
+            logger.warning(
+                "history_log_actuals_failed", date=str(target), exc_info=True
+            )
 
     async def _check_forecast_accuracy(self) -> None:
         """Evening job: compare today's forecast vs actual production."""

@@ -11,7 +11,6 @@ actually produces — accounting for shading, inverter losses, panel degradation
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -55,10 +54,9 @@ def compute_solar_position(
     hour_angle_rad = np.radians(hour_angle_deg)
 
     # Solar elevation
-    sin_elev = (
-        np.sin(lat_rad) * np.sin(decl_rad)
-        + np.cos(lat_rad) * np.cos(decl_rad) * np.cos(hour_angle_rad)
-    )
+    sin_elev = np.sin(lat_rad) * np.sin(decl_rad) + np.cos(lat_rad) * np.cos(
+        decl_rad
+    ) * np.cos(hour_angle_rad)
     sin_elev = np.clip(sin_elev, -1, 1)
     elevation_rad = np.arcsin(sin_elev)
     elevation_deg = np.degrees(elevation_rad)
@@ -67,7 +65,9 @@ def compute_solar_position(
     cos_elev = np.cos(elevation_rad)
     # Avoid division by zero when sun is at horizon
     cos_elev_safe = np.where(np.abs(cos_elev) < 1e-6, 1e-6, cos_elev)
-    cos_az = (sin_elev * np.sin(lat_rad) - np.sin(decl_rad)) / (cos_elev_safe * np.cos(lat_rad))
+    cos_az = (sin_elev * np.sin(lat_rad) - np.sin(decl_rad)) / (
+        cos_elev_safe * np.cos(lat_rad)
+    )
     cos_az = np.clip(cos_az, -1, 1)
     azimuth_deg = np.degrees(np.arccos(cos_az))
     # Afternoon: azimuth > 180
@@ -135,7 +135,9 @@ def add_lagged_features(df: pd.DataFrame) -> pd.DataFrame:
     # Yesterday same hour: shift the pivot by 1 day
     yesterday = pivot.shift(1)
     # Rolling 3-day mean per hour
-    rolling_3d = pivot.rolling(3, min_periods=1).mean().shift(1)  # shift to avoid leakage
+    rolling_3d = (
+        pivot.rolling(3, min_periods=1).mean().shift(1)
+    )  # shift to avoid leakage
 
     # Map back to the original DataFrame
     kwh_yesterday = []
@@ -143,12 +145,22 @@ def add_lagged_features(df: pd.DataFrame) -> pd.DataFrame:
     for _, row in df.iterrows():
         d = row["date"]
         h = row["hour"]
-        yval = yesterday.loc[d, h] if d in yesterday.index and h in yesterday.columns else np.nan
-        rval = rolling_3d.loc[d, h] if d in rolling_3d.index and h in rolling_3d.columns else np.nan
+        yval = (
+            yesterday.loc[d, h]
+            if d in yesterday.index and h in yesterday.columns
+            else np.nan
+        )
+        rval = (
+            rolling_3d.loc[d, h]
+            if d in rolling_3d.index and h in rolling_3d.columns
+            else np.nan
+        )
         kwh_yesterday.append(yval)
         kwh_rolling.append(rval)
 
-    df["kwh_yesterday_same_hour"] = pd.Series(kwh_yesterday, dtype=float).fillna(0).values
+    df["kwh_yesterday_same_hour"] = (
+        pd.Series(kwh_yesterday, dtype=float).fillna(0).values
+    )
     df["kwh_rolling_3d_mean"] = pd.Series(kwh_rolling, dtype=float).fillna(0).values
     df = df.drop(columns=["date"], errors="ignore")
 
@@ -170,10 +182,179 @@ class PVDataCollector:
         influx: InfluxClient,
         weather: OpenMeteoClient,
         settings: PVForecastSettings,
+        influx_admin: InfluxClient | None = None,
     ) -> None:
         self.influx = influx
         self.weather = weather
         self.settings = settings
+        # Optional client with read access to the analytics bucket — used for
+        # enriching training data with forecast revision features (drift,
+        # volatility). Falls back to the main client.
+        self.influx_admin = influx_admin or influx
+
+    def _query_forecast_history_drift(self, days_back: int) -> pd.DataFrame:
+        """Query analytics.pv_weather_forecast_history and compute per-target-hour
+        drift + volatility features.
+
+        Returns DataFrame indexed by target hour (UTC) with columns:
+          - ghi_drift_24h:        latest_forecast_ghi - forecast_made_24h_before
+          - ghi_volatility_24h:   stddev across forecasts made in last 24h
+          - cloud_cover_drift_24h, cloud_cover_volatility_24h
+
+        Returns empty DataFrame if the analytics bucket is empty / has no history yet.
+        """
+        bucket = self.settings.influxdb_analytics_bucket
+        if not bucket:
+            return pd.DataFrame()
+        try:
+            flux = f'''
+from(bucket: "{bucket}")
+  |> range(start: -{days_back}d)
+  |> filter(fn: (r) => r["_measurement"] == "pv_weather_forecast_history")
+  |> filter(fn: (r) => r["_field"] == "shortwave_radiation" or r["_field"] == "cloud_cover")
+  |> keep(columns: ["_time", "_value", "_field", "forecast_run_iso"])
+'''
+            records = self.influx_admin.query_raw(flux)
+            rows = []
+            for table in records:
+                for r in table.records:
+                    v = r.values
+                    rows.append(
+                        {
+                            "target_time": v.get("_time"),
+                            "field": v.get("_field"),
+                            "value": v.get("_value"),
+                            "run_iso": v.get("forecast_run_iso"),
+                        }
+                    )
+        except Exception as e:
+            logger.warning("forecast_history_query_failed", err=str(e))
+            return pd.DataFrame()
+
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows)
+        df["target_time"] = pd.to_datetime(df["target_time"], utc=True)
+        df["run_dt"] = pd.to_datetime(df["run_iso"], utc=True, errors="coerce")
+        df["lead_h"] = (df["target_time"] - df["run_dt"]).dt.total_seconds() / 3600.0
+        # Only consider forecasts made ≤ 36h before target hour (covers 24h drift window)
+        df = df[(df["lead_h"] >= 0) & (df["lead_h"] <= 36)]
+        df["value"] = pd.to_numeric(df["value"], errors="coerce")
+        df = df.dropna(subset=["value", "target_time", "lead_h"])
+        if df.empty:
+            return pd.DataFrame()
+
+        out_frames = []
+        for field, prefix in [
+            ("shortwave_radiation", "ghi"),
+            ("cloud_cover", "cloud_cover"),
+        ]:
+            sub = df[df["field"] == field]
+            if sub.empty:
+                continue
+            grp = sub.groupby("target_time")
+            # Volatility: stddev across all forecasts made in last 24h
+            vol = grp.apply(lambda g: g[g["lead_h"] <= 24]["value"].std()).rename(
+                f"{prefix}_volatility_24h"
+            )
+
+            # Drift: latest (lowest lead_h) minus oldest within 24h±2h (lead_h ~22-26h)
+            def _drift(g: pd.DataFrame) -> float:
+                latest = g.loc[g["lead_h"].idxmin(), "value"]
+                near_24h = g[(g["lead_h"] >= 20) & (g["lead_h"] <= 28)]
+                if near_24h.empty:
+                    return float("nan")
+                old = near_24h.loc[near_24h["lead_h"].idxmax(), "value"]
+                return latest - old
+
+            drift = grp.apply(_drift).rename(f"{prefix}_drift_24h")
+            out_frames.append(pd.concat([vol, drift], axis=1))
+
+        if not out_frames:
+            return pd.DataFrame()
+        result = pd.concat(out_frames, axis=1)
+        result.index.name = "time"
+        return result.reset_index()
+
+    def _query_pv_forecast_drift(self, days_back: int) -> pd.DataFrame:
+        """Query analytics.pv_forecast_rolling for pv_ai and forecast_solar daily drift.
+
+        Returns per-day drift values (broadcasted to all hours of the target day):
+          - pv_ai_drift_24h: change in pv-ai's "today" forecast over past 24h for that day
+          - forecast_solar_drift_24h: same for HA Forecast.Solar
+
+        Empty DataFrame if no rolling data yet.
+        """
+        bucket = self.settings.influxdb_analytics_bucket
+        if not bucket:
+            return pd.DataFrame()
+        try:
+            flux = f'''
+from(bucket: "{bucket}")
+  |> range(start: -{days_back}d)
+  |> filter(fn: (r) => r["_measurement"] == "pv_forecast_rolling")
+  |> filter(fn: (r) => r["array"] == "total")
+  |> filter(fn: (r) => r["target_day"] == "D+0")
+  |> keep(columns: ["_time", "_value", "source"])
+'''
+            records = self.influx_admin.query_raw(flux)
+            rows = []
+            for table in records:
+                for r in table.records:
+                    v = r.values
+                    rows.append(
+                        {
+                            "run_time": v.get("_time"),
+                            "source": v.get("source"),
+                            "value": v.get("_value"),
+                        }
+                    )
+        except Exception as e:
+            logger.warning("pv_forecast_rolling_query_failed", err=str(e))
+            return pd.DataFrame()
+
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows)
+        df["run_time"] = pd.to_datetime(df["run_time"], utc=True)
+        df["value"] = pd.to_numeric(df["value"], errors="coerce")
+        df = df.dropna(subset=["value", "run_time"])
+        if df.empty:
+            return pd.DataFrame()
+        df["target_date"] = df["run_time"].dt.date
+
+        out = pd.DataFrame({"date": sorted(df["target_date"].unique())})
+        for source, col in [
+            ("pv_ai", "pv_ai_drift_24h"),
+            ("forecast_solar", "forecast_solar_drift_24h"),
+        ]:
+            sub = df[df["source"] == source]
+            if sub.empty:
+                out[col] = float("nan")
+                continue
+            grp = sub.groupby("target_date")
+            drift_per_day = []
+            for d in out["date"]:
+                gd = grp.get_group(d) if d in grp.groups else None
+                if gd is None or len(gd) < 2:
+                    drift_per_day.append(float("nan"))
+                    continue
+                gd = gd.sort_values("run_time")
+                latest = gd.iloc[-1]["value"]
+                # Find a row ~24h before latest (or earliest within last 24h+2h)
+                window_start = gd.iloc[-1]["run_time"] - pd.Timedelta(hours=26)
+                window_end = gd.iloc[-1]["run_time"] - pd.Timedelta(hours=22)
+                near_24h = gd[
+                    (gd["run_time"] >= window_start) & (gd["run_time"] <= window_end)
+                ]
+                if near_24h.empty:
+                    drift_per_day.append(float("nan"))
+                else:
+                    drift_per_day.append(latest - near_24h.iloc[-1]["value"])
+            out[col] = drift_per_day
+        return out
 
     def get_production_history(
         self,
@@ -198,7 +379,9 @@ class PVDataCollector:
         )
 
         if not records:
-            logger.warning("no_production_data", entity_id=entity_id, days_back=days_back)
+            logger.warning(
+                "no_production_data", entity_id=entity_id, days_back=days_back
+            )
             return pd.DataFrame(columns=["time", "kwh"])
 
         df = pd.DataFrame(records)
@@ -287,7 +470,9 @@ class PVDataCollector:
 
         df = df.rename(columns={"_time": "time", "_value": "forecast_solar_kwh"})
         df["time"] = pd.to_datetime(df["time"], utc=True)
-        df["forecast_solar_kwh"] = pd.to_numeric(df["forecast_solar_kwh"], errors="coerce")
+        df["forecast_solar_kwh"] = pd.to_numeric(
+            df["forecast_solar_kwh"], errors="coerce"
+        )
         df = df.dropna(subset=["forecast_solar_kwh"])
         df = df[["time", "forecast_solar_kwh"]]
 
@@ -391,14 +576,20 @@ class PVDataCollector:
                 # Distribute daily total proportional to GHI
                 if "shortwave_radiation" in merged.columns:
                     ghi = merged["shortwave_radiation"].fillna(0)
-                    daily_ghi_sum = merged.groupby("date")["shortwave_radiation"].transform("sum")
+                    daily_ghi_sum = merged.groupby("date")[
+                        "shortwave_radiation"
+                    ].transform("sum")
                     # Weight: this hour's GHI / total GHI for the day
                     weight = np.where(daily_ghi_sum > 0, ghi / daily_ghi_sum, 0)
-                    merged["forecast_solar_hourly_kwh"] = merged["forecast_solar_kwh"] * weight
+                    merged["forecast_solar_hourly_kwh"] = (
+                        merged["forecast_solar_kwh"] * weight
+                    )
                 else:
                     merged["forecast_solar_hourly_kwh"] = merged["forecast_solar_kwh"]
 
-                merged = merged.drop(columns=["date", "forecast_solar_kwh"], errors="ignore")
+                merged = merged.drop(
+                    columns=["date", "forecast_solar_kwh"], errors="ignore"
+                )
                 logger.info(
                     "forecast_solar_merged",
                     matched_rows=int((merged["forecast_solar_hourly_kwh"] > 0).sum()),
@@ -433,12 +624,72 @@ class PVDataCollector:
         # Add lagged production features (yesterday same hour, rolling 3d mean)
         merged = add_lagged_features(merged)
 
+        # ── Forecast revision features (Phase 2) ─────────────────────────
+        # Pull rolling-forecast history from analytics bucket and compute
+        # drift/volatility per target hour. NaN for rows where we have no
+        # history yet — fillna(0) so the model treats "no signal" as known.
+        new_feats = [
+            "ghi_drift_24h",
+            "ghi_volatility_24h",
+            "cloud_cover_drift_24h",
+            "cloud_cover_volatility_24h",
+            "pv_ai_drift_24h",
+            "forecast_solar_drift_24h",
+        ]
+        for col in new_feats:
+            merged[col] = 0.0
+        try:
+            wx_drift = self._query_forecast_history_drift(days_back=min(days_back, 30))
+            if not wx_drift.empty:
+                wx_drift["time"] = pd.to_datetime(wx_drift["time"], utc=True)
+                merged["time"] = pd.to_datetime(merged["time"], utc=True)
+                merged = merged.merge(
+                    wx_drift, on="time", how="left", suffixes=("", "_wx")
+                )
+                for c in [
+                    "ghi_drift_24h",
+                    "ghi_volatility_24h",
+                    "cloud_cover_drift_24h",
+                    "cloud_cover_volatility_24h",
+                ]:
+                    if f"{c}_wx" in merged.columns:
+                        merged[c] = merged[f"{c}_wx"].fillna(merged[c])
+                        merged = merged.drop(columns=[f"{c}_wx"])
+        except Exception:
+            logger.exception("weather_drift_enrich_failed")
+
+        try:
+            pv_drift = self._query_pv_forecast_drift(days_back=min(days_back, 30))
+            if not pv_drift.empty:
+                merged["date"] = merged["time"].dt.date
+                merged = merged.merge(
+                    pv_drift, on="date", how="left", suffixes=("", "_pv")
+                )
+                for c in ["pv_ai_drift_24h", "forecast_solar_drift_24h"]:
+                    if f"{c}_pv" in merged.columns:
+                        merged[c] = merged[f"{c}_pv"].fillna(merged[c])
+                        merged = merged.drop(columns=[f"{c}_pv"])
+                merged = merged.drop(columns=["date"], errors="ignore")
+        except Exception:
+            logger.exception("pv_drift_enrich_failed")
+
+        for col in new_feats:
+            if col in merged.columns:
+                merged[col] = merged[col].fillna(0.0)
+
         logger.info(
             "training_data_ready",
             entity_id=entity_id,
             samples=len(merged),
             date_range=f"{start_date} to {end_date}",
             has_forecast_solar="forecast_solar_hourly_kwh" in merged.columns,
+            forecast_history_rows=int(
+                (
+                    (merged["ghi_volatility_24h"] != 0) | (merged["ghi_drift_24h"] != 0)
+                ).sum()
+            )
+            if "ghi_volatility_24h" in merged.columns
+            else 0,
         )
         return merged
 

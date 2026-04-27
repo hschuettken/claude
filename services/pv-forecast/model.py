@@ -57,6 +57,15 @@ FEATURE_COLS = [
     "clear_sky_index",  # Ratio of actual GHI to theoretical clear-sky GHI
     "kwh_yesterday_same_hour",  # Production at same hour yesterday
     "kwh_rolling_3d_mean",  # Rolling 3-day mean production at this hour
+    # Forecast revision features (Phase 2 — populated from analytics bucket).
+    # NaN-safe: filled with 0.0 for rows predating the rolling-forecast logger.
+    # Useful signal accumulates over ~1-2 weeks of operation.
+    "ghi_drift_24h",  # current GHI forecast minus 24h-old forecast for same target hour
+    "ghi_volatility_24h",  # stddev of GHI forecasts made over last 24h
+    "cloud_cover_drift_24h",
+    "cloud_cover_volatility_24h",
+    "pv_ai_drift_24h",  # change in pv-ai's daily forecast over past 24h (target day)
+    "forecast_solar_drift_24h",  # same for HA Forecast.Solar (target day)
 ]
 
 
@@ -94,7 +103,9 @@ class PVModel:
         self._min_training_samples = min_training_samples
         self._cv_folds = cv_folds
 
-    def _make_gbr(self, loss: str = "squared_error", alpha: float = 0.5) -> GradientBoostingRegressor:
+    def _make_gbr(
+        self, loss: str = "squared_error", alpha: float = 0.5
+    ) -> GradientBoostingRegressor:
         """Create a GBR with current hyperparameters."""
         kwargs = dict(
             n_estimators=self._n_estimators,
@@ -165,7 +176,11 @@ class PVModel:
         if n_folds >= 2:
             tscv = TimeSeriesSplit(n_splits=n_folds)
             cv_scores = cross_val_score(
-                self._make_gbr("squared_error"), X, y, cv=tscv, scoring="r2",
+                self._make_gbr("squared_error"),
+                X,
+                y,
+                cv=tscv,
+                scoring="r2",
             )
             cv_r2 = float(cv_scores.mean())
 
@@ -178,8 +193,12 @@ class PVModel:
             if n_gfolds >= 2:
                 gkf = GroupKFold(n_splits=n_gfolds)
                 gkf_scores = cross_val_score(
-                    self._make_gbr("squared_error"), X, y,
-                    cv=gkf, groups=groups.values, scoring="r2",
+                    self._make_gbr("squared_error"),
+                    X,
+                    y,
+                    cv=gkf,
+                    groups=groups.values,
+                    scoring="r2",
                 )
                 cv_r2_group = float(gkf_scores.mean())
 
@@ -206,7 +225,9 @@ class PVModel:
         return metrics
 
     def predict(
-        self, df: pd.DataFrame, return_intervals: bool = False,
+        self,
+        df: pd.DataFrame,
+        return_intervals: bool = False,
     ) -> np.ndarray | tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Predict hourly kWh for given weather features.
 
@@ -228,7 +249,11 @@ class PVModel:
         X = df[features].fillna(0).values
         predictions = np.clip(self.model.predict(X), 0, None)
 
-        if return_intervals and self.model_low is not None and self.model_high is not None:
+        if (
+            return_intervals
+            and self.model_low is not None
+            and self.model_high is not None
+        ):
             low = np.clip(self.model_low.predict(X), 0, None)
             high = np.clip(self.model_high.predict(X), 0, None)
             return predictions, low, high
@@ -304,8 +329,16 @@ def fallback_estimate(
     PEAK_IRRADIANCE = peak_irradiance
 
     ghi = weather_df["shortwave_radiation"].fillna(0).values
-    hours = weather_df["hour"].values if "hour" in weather_df.columns else np.zeros(len(ghi))
-    days = weather_df["day_of_year"].values if "day_of_year" in weather_df.columns else np.full(len(ghi), 180)
+    hours = (
+        weather_df["hour"].values
+        if "hour" in weather_df.columns
+        else np.zeros(len(ghi))
+    )
+    days = (
+        weather_df["day_of_year"].values
+        if "day_of_year" in weather_df.columns
+        else np.full(len(ghi), 180)
+    )
 
     estimates = []
     for i in range(len(ghi)):
@@ -325,7 +358,12 @@ def fallback_estimate(
         orientation_factor = max(0.5, min(1.3, orientation_factor))
 
         # Estimate kWh for this hour
-        kwh = (ghi[i] / PEAK_IRRADIANCE) * capacity_kwp * SYSTEM_EFFICIENCY * orientation_factor
+        kwh = (
+            (ghi[i] / PEAK_IRRADIANCE)
+            * capacity_kwp
+            * SYSTEM_EFFICIENCY
+            * orientation_factor
+        )
         estimates.append(max(0.0, kwh))
 
     return np.array(estimates)
