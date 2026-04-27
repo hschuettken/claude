@@ -140,6 +140,12 @@ class OrchestratorService(BaseService):
                     "services.>.updated",
                     "energy.ev.forecast.plan",
                     "energy.ev.forecast.clarification_needed",
+                    # S3b: Energy Allocator (advisory PV-surplus arbitration)
+                    "energy.demand.ev",  # subscribe — EV demand publisher
+                    "energy.demand.heating",  # subscribe — HEMS demand publisher
+                    "energy.pv.forecast.hourly",  # subscribe — PV forecast feed
+                    "energy.allocation.ev",  # publish — advisory hint to EV
+                    "energy.allocation.heating",  # publish — advisory hint to HEMS
                 ],
                 "source_paths": [
                     {"repo": "claude", "paths": ["services/orchestrator/"]},
@@ -219,6 +225,22 @@ class OrchestratorService(BaseService):
         await self.nats.subscribe_json(
             "energy.ev.forecast.clarification_needed", self._on_ev_clarification
         )
+
+        # --- S3b: Energy Allocator (advisory PV-surplus arbitration) ---
+        from energy_allocator import EnergyAllocator  # noqa: F401  (deferred import keeps startup lazy)
+
+        self.energy_allocator = EnergyAllocator(self.nats)
+        await self.nats.subscribe_json(
+            "energy.demand.ev", self.energy_allocator.on_demand_ev
+        )
+        await self.nats.subscribe_json(
+            "energy.demand.heating", self.energy_allocator.on_demand_heating
+        )
+        await self.nats.subscribe_json(
+            "energy.pv.forecast.hourly",
+            self.energy_allocator.on_pv_forecast_hourly,
+        )
+        self.logger.info("energy_allocator_wired")
 
         # --- Companion module (Kairos) ---
         companion_pool_ready: bool = False
