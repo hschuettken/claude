@@ -250,6 +250,36 @@ services:
     networks:
       - homelab
 
+  self-optimizing-infra:
+    build:
+      context: .
+      dockerfile: services/self-optimizing-infra/Dockerfile
+    container_name: claude-self-optimizing-infra-1
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SOI_DB_URL: ${SOI_DB_URL:-postgresql://homelab:homelab@192.168.0.80:5432/homelab}
+      NATS_URL: ${NATS_URL:-nats://192.168.0.50:4222}
+      ORACLE_URL: ${ORACLE_URL:-http://192.168.0.50:8225}
+      SOI_PORT: ${SOI_PORT:-8242}
+      PROXMOX_URL: ${PROXMOX_URL:-https://192.168.0.10:8006}
+      PROXMOX_TOKEN_ID: ${PROXMOX_TOKEN_ID:-}
+      PROXMOX_TOKEN_SECRET: ${PROXMOX_TOKEN_SECRET:-}
+      BOOTSTRAP_URL: ${BOOTSTRAP_URL:-http://192.168.0.50:8235}
+      OPS_BRIDGE_URL: ${OPS_BRIDGE_URL:-http://192.168.0.50:8220}
+      OPS_BRIDGE_TOKEN: ${OPS_BRIDGE_TOKEN:-}
+      K3S_API_URL: ${K3S_API_URL:-https://192.168.0.60:6443}
+      K3S_TOKEN: ${K3S_TOKEN:-}
+      SOI_CHAOS_ENABLED: ${SOI_CHAOS_ENABLED:-false}
+    ports:
+      - "${SOI_PORT:-8242}:8242"
+    networks:
+      - homelab
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.homelab-soi.rule=Host(`soi.local.schuettken.net`)"
+      - "traefik.http.services.homelab-soi.loadbalancer.server.port=8242"
+
   # --- Template for new services ---
   # my-new-service:
   #   build:
@@ -273,6 +303,7 @@ volumes:
   cognitive_layer_data:
   agent_economy_data:
   digital_twin_data:
+  self_optimizing_infra_data:
   pv_forecast_data:
   smart_ev_charging_data:
   ev_forecast_data:
