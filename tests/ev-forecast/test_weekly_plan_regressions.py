@@ -56,7 +56,12 @@ def test_high_soc_commute_only_does_not_recommend_grid():
 
 
 def test_low_soc_commute_grid_requested():
-    """At 10% SoC + commute + no PV, grid IS needed."""
+    """At 10% SoC + commute + no PV, total grid demand is substantial.
+
+    The running SoC update tops up across days, so tomorrow's *delta* is
+    only the trip drain. What we care about is that the WEEK's grid total
+    reflects the gap between starting SoC and min_arrival + commute drain.
+    """
     today = date(2026, 4, 28)
     tomorrow = today + timedelta(days=1)
     plan = WeeklyPlanBuilder().build(
@@ -67,12 +72,14 @@ def test_low_soc_commute_grid_requested():
         pv_forecast_by_date={tomorrow.isoformat(): 0.0},
         today=today,
     )
-    tomorrow_plan = next(d for d in plan.days if d.date == tomorrow.isoformat())
-    # 10% SoC = 7.6 kWh; need ≥ 9.7 + 19 = 28.7 kWh → deficit ≈ 21 kWh from grid.
-    assert tomorrow_plan.grid_needed_kwh > 15.0, (
-        f"Expected grid_needed > 15 kWh at 10% SoC + commute, got "
-        f"{tomorrow_plan.grid_needed_kwh:.2f} kWh"
+    total_grid = sum(d.grid_needed_kwh for d in plan.days)
+    # 10% SoC = 7.6 kWh; min_arrival 19 kWh; commute 9.7 kWh.
+    # Total grid ≈ (19-7.6) + 9.7 = 21 kWh across today + tomorrow.
+    assert total_grid > 15.0, (
+        f"Expected total weekly grid demand > 15 kWh at 10% SoC + commute, got "
+        f"{total_grid:.2f} kWh ({[d.grid_needed_kwh for d in plan.days]})"
     )
+    tomorrow_plan = next(d for d in plan.days if d.date == tomorrow.isoformat())
     assert tomorrow_plan.charge_source_recommendation == "grid_required"
 
 

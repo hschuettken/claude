@@ -877,6 +877,9 @@ class WeeklyPlanBuilder:
 
     # 5% buffer per day added on top of raw trip energy
     ENERGY_BUFFER_FRACTION = 0.05
+    # Floor SoC the car must still have at arrival (matches ChargingPlanner:
+    # min_soc 20% + buffer 10% + min_arrival 15% ≈ 25% practical floor)
+    MIN_ARRIVAL_SOC_PCT = 25.0
 
     def build(
         self,
@@ -887,8 +890,13 @@ class WeeklyPlanBuilder:
         pv_forecast_by_date: dict[str, float],
         today: date | None = None,
         timestamp: str | None = None,
+        min_arrival_soc_pct: float | None = None,
     ) -> EVWeeklyPlan:
-        """Build a 7-day weekly plan.
+        """Build a 7-day SoC-aware weekly plan.
+
+        For each day computes the energy DEFICIT given current running SoC,
+        then splits it between PV and grid. Days where current SoC already
+        covers required energy + min-arrival buffer report grid_needed=0.
 
         Args:
             trips: All trips across the planning horizon (any day).
@@ -896,14 +904,18 @@ class WeeklyPlanBuilder:
             battery_capacity_kwh: Net battery capacity in kWh.
             consumption_kwh_per_100km: Energy consumption rate.
             pv_forecast_by_date: Mapping of YYYY-MM-DD to expected PV kWh.
-                Days not in the dict default to 0.0 (no forecast).
+                Days not in the dict default to 0.0.
             today: Override for today's date (useful in tests).
             timestamp: ISO timestamp for the plan; defaults to now.
+            min_arrival_soc_pct: SoC floor required at trip end. Defaults to
+                MIN_ARRIVAL_SOC_PCT (25%).
         """
         if today is None:
             today = date.today()
         if timestamp is None:
             timestamp = datetime.now().isoformat()
+        if min_arrival_soc_pct is None:
+            min_arrival_soc_pct = self.MIN_ARRIVAL_SOC_PCT
 
         # Index trips by date string for quick lookup
         trips_by_date: dict[str, list[Trip]] = {}
@@ -913,6 +925,7 @@ class WeeklyPlanBuilder:
 
         running_soc = current_soc_pct
         days: list[EVDailyPlan] = []
+        min_arrival_kwh = battery_capacity_kwh * min_arrival_soc_pct / 100.0
 
         for day_offset in range(7):
             day = today + timedelta(days=day_offset)
@@ -927,11 +940,19 @@ class WeeklyPlanBuilder:
             energy_needed = raw_energy * (1.0 + self.ENERGY_BUFFER_FRACTION)
 
             pv_expected = pv_forecast_by_date.get(day_key, 0.0)
-            grid_needed = max(0.0, energy_needed - pv_expected)
 
-            # Charge source recommendation
-            if energy_needed == 0.0:
-                charge_source = "pv_only"
+            # SoC-aware deficit: how much MORE energy do we need beyond what's in the battery?
+            current_kwh = (running_soc / 100.0) * battery_capacity_kwh
+            required_kwh = energy_needed + min_arrival_kwh
+            deficit_kwh = max(0.0, required_kwh - current_kwh)
+
+            # Grid only if PV can't cover the deficit
+            grid_needed = max(0.0, deficit_kwh - pv_expected)
+            pv_used = min(deficit_kwh, pv_expected)
+
+            # Charge source recommendation (deficit-aware)
+            if deficit_kwh == 0.0:
+                charge_source = "no_charge_needed"
             elif pv_expected == 0.0:
                 charge_source = "grid_required"
             elif grid_needed == 0.0:
@@ -942,13 +963,23 @@ class WeeklyPlanBuilder:
             # SoC target at the start of this day equals current running_soc
             target_soc = max(0.0, min(100.0, running_soc))
 
-            # Deplete running SoC by trips for the next day's calculation
-            soc_delta = (
+            # Update running SoC: subtract trip drain, add planned charge.
+            # (Without the charge add-back, day N+1 sees an artificially low SoC and
+            #  over-recommends grid — the same family of bug we just fixed.)
+            soc_delta_trips = (
                 (energy_needed / battery_capacity_kwh * 100.0)
                 if battery_capacity_kwh > 0
                 else 0.0
             )
-            running_soc = max(0.0, running_soc - soc_delta)
+            charge_kwh = pv_used + grid_needed
+            soc_delta_charge = (
+                (charge_kwh / battery_capacity_kwh * 100.0)
+                if battery_capacity_kwh > 0
+                else 0.0
+            )
+            running_soc = max(
+                0.0, min(100.0, running_soc - soc_delta_trips + soc_delta_charge)
+            )
 
             trip_dicts = [
                 {
