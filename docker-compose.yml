@@ -280,6 +280,28 @@ services:
       - "traefik.http.routers.homelab-soi.rule=Host(`soi.local.schuettken.net`)"
       - "traefik.http.services.homelab-soi.loadbalancer.server.port=8242"
 
+  life-nav:
+    build:
+      context: .
+      dockerfile: services/life-nav/Dockerfile
+    container_name: claude-life-nav-1
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      LIFE_NAV_DB_URL: ${LIFE_NAV_DB_URL:-postgresql://homelab:homelab@192.168.0.80:5432/homelab}
+      NATS_URL: ${NATS_URL:-nats://192.168.0.50:4222}
+      ORACLE_URL: ${ORACLE_URL:-http://192.168.0.50:8225}
+      LIFE_NAV_PORT: ${LIFE_NAV_PORT:-8243}
+      LIFE_NAV_USER: ${LIFE_NAV_USER:-henning}
+    ports:
+      - "${LIFE_NAV_PORT:-8243}:8243"
+    networks:
+      - homelab
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.homelab-life-nav.rule=Host(`life-nav.local.schuettken.net`)"
+      - "traefik.http.services.homelab-life-nav.loadbalancer.server.port=8243"
+
   # --- Template for new services ---
   # my-new-service:
   #   build:
