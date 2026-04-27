@@ -86,6 +86,7 @@ class EVForecastService:
                     "energy.ev.forecast.plan",
                     "energy.ev.forecast.clarification_needed",
                     "energy.ev.decision.plan",  # S1: Decision Journal
+                    "energy.pv.forecast.hourly",  # S2: subscribed for greedy scheduler
                     "heartbeat.ev-forecast",
                     "orchestrator.command.ev-forecast",
                     "orchestrator.knowledge-update",
@@ -214,6 +215,11 @@ class EVForecastService:
         # Keys: YYYY-MM-DD strings for today and tomorrow
         self._pv_forecast_cache: dict[str, float] = {}
 
+        # Hour-by-hour PV forecast cache (S2 — fed by energy.pv.forecast.hourly)
+        # Keys: ISO hour timestamps; values: {"kwh", "conf_low", "conf_high"}
+        self._pv_hourly_cache: dict[str, dict[str, float]] = {}
+        self._pv_hourly_run_iso: str | None = None
+
     async def start(self) -> None:
         """Initialize and start the service."""
         logger.info(
@@ -302,6 +308,12 @@ class EVForecastService:
             await self.nats.subscribe_json(
                 "energy.pv.forecast_updated",
                 self._on_pv_forecast_updated,
+            )
+
+            # Hourly 72h PV forecast — feeds the greedy charge scheduler (S2)
+            await self.nats.subscribe_json(
+                "energy.pv.forecast.hourly",
+                self._on_pv_forecast_hourly,
             )
 
         # Initialize Google Calendar
@@ -696,6 +708,26 @@ class EVForecastService:
             )
         except Exception:
             logger.exception("pv_forecast_cache_update_failed")
+
+    async def _on_pv_forecast_hourly(self, subject: str, payload: dict) -> None:
+        """Cache the flat 72h hourly PV forecast for the charge scheduler (S2)."""
+        try:
+            self._pv_hourly_run_iso = payload.get("forecast_run_iso")
+            new_cache: dict[str, dict[str, float]] = {}
+            for slot in payload.get("hourly", []):
+                t = slot.get("time_iso")
+                if not t:
+                    continue
+                kwh = float(slot.get("kwh", 0.0))
+                new_cache[t] = {
+                    "kwh": kwh,
+                    "conf_low": float(slot.get("conf_low", kwh)),
+                    "conf_high": float(slot.get("conf_high", kwh)),
+                }
+            self._pv_hourly_cache = new_cache
+            logger.debug("pv_hourly_cache_updated", slots=len(new_cache))
+        except Exception:
+            logger.exception("pv_hourly_cache_update_failed")
 
     # ------------------------------------------------------------------
     # Home location resolution
