@@ -89,6 +89,8 @@ class EVForecastService:
                     "energy.ev.decision.plan",  # S1: Decision Journal
                     "energy.pv.forecast.hourly",  # S2: subscribed for greedy scheduler
                     "energy.demand.ev",  # S3b: published for Energy Allocator
+                    "energy.ev.command.set_ready_by",  # S4.2: subscribed override
+                    "energy.ev.command.acknowledged",  # S4.2: published ack
                     "heartbeat.ev-forecast",
                     "orchestrator.command.ev-forecast",
                     "orchestrator.knowledge-update",
@@ -316,6 +318,12 @@ class EVForecastService:
             await self.nats.subscribe_json(
                 "energy.pv.forecast.hourly",
                 self._on_pv_forecast_hourly,
+            )
+
+            # S4.2: manual Ready-By override from the orchestrator
+            await self.nats.subscribe_json(
+                "energy.ev.command.set_ready_by",
+                self._on_ev_command_set_ready_by,
             )
 
         # Initialize Google Calendar
@@ -835,6 +843,123 @@ class EVForecastService:
             )
         except Exception:
             logger.exception("pv_forecast_cache_update_failed")
+
+    async def _on_ev_command_set_ready_by(self, subject: str, payload: dict) -> None:
+        """S4.2: handle Ready-By override from the orchestrator.
+
+        Sets the HA helpers (charge_mode → 'Ready By', deadline, target_soc),
+        journals the override, triggers an immediate replan, and acks via
+        ``energy.ev.command.acknowledged`` with a short plan summary.
+        """
+        from datetime import datetime as _dt
+
+        trace_id = payload.get("trace_id", "")
+        deadline_local = payload.get("deadline_local", "")
+        target_soc_pct = int(payload.get("target_soc_pct", 80))
+        reason = payload.get("reason", "manual override")
+
+        async def _ack(status: str, plan_summary: str = "", error: str = "") -> None:
+            if not (self.nats and self.nats.connected):
+                return
+            try:
+                await self.nats.publish(
+                    "energy.ev.command.acknowledged",
+                    {
+                        "trace_id": trace_id,
+                        "status": status,
+                        "plan_summary": plan_summary,
+                        "error": error,
+                    },
+                )
+            except Exception:
+                logger.exception("ev_command_ack_publish_failed", trace_id=trace_id)
+
+        try:
+            try:
+                dt = _dt.fromisoformat(deadline_local)
+            except ValueError as exc:
+                logger.warning(
+                    "ev_command_set_ready_by_invalid_deadline",
+                    deadline_local=deadline_local,
+                    trace_id=trace_id,
+                )
+                await _ack(status="failed", error=f"invalid deadline_local: {exc}")
+                return
+
+            await self.ha.call_service(
+                "input_select",
+                "select_option",
+                {
+                    "entity_id": self.settings.charge_mode_entity,
+                    "option": "Ready By",
+                },
+            )
+            await self.ha.call_service(
+                "input_datetime",
+                "set_datetime",
+                {
+                    "entity_id": "input_datetime.ev_ready_by_deadline",
+                    "datetime": dt.strftime("%Y-%m-%d %H:%M:%S"),
+                },
+            )
+            await self.ha.call_service(
+                "input_number",
+                "set_value",
+                {
+                    "entity_id": "input_number.ev_ready_by_target_soc",
+                    "value": float(target_soc_pct),
+                },
+            )
+
+            if self.journal is not None:
+                try:
+                    await self.journal.write(
+                        decision_kind="override_applied",
+                        outcome=(
+                            f"Ready By {dt.strftime('%H:%M')} target {target_soc_pct}%"
+                        ),
+                        reason=reason or "manual override",
+                        outcome_class="charge",
+                        trace_id=trace_id or None,
+                        target_soc_pct=float(target_soc_pct),
+                        inputs={
+                            "deadline_local": deadline_local,
+                            "reason": reason,
+                            "source": "orchestrator.set_ev_ready_by",
+                        },
+                    )
+                except Exception:
+                    logger.exception("override_journal_write_failed")
+
+            # Trigger replan immediately so the ack can carry a fresh summary.
+            try:
+                await self._update_plan()
+            except Exception:
+                logger.exception("override_replan_failed")
+
+            summary = ""
+            try:
+                if self._last_plan and self._last_plan.days:
+                    today = self._last_plan.days[0]
+                    summary = (
+                        f"{today.charge_mode}, "
+                        f"{today.energy_to_charge_kwh:.1f} kWh needed by "
+                        f"{dt.strftime('%H:%M')} (target {target_soc_pct}%)"
+                    )
+            except Exception:
+                summary = ""
+
+            await _ack(status="applied", plan_summary=summary)
+            logger.info(
+                "ev_command_set_ready_by_applied",
+                trace_id=trace_id,
+                deadline=deadline_local,
+                target_soc=target_soc_pct,
+            )
+
+        except Exception as exc:
+            logger.exception("ev_command_set_ready_by_failed", trace_id=trace_id)
+            await _ack(status="failed", error=str(exc))
 
     async def _on_pv_forecast_hourly(self, subject: str, payload: dict) -> None:
         """Cache the flat 72h hourly PV forecast for the charge scheduler (S2)."""
