@@ -226,6 +226,30 @@ services:
     networks:
       - homelab
 
+  digital-twin:
+    build:
+      context: .
+      dockerfile: services/digital-twin/Dockerfile
+    container_name: claude-digital-twin-1
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DIGITAL_TWIN_DB_URL: ${DIGITAL_TWIN_DB_URL:-postgresql://homelab:homelab@192.168.0.80:5432/homelab}
+      NATS_URL: ${NATS_URL:-nats://192.168.0.50:4222}
+      HA_URL: ${HA_URL:-http://192.168.0.40:8123}
+      HA_TOKEN: ${HA_TOKEN:-}
+      INFLUXDB_URL: ${INFLUXDB_URL:-http://192.168.0.66:8086}
+      INFLUXDB_TOKEN: ${INFLUXDB_TOKEN:-}
+      INFLUXDB_ORG: ${INFLUXDB_ORG:-nb9}
+      ORACLE_URL: ${ORACLE_URL:-http://192.168.0.50:8225}
+      DIGITAL_TWIN_PORT: ${DIGITAL_TWIN_PORT:-8238}
+    ports:
+      - "${DIGITAL_TWIN_PORT:-8238}:8238"
+    volumes:
+      - digital_twin_data:/app/data
+    networks:
+      - homelab
+
   # --- Template for new services ---
   # my-new-service:
   #   build:
@@ -248,6 +272,7 @@ volumes:
   marketing_agent_data:
   cognitive_layer_data:
   agent_economy_data:
+  digital_twin_data:
   pv_forecast_data:
   smart_ev_charging_data:
   ev_forecast_data:
