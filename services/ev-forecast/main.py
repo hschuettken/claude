@@ -84,6 +84,7 @@ class EVForecastService:
                     "energy.ev.forecast.vehicle",
                     "energy.ev.forecast.plan",
                     "energy.ev.forecast.clarification_needed",
+                    "energy.ev.decision.plan",  # S1: Decision Journal
                     "heartbeat.ev-forecast",
                     "orchestrator.command.ev-forecast",
                     "orchestrator.knowledge-update",

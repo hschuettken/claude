@@ -51,6 +51,7 @@ class SmartEVChargingService(BaseService):
                 "endpoints": [],
                 "nats_subjects": [
                     "energy.ev.charging.status",
+                    "energy.ev.decision.control",  # S1: Decision Journal
                     "heartbeat.smart-ev-charging",
                     "orchestrator.command.smart-ev-charging",
                     "energy.ev.weekly_plan",
