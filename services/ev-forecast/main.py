@@ -182,6 +182,20 @@ class EVForecastService:
             org=self.settings.influxdb_org,
         )
 
+        # Admin Influx client for writing the analytics bucket (Decision Journal).
+        # Falls back to the hass-scoped client if no admin token is configured.
+        if self.settings.influxdb_all_access_token:
+            self.influx_admin = InfluxClient(
+                url=self.settings.influxdb_url,
+                token=self.settings.influxdb_all_access_token,
+                org=self.settings.influxdb_org,
+            )
+        else:
+            self.influx_admin = self.influx
+
+        # Decision Journal — wired in start() once NATS is connected.
+        self.journal: DecisionJournal | None = None
+
         # Track previous mileage to compute km_delta for InfluxDB writes
         self._prev_mileage_km: float | None = None
 
@@ -248,6 +262,14 @@ class EVForecastService:
         if self.settings.nats_enabled:
             self.nats = NatsPublisher(url=self.settings.nats_url)
             await self.nats.connect()
+
+        # Decision Journal — best-effort writer to analytics bucket + NATS.
+        self.journal = DecisionJournal(
+            influx_admin=self.influx_admin,
+            nats=self.nats,
+            service="ev-forecast",
+            bucket=self.settings.influxdb_analytics_bucket,
+        )
 
         # Register HA auto-discovery entities
         await self._register_ha_discovery()
@@ -438,6 +460,58 @@ class EVForecastService:
                 pv_forecast_kwh=pv_forecast_kwh if pv_forecast_kwh else None,
             )
             self._last_plan = plan
+
+            # Decision Journal — record the plan with full reasoning context.
+            # Best-effort: never raises; never blocks publication below.
+            if self.journal is not None:
+                today = plan.days[0] if plan.days else None
+                action = plan.immediate_action
+                outcome_str = (
+                    f"{action.charge_mode}: {action.energy_to_charge_kwh:.1f} kWh"
+                    if action is not None
+                    else "no plan"
+                )
+                outcome_class = (
+                    "charge"
+                    if action is not None and action.energy_to_charge_kwh > 0
+                    else "hold"
+                )
+                pv_today_for_journal: float | None = (
+                    pv_forecast_kwh[0] if pv_forecast_kwh else None
+                )
+                await self.journal.write(
+                    decision_kind="plan_generated",
+                    outcome=outcome_str,
+                    reason=(action.reason if action is not None else "no day plans"),
+                    outcome_class=outcome_class,
+                    trace_id=plan.trace_id or None,
+                    current_soc_pct=plan.current_soc_pct,
+                    target_soc_pct=(
+                        today.soc_needed_pct if today is not None else None
+                    ),
+                    energy_needed_kwh=(
+                        today.energy_needed_kwh if today is not None else 0.0
+                    ),
+                    urgency=(action.urgency if action is not None else "none"),
+                    mode=(action.charge_mode if action is not None else None),
+                    inputs={
+                        "vehicle_plugged_in": plan.vehicle_plugged_in,
+                        "current_soc_pct": plan.current_soc_pct,
+                        "current_energy_kwh": plan.current_energy_kwh,
+                        "trips_today": [
+                            {
+                                "person": t.person,
+                                "destination": t.destination,
+                                "round_trip_km": t.round_trip_km,
+                                "is_commute": t.is_commute,
+                            }
+                            for t in (today.trips if today is not None else [])
+                        ],
+                        "pv_forecast_today_kwh": pv_today_for_journal,
+                        "horizon_days": len(plan.days),
+                        "total_energy_needed_kwh": plan.total_energy_needed_kwh,
+                    },
+                )
 
             # Publish plan to NATS (bridge forwards to MQTT for HA discovery sensor)
             plan_payload = plan.to_dict()

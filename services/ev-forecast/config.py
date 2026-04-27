@@ -12,8 +12,8 @@ class EVForecastSettings(BaseSettings):
     """
 
     # --- EV Battery specs ---
-    ev_battery_capacity_gross_kwh: float = 83.0   # Audi A6 e-tron gross
-    ev_battery_capacity_net_kwh: float = 76.0     # Usable capacity
+    ev_battery_capacity_gross_kwh: float = 83.0  # Audi A6 e-tron gross
+    ev_battery_capacity_net_kwh: float = 76.0  # Usable capacity
     # Default consumption — used as fallback until enough real data is collected.
     # The service calculates actual consumption dynamically from mileage + SoC changes.
     # For Audi A6 e-tron: ~18-20 kWh/100km in summer, ~22-26 kWh/100km in winter
@@ -38,7 +38,9 @@ class EVForecastSettings(BaseSettings):
     ev_charging_entity: str = "sensor.audi_a6_avant_e_tron_charging_state"
     ev_plug_entity: str = "binary_sensor.audi_a6_avant_e_tron_plug_state"
     ev_mileage_entity: str = "sensor.audi_a6_avant_e_tron_mileage"
-    ev_remaining_charge_entity: str = "sensor.audi_a6_avant_e_tron_remaining_charge_time"
+    ev_remaining_charge_entity: str = (
+        "sensor.audi_a6_avant_e_tron_remaining_charge_time"
+    )
     ev_active_account_entity: str = ""  # Only needed in dual-account mode
     ev_climatisation_entity: str = "sensor.audi_a6_avant_e_tron_climatisation_state"
 
@@ -51,13 +53,15 @@ class EVForecastSettings(BaseSettings):
 
     # --- Refresh intervals ---
     audi_refresh_interval_minutes: int = 30  # How often to try refreshing data
-    audi_stale_threshold_minutes: int = 60   # Data older than this triggers refresh
+    audi_stale_threshold_minutes: int = 60  # Data older than this triggers refresh
 
     # --- Google Calendar ---
     google_calendar_credentials_file: str = ""
     google_calendar_credentials_json: str = ""
     google_calendar_family_id: str = ""
-    google_calendar_ev_plan_id: str = ""  # Calendar for writing EV charging plan events (separate from family)
+    google_calendar_ev_plan_id: str = (
+        ""  # Calendar for writing EV charging plan events (separate from family)
+    )
 
     # --- Trip prediction ---
     # Calendar event prefixes for identifying who drives
@@ -89,8 +93,8 @@ class EVForecastSettings(BaseSettings):
     geocoding_road_factor: float = 1.3
 
     # --- Charging plan ---
-    min_soc_pct: float = 20.0         # Never plan below this SoC
-    buffer_soc_pct: float = 10.0      # Extra buffer above minimum needed
+    min_soc_pct: float = 20.0  # Never plan below this SoC
+    buffer_soc_pct: float = 10.0  # Extra buffer above minimum needed
     min_arrival_soc_pct: float = 15.0  # Min SoC when arriving at destination
     default_assumed_soc_pct: float = 50.0  # Assumed SoC when actual is unknown
 
@@ -99,9 +103,11 @@ class EVForecastSettings(BaseSettings):
 
     # --- Urgency thresholds ---
     critical_urgency_hours: float = 2.0  # departure within this → critical
-    high_urgency_hours: float = 6.0      # departure within this → high urgency
+    high_urgency_hours: float = 6.0  # departure within this → high urgency
     fast_mode_threshold_kwh: float = 15.0  # deficit above this → Fast instead of Eco
-    early_departure_hour: int = 10  # tomorrow departure before this hour → charge overnight
+    early_departure_hour: int = (
+        10  # tomorrow departure before this hour → charge overnight
+    )
 
     # --- HA helper entities (written by this service) ---
     charge_mode_entity: str = "input_select.ev_charge_mode"
@@ -109,20 +115,29 @@ class EVForecastSettings(BaseSettings):
     departure_time_entity: str = "input_datetime.ev_departure_time"
     target_energy_entity: str = "input_number.ev_target_energy_kwh"
     target_soc_entity: str = "input_number.ev_target_soc_pct"
-    
+
     # Audi Connect integration (optional, leave empty to disable)
-    audi_vin: str = ""  # Vehicle VIN for audiconnect.set_target_soc (auto-detected if empty)
+    audi_vin: str = (
+        ""  # Vehicle VIN for audiconnect.set_target_soc (auto-detected if empty)
+    )
     audi_set_target_soc: bool = True  # Enable automatic Audi target SoC control
-    
+
     # Wallbox/home charging detection (to prevent changing Audi settings when charging away)
-    wallbox_vehicle_state_entity: str = "sensor.amtron_vehicle_state_raw"  # Amtron vehicle state
+    wallbox_vehicle_state_entity: str = (
+        "sensor.amtron_vehicle_state_raw"  # Amtron vehicle state
+    )
 
     # --- Scheduling ---
-    plan_update_minutes: int = 30      # Re-evaluate plan every N minutes
-    vehicle_check_minutes: int = 15    # Check vehicle state every N minutes
+    plan_update_minutes: int = 30  # Re-evaluate plan every N minutes
+    vehicle_check_minutes: int = 15  # Check vehicle state every N minutes
 
     # --- MQTT integration ---
     # Subscribe to orchestrator responses for trip clarifications
     orchestrator_response_topic: str = "homelab/ev-forecast/trip-response"
     # Subscribe to learned knowledge updates from orchestrator
     knowledge_update_topic: str = "homelab/orchestrator/knowledge-update"
+
+    # --- Decision Journal (S1) ---
+    # Admin token can write the analytics bucket; falls back to influxdb_token if empty.
+    influxdb_all_access_token: str = ""
+    influxdb_analytics_bucket: str = "analytics"
