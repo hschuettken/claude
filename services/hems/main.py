@@ -52,6 +52,10 @@ logger = logging.getLogger("hems")
 _control_loop_task: asyncio.Task | None = None
 _thermal_collector_task: asyncio.Task | None = None  # Phase 3: Thermal data collector
 _heartbeat_task: asyncio.Task | None = None
+_demand_publisher_task: asyncio.Task | None = (
+    None  # S3b: energy.demand.heating publisher
+)
+_allocation_cache = None  # S3b: AllocationCache (advisory PV-allocation hints)
 _mixer_controller: MixerController | None = None
 _boiler_manager: BoilerManager | None = None
 _circulation_pump: CirculationPumpScheduler | None = None
@@ -109,7 +113,9 @@ class HEMSHealthResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _update_sensor_state(entity_id: str, value: float | None, available: bool = True) -> None:
+def _update_sensor_state(
+    entity_id: str, value: float | None, available: bool = True
+) -> None:
     """Update sensor cache and availability state.
 
     Args:
@@ -156,7 +162,9 @@ def _get_all_sensor_health() -> dict[str, SensorHealth]:
 # ---------------------------------------------------------------------------
 
 
-def _init_influxdb(settings: HEMSSettings) -> tuple[influxdb_client.InfluxDBClient | None, object | None]:
+def _init_influxdb(
+    settings: HEMSSettings,
+) -> tuple[influxdb_client.InfluxDBClient | None, object | None]:
     """Initialize InfluxDB client and write API."""
     if not settings.influxdb_token:
         logger.warning("InfluxDB token not set — telemetry disabled")
@@ -206,7 +214,9 @@ def _write_hems_decision_to_influx(
         if demand is not None:
             point = point.field("demand_w", demand)
 
-        write_api.write(bucket=settings.influxdb_bucket, org=settings.influxdb_org, record=point)
+        write_api.write(
+            bucket=settings.influxdb_bucket, org=settings.influxdb_org, record=point
+        )
         logger.debug("Wrote hems_decisions to InfluxDB")
     except Exception as e:
         logger.warning("Failed to write hems_decisions to InfluxDB: %s", e)
@@ -232,7 +242,9 @@ def _write_circulation_pump_to_influx(
             .field("runtime_hours", runtime_hours)
         )
 
-        write_api.write(bucket=settings.influxdb_bucket, org=settings.influxdb_org, record=point)
+        write_api.write(
+            bucket=settings.influxdb_bucket, org=settings.influxdb_org, record=point
+        )
         logger.debug("Wrote circulation pump state to InfluxDB")
     except Exception as e:
         logger.warning("Failed to write circulation pump state to InfluxDB: %s", e)
@@ -278,7 +290,10 @@ async def _publish_pump_schedule_to_ha(
                 )
                 return True
             else:
-                logger.warning("Orchestrator returned status %d when setting pump schedule", response.status_code)
+                logger.warning(
+                    "Orchestrator returned status %d when setting pump schedule",
+                    response.status_code,
+                )
                 return False
     except TimeoutError:
         logger.warning("Timeout publishing circulation pump schedule to HA")
@@ -331,7 +346,9 @@ async def _fetch_flow_temperature() -> tuple[float | None, bool]:
                     logger.debug("Fetched flow temp from HA: %.1f°C", temp)
                     return temp, True
                 except (ValueError, TypeError) as e:
-                    logger.warning(f"Failed to convert HA state to float: {state} ({e})")
+                    logger.warning(
+                        f"Failed to convert HA state to float: {state} ({e})"
+                    )
                     _update_sensor_state(entity_id, None, available=False)
                     cached, _ = _get_sensor_value(entity_id, default=50.0)
                     return cached, False
@@ -397,7 +414,9 @@ async def control_loop(settings: HEMSSettings) -> None:
     global _mixer_controller, _boiler_manager, _circulation_pump, _influxdb_write_api
 
     if not _mixer_controller or not _boiler_manager or not _circulation_pump:
-        logger.error("Control loop: mixer_controller, boiler_manager, or circulation_pump not initialized")
+        logger.error(
+            "Control loop: mixer_controller, boiler_manager, or circulation_pump not initialized"
+        )
         return
 
     logger.info("Control loop started (interval=10s)")
@@ -445,13 +464,19 @@ async def control_loop(settings: HEMSSettings) -> None:
                     now = datetime.now(UTC)
                     dow = now.weekday()
                     current_time = now.time()
-                    schedule = await _hems_db.get_current_schedule("living_room", dow, current_time)
+                    schedule = await _hems_db.get_current_schedule(
+                        "living_room", dow, current_time
+                    )
                     if schedule:
                         room_targets["living_room"] = schedule.target_temp
                         # Use cached room temperature if available
-                        room_actuals["living_room"] = _sensor_cache.get("sensor.room_temperature", 20.0)
+                        room_actuals["living_room"] = _sensor_cache.get(
+                            "sensor.room_temperature", 20.0
+                        )
             except Exception as e:
-                logger.warning("Could not fetch room schedule for circulation pump: %s", e)
+                logger.warning(
+                    "Could not fetch room schedule for circulation pump: %s", e
+                )
 
             # Determine if pump should run
             pump_should_run = _circulation_pump.should_pump(
@@ -557,7 +582,11 @@ async def thermal_data_collector(settings: HEMSSettings) -> None:
                     if outside_temp is not None:
                         point = point.field("outside_temp", float(outside_temp))
 
-                    _influxdb_write_api.write(bucket=settings.influxdb_bucket, org=settings.influxdb_org, record=point)
+                    _influxdb_write_api.write(
+                        bucket=settings.influxdb_bucket,
+                        org=settings.influxdb_org,
+                        record=point,
+                    )
 
                     logger.debug(
                         "Thermal snapshot logged: flow=%.1f°C, room=%.1f°C, sp=%.1f°C, heating=%s",
@@ -590,9 +619,21 @@ async def _register_with_oracle() -> None:
             "description": "Heating energy management — room schedules, boiler, demand, thermal model",
             "endpoints": [
                 {"method": "GET", "path": "/health", "purpose": "Health check"},
-                {"method": "GET", "path": "/api/v1/hems/status", "purpose": "HEMS status"},
-                {"method": "GET", "path": "/api/v1/hems/schedule", "purpose": "Get schedule"},
-                {"method": "POST", "path": "/api/v1/hems/schedule", "purpose": "Set schedule"},
+                {
+                    "method": "GET",
+                    "path": "/api/v1/hems/status",
+                    "purpose": "HEMS status",
+                },
+                {
+                    "method": "GET",
+                    "path": "/api/v1/hems/schedule",
+                    "purpose": "Get schedule",
+                },
+                {
+                    "method": "POST",
+                    "path": "/api/v1/hems/schedule",
+                    "purpose": "Set schedule",
+                },
                 {"method": "GET", "path": "/api/v1/hems/mode", "purpose": "Get mode"},
                 {"method": "POST", "path": "/api/v1/hems/mode", "purpose": "Set mode"},
             ],
@@ -601,6 +642,9 @@ async def _register_with_oracle() -> None:
                 "energy.hems.mode",
                 "energy.hems.commands.retrain",
                 "energy.hems.boiler.flow_override",
+                # S3b: advisory cross-domain PV-allocation arbitration
+                "energy.demand.heating",  # publish — household heating demand
+                "energy.allocation.heating",  # subscribe — advisory allocation hint
             ],
             "source_paths": [
                 {"repo": "claude", "paths": ["services/hems/"]},
@@ -644,10 +688,16 @@ async def lifespan(app: FastAPI):
         app.state.db = None
 
     # Initialize controllers
-    _mixer_controller = MixerController(kp=3.0, ki=0.15, max_integral=20, rate_limit=2.0)
+    _mixer_controller = MixerController(
+        kp=3.0, ki=0.15, max_integral=20, rate_limit=2.0
+    )
     _boiler_manager = BoilerManager(min_off_time_s=600, min_on_time_s=300)
-    _circulation_pump = CirculationPumpScheduler(min_runtime_s=600, max_runtime_s=3600, temp_hysteresis_c=0.5)
-    logger.info("Controllers initialized: mixer_controller, boiler_manager, circulation_pump")
+    _circulation_pump = CirculationPumpScheduler(
+        min_runtime_s=600, max_runtime_s=3600, temp_hysteresis_c=0.5
+    )
+    logger.info(
+        "Controllers initialized: mixer_controller, boiler_manager, circulation_pump"
+    )
 
     # Initialize InfluxDB
     _influxdb_client, _influxdb_write_api = _init_influxdb(settings)
@@ -667,6 +717,21 @@ async def lifespan(app: FastAPI):
     _heartbeat_task = asyncio.create_task(_heartbeat_publisher.run_forever())
     logger.info("NATS heartbeat task started")
 
+    # S3b: Energy Allocator demand publisher + advisory allocation cache.
+    from demand_publisher import (  # noqa: F401  (imported here to keep startup lazy)
+        AllocationCache,
+        DemandPublisher,
+    )
+
+    global _demand_publisher_task, _allocation_cache
+    _allocation_cache = AllocationCache()
+    await _allocation_cache.start()
+    app.state.allocation_cache = _allocation_cache
+
+    _demand_publisher = DemandPublisher(demand_provider=_fetch_heating_demand)
+    _demand_publisher_task = asyncio.create_task(_demand_publisher.run_forever())
+    logger.info("S3b energy demand publisher + allocation cache started")
+
     yield
 
     logger.info("HEMS shutting down")
@@ -684,6 +749,14 @@ async def lifespan(app: FastAPI):
         _thermal_collector_task.cancel()
         try:
             await _thermal_collector_task
+        except asyncio.CancelledError:
+            pass
+
+    # Cancel S3b demand publisher
+    if _demand_publisher_task:
+        _demand_publisher_task.cancel()
+        try:
+            await _demand_publisher_task
         except asyncio.CancelledError:
             pass
 
@@ -719,7 +792,11 @@ def create_app() -> FastAPI:
     app.include_router(api_router)  # Phase 2 internal API endpoints
 
     # Add control tick endpoint
-    @app.post("/api/v1/hems/control/tick", response_model=ControlDecisionResponse, tags=["hems"])
+    @app.post(
+        "/api/v1/hems/control/tick",
+        response_model=ControlDecisionResponse,
+        tags=["hems"],
+    )
     async def control_tick() -> ControlDecisionResponse:
         """Execute a single control iteration (test endpoint).
 
@@ -771,12 +848,18 @@ def create_app() -> FastAPI:
                     now = datetime.now(UTC)
                     dow = now.weekday()
                     current_time = now.time()
-                    schedule = await _hems_db.get_current_schedule("living_room", dow, current_time)
+                    schedule = await _hems_db.get_current_schedule(
+                        "living_room", dow, current_time
+                    )
                     if schedule:
                         room_targets["living_room"] = schedule.target_temp
-                        room_actuals["living_room"] = _sensor_cache.get("sensor.room_temperature", 20.0)
+                        room_actuals["living_room"] = _sensor_cache.get(
+                            "sensor.room_temperature", 20.0
+                        )
             except Exception as e:
-                logger.debug("Could not fetch room schedule for pump in control_tick: %s", e)
+                logger.debug(
+                    "Could not fetch room schedule for pump in control_tick: %s", e
+                )
 
             pump_should_run = _circulation_pump.should_pump(
                 boiler_active=boiler_should_fire,
@@ -872,7 +955,8 @@ def create_app() -> FastAPI:
             timestamp=datetime.now(UTC).isoformat(),
             sensors=sensor_health,
             degraded_rooms=degraded_rooms,
-            control_loop_active=_control_loop_task is not None and not _control_loop_task.done(),
+            control_loop_active=_control_loop_task is not None
+            and not _control_loop_task.done(),
             database_available=_hems_db is not None,
         )
 
