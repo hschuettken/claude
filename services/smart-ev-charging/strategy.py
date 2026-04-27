@@ -1559,63 +1559,191 @@ class ChargingStrategy:
         assist, _ = self._calc_battery_assist_detailed(ctx, pv_only_available)
         return assist
 
+    def _battery_assist_decision(
+        self,
+        *,
+        home_battery_soc_pct: int,
+        pv_producing_w: int,
+        ev_plugged: bool,
+        ev_deadline_hours: float | None,
+        user_drain_disabled: bool,
+        wallbox_max_w: int,
+        pv_min_wallbox_w: int = 1500,
+        pv_post_deadline_kwh: float | None = None,
+        home_battery_refill_kwh: float = 0.0,
+        household_buffer_kwh: float = 1.5,
+    ) -> tuple[int, str, str]:
+        """Tier-based battery-drain gate (S3a, FR #3061).
+
+        Default-on policy: drain home battery into EV freely when conditions
+        allow. User can disable via toggle.
+
+        Tier 0 (pv_harvest): daytime deadline + post-deadline PV covers
+            battery refill → drain at wallbox max, allow overshoot of EV
+            target SoC. Maximizes PV harvest before sundown.
+        Tier 1 (battery_full): SoC > 80% + PV producing — full drain.
+        Tier 2 (deadline_imminent): deadline ≤ 2h + battery moderate — 5 kW.
+        Tier 3 (opportunistic): SoC > 50% + PV < min wallbox — 2 kW.
+
+        Returns (allowed_battery_assist_w_cap, reason, tier_name). The tier
+        name lets callers decide whether to shortfall-cap (default) or to
+        let the cap pass through (Tier 0 PV harvest).
+        """
+        if user_drain_disabled:
+            return 0, "user disabled drain via toggle", "disabled"
+        if not ev_plugged:
+            return 0, "ev not plugged", "no_ev"
+        if home_battery_soc_pct < 50:
+            return (
+                0,
+                f"battery SoC {home_battery_soc_pct}% below 50% floor",
+                "soc_floor",
+            )
+
+        # Tier 0: PV-harvest mode — daytime deadline + post-deadline PV will
+        # refill the home battery anyway, so drain freely and even overshoot
+        # the EV target SoC. Highest priority because it's free energy.
+        if (
+            ev_deadline_hours is not None
+            and 0.0 <= ev_deadline_hours <= 10.0
+            and pv_post_deadline_kwh is not None
+            and pv_post_deadline_kwh >= home_battery_refill_kwh + household_buffer_kwh
+        ):
+            return (
+                wallbox_max_w,
+                (
+                    f"PV-harvest: daytime deadline {ev_deadline_hours:.1f}h, "
+                    f"post-deadline PV {pv_post_deadline_kwh:.1f} kWh covers battery "
+                    f"refill {home_battery_refill_kwh:.1f} kWh + {household_buffer_kwh:.1f} kWh "
+                    f"household — full drain + overshoot enabled"
+                ),
+                "pv_harvest",
+            )
+
+        # Tier 1: home battery full + PV producing — drain freely up to wallbox max
+        if home_battery_soc_pct > 80 and pv_producing_w >= pv_min_wallbox_w:
+            return (
+                wallbox_max_w,
+                (
+                    f"battery {home_battery_soc_pct}%, PV producing {pv_producing_w} W "
+                    f"— full drain enabled (cap = wallbox max {wallbox_max_w} W)"
+                ),
+                "battery_full",
+            )
+
+        # Tier 2: deadline imminent + battery moderate — partial drain
+        if ev_deadline_hours is not None and ev_deadline_hours <= 2.0:
+            cap = min(wallbox_max_w, 5000)
+            return (
+                cap,
+                (
+                    f"deadline {ev_deadline_hours:.1f}h imminent, battery {home_battery_soc_pct}% "
+                    f"— partial drain capped at {cap} W"
+                ),
+                "deadline_imminent",
+            )
+
+        # Tier 3: opportunistic — small drain when battery > 50% and PV insufficient
+        if (
+            home_battery_soc_pct > 50
+            and pv_producing_w > 0
+            and pv_producing_w < pv_min_wallbox_w
+        ):
+            cap = 2000
+            return (
+                cap,
+                (
+                    f"battery {home_battery_soc_pct}%, PV {pv_producing_w} W < min wallbox "
+                    f"— opportunistic drain {cap} W"
+                ),
+                "opportunistic",
+            )
+
+        return 0, "no drain conditions met", "none"
+
+    def _pv_kwh_after_hour(self, ctx: ChargingContext, after_hour: int) -> float | None:
+        """Sum kWh from today's hourly PV forecast for hours >= after_hour.
+
+        Returns None if hourly forecast is unavailable.
+        """
+        if not ctx.pv_hourly_forecast:
+            return None
+        total = 0.0
+        for slot in ctx.pv_hourly_forecast:
+            try:
+                hour = int(slot.get("hour", -1))
+                kwh = float(slot.get("kwh", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if hour >= after_hour:
+                total += kwh
+        return total
+
+    def _battery_refill_kwh(self, ctx: ChargingContext) -> float:
+        """kWh needed to top home battery from current SoC to target_eod."""
+        if ctx.battery_capacity_kwh <= 0:
+            return 0.0
+        deficit_pct = max(0.0, ctx.battery_target_eod_soc_pct - ctx.battery_soc_pct)
+        return deficit_pct / 100.0 * ctx.battery_capacity_kwh
+
     def _calc_battery_assist_detailed(
         self,
         ctx: ChargingContext,
         pv_only_available: float,
     ) -> tuple[float, str]:
-        """Extra power the home battery can contribute for EV charging."""
-        if ctx.battery_soc_pct <= self.battery_min_soc_pct:
-            return (
-                0.0,
-                f"SoC {ctx.battery_soc_pct:.0f}% <= floor {self.battery_min_soc_pct:.0f}%",
-            )
+        """Extra power the home battery can contribute for EV charging.
+
+        S3 (FR #3061): Delegates the drain gate to ``_battery_assist_decision``
+        (default-on, tier-based). Tier 0 (PV harvest) bypasses the shortfall
+        cap so we can dump everything into the EV. Other tiers are bounded by
+        the shortfall to ``min_power_w`` so we don't over-drain when PV alone
+        is already sufficient.
+        """
+        deadline_h: float | None = None
+        deadline_hour: int | None = None
+        if ctx.ready_by_deadline is not None:
+            deadline_h = (ctx.ready_by_deadline - ctx.now).total_seconds() / 3600.0
+            deadline_hour = ctx.ready_by_deadline.hour
+        elif ctx.departure_time is not None:
+            deadline_h = self._hours_until_departure(ctx.departure_time, ctx.now)
+            deadline_hour = ctx.departure_time.hour
+
+        pv_post_deadline_kwh: float | None = None
+        if deadline_hour is not None:
+            pv_post_deadline_kwh = self._pv_kwh_after_hour(ctx, deadline_hour)
+
+        cap_w, cap_reason, tier = self._battery_assist_decision(
+            home_battery_soc_pct=int(ctx.battery_soc_pct),
+            pv_producing_w=int(max(0.0, ctx.pv_power_w)),
+            ev_plugged=ctx.wallbox.vehicle_connected,
+            ev_deadline_hours=deadline_h,
+            user_drain_disabled=(not ctx.drain_pv_battery),
+            wallbox_max_w=self.max_power_w,
+            pv_post_deadline_kwh=pv_post_deadline_kwh,
+            home_battery_refill_kwh=self._battery_refill_kwh(ctx),
+        )
+
+        if cap_w <= 0:
+            return 0.0, cap_reason
+
+        # Tier 0 (PV harvest): bypass shortfall — we WANT to overshoot to
+        # harvest PV that would otherwise be wasted before sundown.
+        if tier == "pv_harvest":
+            return float(cap_w), cap_reason
 
         if pv_only_available >= self.min_power_w:
             return 0.0, "PV surplus sufficient (no assist needed)"
 
         shortfall = self.min_power_w - max(0.0, pv_only_available)
-        can_refill, refill_reason = self._can_battery_refill(ctx)
-
-        soc_headroom = (ctx.battery_soc_pct - self.battery_min_soc_pct) / (
-            100.0 - self.battery_min_soc_pct
-        )
-        soc_factor = min(1.0, max(0.0, soc_headroom))
-
-        if can_refill:
-            # When PV forecast guarantees battery refill by sundown,
-            # use full assist power above a reasonable SoC floor (~50%).
-            # The soc_factor alone is too conservative — at 58% SoC with
-            # 35 kWh forecast remaining, there's zero risk.
-            if ctx.battery_soc_pct >= 50:
-                soc_factor = 1.0
-            max_assist = self.battery_ev_assist_max_w * soc_factor
-            strategy = "refill OK"
-        elif ctx.battery_soc_pct > 80:
-            max_assist = self.battery_ev_assist_max_w * soc_factor
-            strategy = f"SoC {ctx.battery_soc_pct:.0f}% > 80% (accept partial drain)"
-        else:
-            forecast_factor = min(
-                1.0,
-                ctx.pv_forecast_remaining_kwh / self.pv_forecast_good_kwh,
-            )
-            max_assist = (
-                self.battery_ev_assist_max_w * forecast_factor * soc_factor * 0.5
-            )
-            strategy = f"conservative (forecast {forecast_factor:.0%})"
-
-        if max_assist < 100:
+        assist = min(float(cap_w), shortfall)
+        if assist < 100:
             return (
                 0.0,
-                f"Assist too small ({max_assist:.0f} W) — {strategy}, {refill_reason}",
+                f"Assist too small ({assist:.0f} W) — {cap_reason}",
             )
-
-        assist = min(shortfall, max_assist)
-        reason = (
-            f"Shortfall {shortfall:.0f} W, assist {assist:.0f}/{max_assist:.0f} W "
-            f"— {strategy}, {refill_reason}"
+        return assist, (
+            f"shortfall {shortfall:.0f} W, assist {assist:.0f}/{cap_w} W — {cap_reason}"
         )
-        return assist, reason
 
     def _calc_battery_hold_boost(
         self,
