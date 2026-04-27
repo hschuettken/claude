@@ -17,8 +17,8 @@ from shared.ha_client import HomeAssistantClient
 from shared.log import get_logger
 
 from config import PVForecastSettings
-from data import PVDataCollector, add_solar_features, compute_solar_position
-from model import FEATURE_COLS, PVModel, fallback_estimate
+from data import PVDataCollector, add_solar_features
+from model import PVModel, fallback_estimate
 from weather import OpenMeteoClient
 
 logger = get_logger("pv-forecast")
@@ -30,7 +30,7 @@ class HourlyForecast:
 
     time: datetime
     kwh: float
-    kwh_low: float = 0.0   # 10th percentile (prediction interval lower bound)
+    kwh_low: float = 0.0  # 10th percentile (prediction interval lower bound)
     kwh_high: float = 0.0  # 90th percentile (prediction interval upper bound)
 
 
@@ -209,7 +209,9 @@ class ForecastEngine:
                 & (weather_df["hour"] < np.ceil(weather_df["sunset_hour"]).astype(int))
             ]
         else:
-            weather_df = weather_df[(weather_df["hour"] >= 6) & (weather_df["hour"] <= 18)]
+            weather_df = weather_df[
+                (weather_df["hour"] >= 6) & (weather_df["hour"] <= 18)
+            ]
 
         # Split into days
         weather_df["date"] = weather_df["time"].dt.date
@@ -325,7 +327,9 @@ class ForecastEngine:
                     values=values,
                 )
             except Exception:
-                logger.warning("forecast_solar_fetch_failed", array=array_name, entity_id=entity_id)
+                logger.warning(
+                    "forecast_solar_fetch_failed", array=array_name, entity_id=entity_id
+                )
 
         return result
 
@@ -398,7 +402,9 @@ class ForecastEngine:
                 ghi = weather_day["shortwave_radiation"].fillna(0)
                 ghi_sum = ghi.sum()
                 if ghi_sum > 0:
-                    weather_day["forecast_solar_hourly_kwh"] = fs_value * (ghi / ghi_sum)
+                    weather_day["forecast_solar_hourly_kwh"] = fs_value * (
+                        ghi / ghi_sum
+                    )
                 else:
                     weather_day["forecast_solar_hourly_kwh"] = fs_value
             else:
@@ -416,6 +422,21 @@ class ForecastEngine:
             )
             # For rolling 3d mean at inference, use yesterday as best approximation
             weather_day["kwh_rolling_3d_mean"] = weather_day["kwh_yesterday_same_hour"]
+
+            # Forecast revision features (Phase 2 — added 2026-04-27, FR #3065).
+            # Populated as 0.0 at inference: matches the training-side NaN→0
+            # fallback for rows predating the rolling-forecast logger. A future
+            # enhancement can pull live drift values from the analytics bucket.
+            for col in (
+                "ghi_drift_24h",
+                "ghi_volatility_24h",
+                "cloud_cover_drift_24h",
+                "cloud_cover_volatility_24h",
+                "pv_ai_drift_24h",
+                "forecast_solar_drift_24h",
+            ):
+                if col not in weather_day.columns:
+                    weather_day[col] = 0.0
 
             if use_ml:
                 result = model.predict(weather_day, return_intervals=True)
@@ -455,7 +476,10 @@ class ForecastEngine:
                     kwh_high=round(float(hi), 3),
                 )
                 for (_, row), pred, lo, hi in zip(
-                    weather_day.iterrows(), predictions, pred_low, pred_high,
+                    weather_day.iterrows(),
+                    predictions,
+                    pred_low,
+                    pred_high,
                 )
             ]
             total = round(float(np.sum(predictions)), 2)
