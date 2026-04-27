@@ -30,6 +30,8 @@ from shared.energy_events import (
     PVAnomalyDetected,
     PVDriftDetected,
     PVForecastAccuracyResult,
+    PVForecastHourly,  # noqa: F401  (used at runtime in _forecast() to publish energy.pv.forecast.hourly)
+    PVForecastHourlySlot,  # noqa: F401  (used at runtime in _build_hourly_iso_list)
     PVForecastUpdated,
     PVHourlyForecast,
     PVModelRetrained,
@@ -66,6 +68,7 @@ class PVForecastService:
                 "nats_subjects": [
                     "energy.pv.forecast.updated",
                     "energy.pv.forecast.model_trained",
+                    "energy.pv.forecast.hourly",
                     "energy.daylight.window",
                     "heartbeat.pv-forecast",
                     "orchestrator.command.pv-forecast",
@@ -320,6 +323,44 @@ class PVForecastService:
             )
         return result
 
+    def _build_hourly_iso_list(
+        self, forecast, day_key: str
+    ) -> list[PVForecastHourlySlot]:
+        """Flat hourly breakdown with full ISO timestamps (S2 / EV scheduler).
+
+        Returns hour-by-hour slots merged across east + west arrays. Confidence
+        band is a ±30% heuristic until per-hour quantiles are surfaced from the
+        ML model. Returns empty list if the day has no forecast data.
+        """
+        slots: list[PVForecastHourlySlot] = []
+        east = forecast.east
+        west = forecast.west
+
+        east_day = getattr(east, day_key, None) if east else None
+        west_day = getattr(west, day_key, None) if west else None
+
+        # Merge east + west by full timestamp (preserves date + hour)
+        by_time: dict = {}  # datetime → kwh
+        for src in (east_day, west_day):
+            if not src or not src.hourly:
+                continue
+            for h in src.hourly:
+                # Round to top-of-hour to avoid sub-second drift breaking the merge
+                t = h.time.replace(minute=0, second=0, microsecond=0)
+                by_time[t] = by_time.get(t, 0.0) + h.kwh
+
+        for t in sorted(by_time.keys()):
+            kwh = round(by_time[t], 3)
+            slots.append(
+                PVForecastHourlySlot(
+                    time_iso=t.isoformat(),
+                    kwh=kwh,
+                    conf_low=round(kwh * 0.7, 3),
+                    conf_high=round(kwh * 1.3, 3),
+                )
+            )
+        return slots
+
     async def _train(self) -> None:
         """Train or retrain the models."""
         try:
@@ -479,6 +520,30 @@ class PVForecastService:
                 await self.nats.publish(
                     "energy.pv.hourly_forecast", hourly_event.model_dump()
                 )
+
+                # Publish flat 72h ISO-timestamped forecast for the EV
+                # scheduler (S2). Distinct from energy.pv.hourly_forecast,
+                # which keeps hour-of-day for HA dashboards.
+                try:
+                    flat_slots: list[PVForecastHourlySlot] = []
+                    for day_key in ("today", "tomorrow", "day_after"):
+                        flat_slots.extend(
+                            self._build_hourly_iso_list(forecast, day_key)
+                        )
+                    flat_event = PVForecastHourly(
+                        forecast_run_iso=forecast.timestamp.isoformat(),
+                        horizon_hours=72,
+                        hourly=flat_slots[:72],
+                    )
+                    await self.nats.publish(
+                        "energy.pv.forecast.hourly", flat_event.model_dump()
+                    )
+                    logger.info(
+                        "hourly_pv_forecast_published",
+                        slots=len(flat_event.hourly),
+                    )
+                except Exception:
+                    logger.exception("hourly_pv_forecast_publish_failed")
 
             # Log this forecast cycle's pv-ai output to analytics bucket
             # (rolling history for forecast-revision learning).

@@ -82,6 +82,23 @@ class PVHourlyForecast(BaseModel):
     timestamp: str  # ISO format
 
 
+class PVForecastHourlySlot(BaseModel):
+    """One hour of the 72h flat-list forecast (S2)."""
+
+    time_iso: str  # ISO 8601 with TZ — start of the hour
+    kwh: float
+    conf_low: float
+    conf_high: float
+
+
+class PVForecastHourly(BaseModel):
+    """energy.pv.forecast.hourly — flat 72h horizon, ISO-timestamped (S2)."""
+
+    forecast_run_iso: str
+    horizon_hours: int
+    hourly: list[PVForecastHourlySlot]
+
+
 class PVForecastAccuracyResult(BaseModel):
     """Published after accuracy check, subject: energy.pv.accuracy_checked"""
 
