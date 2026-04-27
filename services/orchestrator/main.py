@@ -250,6 +250,45 @@ class OrchestratorService(BaseService):
         )
         self.logger.info("energy_allocator_wired")
 
+        # --- S4.3 + S4.4: EV narrator + proactive nudges ---
+        try:
+            import redis.asyncio as aioredis  # noqa: F401  (deferred import keeps startup lazy)
+
+            from ev_narrator import EVNarrator  # noqa: F401  (used immediately below)
+            from ev_nudges import EVNudges  # noqa: F401
+
+            ev_redis = aioredis.from_url(
+                getattr(self.settings, "redis_url", "redis://192.168.0.78:6379/0"),
+                encoding="utf-8",
+                decode_responses=True,
+            )
+            ev_router_url = getattr(
+                self.settings, "llm_router_url", "http://192.168.0.50:8070"
+            )
+
+            self.ev_narrator = EVNarrator(
+                nats=self.nats,
+                redis_client=ev_redis,
+                llm_router_url=ev_router_url,
+            )
+            await self.nats.subscribe_json(
+                "energy.ev.decision.plan", self.ev_narrator.on_plan_journal
+            )
+
+            self.ev_nudges = EVNudges(
+                redis_client=ev_redis,
+                ev_state=self._ev_state,
+            )
+            await self.nats.subscribe_json(
+                "energy.ev.decision.plan", self.ev_nudges.on_plan_journal
+            )
+            await self.nats.subscribe_json(
+                "energy.pv.forecast.hourly", self.ev_nudges.on_pv_hourly
+            )
+            self.logger.info("ev_narrator_and_nudges_wired")
+        except Exception:
+            self.logger.exception("ev_narrator_or_nudges_init_failed")
+
         # --- Companion module (Kairos) ---
         companion_pool_ready: bool = False
         companion_chat_engine: ChatEngine | None = None
