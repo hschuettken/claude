@@ -183,6 +183,29 @@ services:
     networks:
       - homelab
 
+  cognitive-layer:
+    build:
+      context: .
+      dockerfile: services/cognitive-layer/Dockerfile
+    container_name: claude-cognitive-layer-1
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      COGNITIVE_DB_URL: ${COGNITIVE_DB_URL:-postgresql://homelab:homelab@192.168.0.80:5432/homelab}
+      LLM_ROUTER_URL: ${LLM_ROUTER_URL:-http://192.168.0.50:8070}
+      COGNITIVE_LLM_MODEL: ${COGNITIVE_LLM_MODEL:-qwen2.5:3b}
+      NATS_URL: ${NATS_URL:-nats://192.168.0.50:4222}
+      NB9OS_API_URL: ${NB9OS_API_URL:-http://192.168.0.50:8060}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_OWNER: ${GITHUB_OWNER:-hschuettken}
+      COGNITIVE_PORT: ${COGNITIVE_PORT:-8230}
+    ports:
+      - "${COGNITIVE_PORT:-8230}:8230"
+    volumes:
+      - cognitive_layer_data:/app/data
+    networks:
+      - homelab
+
   # --- Template for new services ---
   # my-new-service:
   #   build:
@@ -203,6 +226,7 @@ services:
 volumes:
   hems_data:
   marketing_agent_data:
+  cognitive_layer_data:
   pv_forecast_data:
   smart_ev_charging_data:
   ev_forecast_data:
