@@ -47,15 +47,45 @@ class NatsPublisher:
         return not self._nc.is_closed
 
     async def connect(self) -> None:
-        """Connect to the NATS server."""
+        """Connect to the NATS server.
+
+        FR #3068: configure nats-py for indefinite reconnect with explicit
+        callbacks so transient disconnects don't silently drop subscriptions.
+        Without this, the default nats-py behavior gives up after 60 attempts
+        and silently flips ``_nc.is_closed=True`` — which makes every
+        subsequent ``publish``/``subscribe`` a no-op without surfacing why.
+        """
         if not _NATS_AVAILABLE:
             logger.warning(
                 "nats_unavailable",
                 reason="nats-py not installed; NATS publishing disabled",
             )
             return
+
+        async def _on_disconnect() -> None:
+            logger.warning("nats_disconnected", url=self._url)
+
+        async def _on_reconnect() -> None:
+            logger.info("nats_reconnected", url=self._url)
+
+        async def _on_closed() -> None:
+            logger.warning("nats_closed", url=self._url)
+
+        async def _on_error(err: Exception) -> None:
+            logger.warning("nats_error", url=self._url, error=str(err))
+
         try:
-            self._nc = await nats.connect(self._url)
+            self._nc = await nats.connect(
+                self._url,
+                max_reconnect_attempts=-1,  # never give up
+                reconnect_time_wait=2,  # 2 s between attempts
+                ping_interval=20,
+                max_outstanding_pings=5,
+                disconnected_cb=_on_disconnect,
+                reconnected_cb=_on_reconnect,
+                closed_cb=_on_closed,
+                error_cb=_on_error,
+            )
             logger.info("nats_connected", url=self._url)
         except Exception as exc:
             logger.warning("nats_connect_failed", url=self._url, error=str(exc))
