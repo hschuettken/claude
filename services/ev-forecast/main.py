@@ -29,7 +29,7 @@ import asyncio
 import json
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone  # noqa: F401  (timezone used in _update_plan for scheduler deadline)
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -46,6 +46,7 @@ from shared.nats_client import NatsPublisher
 from config import EVForecastSettings
 from learned_destinations import LearnedDestinations
 from planner import ChargingPlan, ChargingPlanner, WeeklyPlanBuilder
+from scheduler import HourlyPV, schedule_charge_windows  # noqa: F401  (used at runtime in _build_hourly_pv + _update_plan)
 from trips import GeoDistance, TripPredictor
 from vehicle import (
     ConsumptionTracker,
@@ -475,6 +476,64 @@ class EVForecastService:
             )
             self._last_plan = plan
 
+            # Compute hour-by-hour charge schedule (S2). Best-effort: the
+            # scheduler runs only if we have hourly PV forecast data and a
+            # day with a deadline (departure_time). Failures are logged and
+            # never block the plan publish.
+            schedule_windows: list[dict] = []
+            schedule_pv_kwh: float = 0.0
+            schedule_grid_kwh: float = 0.0
+            schedule_reason: str = ""
+            try:
+                if self._pv_hourly_cache:
+                    today = plan.days[0] if plan.days else None
+                    tomorrow = plan.days[1] if len(plan.days) > 1 else None
+                    schedule_target = (
+                        tomorrow
+                        if tomorrow is not None and tomorrow.energy_to_charge_kwh > 0
+                        else today
+                    )
+                    if (
+                        schedule_target is not None
+                        and schedule_target.energy_to_charge_kwh > 0
+                    ):
+                        deadline_dt = None
+                        if schedule_target.departure_time is not None:
+                            deadline_local = datetime.combine(
+                                schedule_target.date,
+                                schedule_target.departure_time,
+                                tzinfo=self._tz,
+                            )
+                            deadline_dt = deadline_local.astimezone(timezone.utc)
+                        sched = schedule_charge_windows(
+                            self._build_hourly_pv(),
+                            demand_kwh=schedule_target.energy_to_charge_kwh,
+                            deadline=deadline_dt,
+                        )
+                        schedule_windows = [
+                            {
+                                "start_iso": w.start.isoformat(),
+                                "end_iso": w.end.isoformat(),
+                                "kwh": w.kwh,
+                                "source": w.source,
+                            }
+                            for w in sched.windows
+                        ]
+                        schedule_pv_kwh = sched.pv_kwh
+                        schedule_grid_kwh = sched.grid_kwh
+                        schedule_reason = sched.reason
+                        logger.info(
+                            "schedule_computed",
+                            target_date=schedule_target.date.isoformat(),
+                            pv_kwh=sched.pv_kwh,
+                            grid_kwh=sched.grid_kwh,
+                            deferred_kwh=sched.deferred_kwh,
+                            windows=len(sched.windows),
+                            reason=sched.reason,
+                        )
+            except Exception:
+                logger.exception("schedule_compute_failed")
+
             # Decision Journal — record the plan with full reasoning context.
             # Best-effort: never raises; never blocks publication below.
             if self.journal is not None:
@@ -524,12 +583,24 @@ class EVForecastService:
                         "pv_forecast_today_kwh": pv_today_for_journal,
                         "horizon_days": len(plan.days),
                         "total_energy_needed_kwh": plan.total_energy_needed_kwh,
+                        # S2: greedy schedule attached so post-hoc analysis can
+                        # see "what we asked for vs. what actually happened".
+                        "schedule": schedule_windows,
+                        "schedule_pv_kwh": schedule_pv_kwh,
+                        "schedule_grid_kwh": schedule_grid_kwh,
+                        "schedule_reason": schedule_reason,
+                        "pv_hourly_run_iso": self._pv_hourly_run_iso,
+                        "pv_hourly_slots": len(self._pv_hourly_cache),
                     },
                 )
 
             # Publish plan to NATS (bridge forwards to MQTT for HA discovery sensor)
             plan_payload = plan.to_dict()
             plan_payload["reasoning"] = self._compose_plan_reasoning(plan, vehicle)
+            # S2: attach hour-by-hour schedule so downstream consumers can
+            # render a real timeline (HA dashboard, NB9OS view).
+            plan_payload["schedule"] = schedule_windows
+            plan_payload["pv_hourly_run_iso"] = self._pv_hourly_run_iso
             if self.nats and self.nats.connected:
                 await self.nats.publish("energy.ev.forecast.plan", plan_payload)
 
@@ -728,6 +799,26 @@ class EVForecastService:
             logger.debug("pv_hourly_cache_updated", slots=len(new_cache))
         except Exception:
             logger.exception("pv_hourly_cache_update_failed")
+
+    def _build_hourly_pv(self) -> list[HourlyPV]:
+        """Convert the NATS-fed hourly cache into HourlyPV input for the scheduler (S2)."""
+        out: list[HourlyPV] = []
+        for t_iso, vals in self._pv_hourly_cache.items():
+            try:
+                t = datetime.fromisoformat(t_iso.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            kwh = vals.get("kwh", 0.0)
+            out.append(
+                HourlyPV(
+                    time=t,
+                    kwh=kwh,
+                    conf_low=vals.get("conf_low", kwh),
+                    conf_high=vals.get("conf_high", kwh),
+                )
+            )
+        out.sort(key=lambda s: s.time)
+        return out
 
     # ------------------------------------------------------------------
     # Home location resolution
