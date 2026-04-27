@@ -97,11 +97,14 @@ class ForecastHistoryLogger:
         run_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         written = 0
         for r in hourly_records:
-            target_iso = r.get("time")
-            if not target_iso:
+            t = r.get("time")
+            if t is None:
                 continue
             try:
-                target_dt = datetime.fromisoformat(target_iso.replace("Z", "+00:00"))
+                if isinstance(t, datetime):
+                    target_dt = t
+                else:
+                    target_dt = datetime.fromisoformat(str(t).replace("Z", "+00:00"))
                 if target_dt.tzinfo is None:
                     target_dt = target_dt.replace(tzinfo=timezone.utc)
             except Exception:
