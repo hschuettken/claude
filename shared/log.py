@@ -14,7 +14,9 @@ from typing import Any
 import structlog
 
 
-def _normalize_log_event(_logger: Any, _method_name: str, event_dict: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
+def _normalize_log_event(
+    _logger: Any, _method_name: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
     """Normalize logs to: timestamp, level, service, msg, context."""
     if "msg" not in event_dict and "event" in event_dict:
         event_dict["msg"] = event_dict.pop("event")
@@ -53,6 +55,8 @@ def setup_logging(level: str = "INFO", log_format: str = "auto") -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", key="timestamp"),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
             _normalize_log_event,
             renderer,
         ],
