@@ -50,7 +50,16 @@ class PVForecastSettings(BaseSettings):
     fallback_peak_irradiance: float = 1000.0  # W/m² STC irradiance
 
     # --- Data collection ---
-    data_history_days: int = 3650  # days of historical data for training (matches InfluxDB retention)
+    data_history_days: int = (
+        3650  # days of historical data for training (matches InfluxDB retention)
+    )
 
     # --- HA output sensor prefix ---
     ha_sensor_prefix: str = "sensor.pv_ai_forecast"
+
+    # --- Analytics bucket (forecast accuracy / model metrics) ---
+    # Separate from hass bucket. Needs a token with read+write on the analytics bucket.
+    # Falls back to influxdb_token if unset, in which case writes will fail unless that
+    # token has analytics-bucket access.
+    influxdb_analytics_bucket: str = "analytics"
+    influxdb_all_access_token: str = ""  # all_access token for cross-bucket writes

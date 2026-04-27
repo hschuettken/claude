@@ -89,6 +89,17 @@ class PVForecastService:
             self.settings.influxdb_token,
             self.settings.influxdb_org,
         )
+        # Separate client for the analytics bucket (forecast accuracy + model metrics).
+        # Uses an admin token with cross-bucket write access. Falls back to the
+        # main client if the admin token isn't configured.
+        if self.settings.influxdb_all_access_token:
+            self.influx_admin = InfluxClient(
+                self.settings.influxdb_url,
+                self.settings.influxdb_all_access_token,
+                self.settings.influxdb_org,
+            )
+        else:
+            self.influx_admin = self.influx
 
         self._start_time = time.monotonic()
 
@@ -510,9 +521,9 @@ class PVForecastService:
             if len(self._mae_history) > 30:
                 self._mae_history.pop(0)
 
-            # Write to InfluxDB
-            self.influx.write_point(
-                bucket="ev_analytics",
+            # Write to InfluxDB analytics bucket via admin client
+            self.influx_admin.write_point(
+                bucket=self.settings.influxdb_analytics_bucket,
                 measurement="pv_forecast_accuracy",
                 fields={
                     "forecast_kwh": round(total_forecast, 3),
