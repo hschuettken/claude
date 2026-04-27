@@ -37,6 +37,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from shared.decision_journal import DecisionJournal  # noqa: F401  (used at runtime in start())
 from shared.ha_client import HomeAssistantClient
 from shared.influx_client import InfluxClient
 from shared.log import get_logger

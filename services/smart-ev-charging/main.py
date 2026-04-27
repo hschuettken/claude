@@ -23,6 +23,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import httpx
+from shared.decision_journal import DecisionJournal  # noqa: F401  (used at runtime in run())
+from shared.influx_client import InfluxClient  # noqa: F401  (used in __init__ for admin client)
 from shared.service import BaseService
 
 from charger import WallboxController
