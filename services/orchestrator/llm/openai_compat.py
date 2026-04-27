@@ -77,10 +77,20 @@ class OpenAICompatProvider(LLMProvider):
                 result.append(entry)
 
             elif msg.role == "tool":
+                # Strip _image binary data — OpenAI vision uses image_url, not base64
+                # in tool results; the text metadata is sufficient for non-vision flows.
+                tool_content = msg.content or ""
+                try:
+                    data = json.loads(tool_content)
+                    if isinstance(data, dict) and "_image" in data:
+                        data.pop("_image")
+                        tool_content = json.dumps(data, ensure_ascii=False)
+                except (json.JSONDecodeError, TypeError):
+                    pass
                 result.append({
                     "role": "tool",
                     "tool_call_id": msg.tool_call_id or "",
-                    "content": msg.content or "",
+                    "content": tool_content,
                 })
 
         return result

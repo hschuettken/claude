@@ -99,10 +99,14 @@ class GeminiProvider(LLMProvider):
                     contents.append(types.Content(role="model", parts=parts))
 
             elif msg.role == "tool":
-                # Parse tool result back to dict for Gemini
+                # Parse tool result back to dict for Gemini.
+                # Strip the _image key — Gemini function responses don't support
+                # raw image blobs; the text metadata is sufficient for reasoning.
                 try:
                     import json
                     response_data = json.loads(msg.content) if msg.content else {}
+                    if isinstance(response_data, dict):
+                        response_data.pop("_image", None)
                 except (json.JSONDecodeError, TypeError):
                     response_data = {"result": msg.content}
 

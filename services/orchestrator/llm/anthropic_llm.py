@@ -1,4 +1,4 @@
-"""Anthropic Claude LLM provider with tool-use support."""
+"""Anthropic Claude LLM provider with tool-use and vision support."""
 
 from __future__ import annotations
 
@@ -90,11 +90,13 @@ class AnthropicProvider(LLMProvider):
                 result.append({"role": "assistant", "content": content})
 
             elif msg.role == "tool":
-                # Anthropic expects tool results as user messages with tool_result blocks
+                # Anthropic expects tool results as user messages with tool_result blocks.
+                # If the result JSON contains a ``_image`` key, include it as an image
+                # content block so vision-capable models can actually see the camera feed.
                 tool_result = {
                     "type": "tool_result",
                     "tool_use_id": msg.tool_call_id or "",
-                    "content": msg.content or "",
+                    "content": self._build_tool_result_content(msg.content or ""),
                 }
                 # Merge consecutive tool results into one user message
                 if result and result[-1].get("role") == "user":
@@ -105,6 +107,33 @@ class AnthropicProvider(LLMProvider):
                 result.append({"role": "user", "content": [tool_result]})
 
         return result
+
+    def _build_tool_result_content(self, content_str: str) -> list[dict[str, Any]] | str:
+        """Build tool result content, promoting _image keys to image content blocks.
+
+        Returns a plain string when no image data is present (Anthropic accepts both).
+        Returns a list of content blocks when image data is detected.
+        """
+        try:
+            data = json.loads(content_str)
+        except (json.JSONDecodeError, TypeError):
+            return content_str
+
+        img = data.pop("_image", None) if isinstance(data, dict) else None
+        if not img:
+            return content_str
+
+        # Reconstruct text content without the image binary
+        text_part = {"type": "text", "text": json.dumps(data, ensure_ascii=False)}
+        image_part = {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": img.get("media_type", "image/jpeg"),
+                "data": img["base64"],
+            },
+        }
+        return [text_part, image_part]
 
     def _parse_response(self, response: Any) -> LLMResponse:
         """Parse Anthropic response into our unified format."""

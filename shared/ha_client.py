@@ -117,3 +117,19 @@ class HomeAssistantClient:
         resp = await client.get(path, params=params)
         resp.raise_for_status()
         return resp.json()
+
+    async def get_camera_image(self, entity_id: str) -> bytes | None:
+        """Fetch a camera snapshot as raw JPEG bytes via the HA camera proxy.
+
+        Returns None if the camera is unavailable or the request fails.
+        """
+        client = await self._get_client()
+        try:
+            resp = await client.get(f"/camera_proxy/{entity_id}")
+            if resp.status_code == 200:
+                return resp.content
+            logger.warning("camera_proxy_error", entity_id=entity_id, status=resp.status_code)
+            return None
+        except Exception as exc:
+            logger.warning("camera_proxy_exception", entity_id=entity_id, error=str(exc))
+            return None

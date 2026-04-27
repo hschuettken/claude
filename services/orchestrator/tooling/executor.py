@@ -24,6 +24,7 @@ from tooling.memory_tools import MemoryTools
 from tooling.notification_tools import NotificationTools
 from tooling.orbit_tools import OrbitTools
 from tooling.hems_tools import HEMSTools
+from tooling.vision_tools import VisionTools
 
 logger = get_logger("tooling.executor")
 
@@ -88,6 +89,7 @@ class ToolExecutor:
         )
         self._orbit_tools = OrbitTools()
         self._hems_tools = HEMSTools()
+        self._vision_tools = VisionTools(ha=ha)
 
         # Build dispatch table: tool_name → (handler_instance, method_name)
         self._dispatch: dict[str, tuple[Any, str]] = {}
@@ -183,6 +185,10 @@ class ToolExecutor:
             "get_energy_status",
         ):
             self._dispatch[name] = (self._hems_tools, name)
+
+        # Vision tools
+        for name in ("list_cameras", "get_camera_snapshot"):
+            self._dispatch[name] = (self._vision_tools, name)
 
         # Weather (inline on self — uses HA directly)
         self._dispatch["get_weather_forecast"] = (self, "_impl_get_weather_forecast")
