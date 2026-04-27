@@ -206,6 +206,26 @@ services:
     networks:
       - homelab
 
+  agent-economy:
+    build:
+      context: .
+      dockerfile: services/agent-economy/Dockerfile
+    container_name: claude-agent-economy-1
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      AGENT_ECONOMY_DB_URL: ${AGENT_ECONOMY_DB_URL:-postgresql://homelab:homelab@192.168.0.80:5432/homelab}
+      NATS_URL: ${NATS_URL:-nats://192.168.0.50:4222}
+      AGENT_ECONOMY_JWT_SECRET: ${AGENT_ECONOMY_JWT_SECRET:-changeme-in-production}
+      AGENT_ECONOMY_PORT: ${AGENT_ECONOMY_PORT:-8240}
+      ORACLE_URL: ${ORACLE_URL:-http://192.168.0.50:8225}
+    ports:
+      - "${AGENT_ECONOMY_PORT:-8240}:8240"
+    volumes:
+      - agent_economy_data:/app/data
+    networks:
+      - homelab
+
   # --- Template for new services ---
   # my-new-service:
   #   build:
@@ -227,6 +247,7 @@ volumes:
   hems_data:
   marketing_agent_data:
   cognitive_layer_data:
+  agent_economy_data:
   pv_forecast_data:
   smart_ev_charging_data:
   ev_forecast_data:
