@@ -137,6 +137,11 @@ async def list_rooms() -> list[RoomResponse]:
 
 
 async def get_room(room_id: str) -> Optional[RoomResponse]:
+    if db.get_pool() is None:
+        for r in _default_room_responses():
+            if r.room_id == room_id:
+                return r
+        return None
     row = await db.fetchrow("SELECT * FROM dt_rooms WHERE room_id = $1", room_id)
     if row is None:
         return None
@@ -144,6 +149,8 @@ async def get_room(room_id: str) -> Optional[RoomResponse]:
 
 
 async def create_room(data: RoomCreate) -> RoomResponse:
+    if db.get_pool() is None:
+        raise RuntimeError("Database unavailable — cannot persist new rooms")
     row = await db.fetchrow(
         """
         INSERT INTO dt_rooms

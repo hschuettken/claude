@@ -321,7 +321,10 @@ async def create_room(data: RoomCreate):
     existing = await room_registry.get_room(data.room_id)
     if existing:
         raise HTTPException(status_code=409, detail=f"Room '{data.room_id}' already exists")
-    return await room_registry.create_room(data)
+    try:
+        return await room_registry.create_room(data)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
 
 
 @app.get("/api/v1/rooms/{room_id}", response_model=RoomResponse)
