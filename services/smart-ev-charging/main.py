@@ -150,6 +150,24 @@ class SmartEVChargingService(BaseService):
         # --- FR #2123: Mode change tracking ---
         self._last_mode_change: dict | None = None
 
+        # --- S1 Decision Journal — admin client + journal instantiated in run() ---
+        if self.settings.influxdb_all_access_token:
+            self._influx_admin = InfluxClient(
+                url=self.settings.influxdb_url,
+                token=self.settings.influxdb_all_access_token,
+                org=self.settings.influxdb_org,
+            )
+        else:
+            self._influx_admin = self.influx
+        self.journal: DecisionJournal | None = None
+        # Last journaled state — used to detect "meaningful change" so the
+        # 30s control loop only writes ~50 records/day instead of 2880.
+        self._journal_last: dict[str, object] = {
+            "target_power_w": None,
+            "mode": None,
+            "drain_active": False,
+        }
+
     async def run(self) -> None:
         # Register with Oracle (non-blocking)
         asyncio.create_task(self._register_with_oracle())
@@ -157,6 +175,14 @@ class SmartEVChargingService(BaseService):
         # NATS is already connected by BaseService.start() before run() is called.
         # Register HA discovery entities via NATS ha.discovery subjects.
         await self._register_ha_discovery()
+
+        # Decision Journal — best-effort writer (analytics bucket + NATS).
+        self.journal = DecisionJournal(
+            influx_admin=self._influx_admin,
+            nats=self.nats,
+            service="smart-ev-charging",
+            bucket=self.settings.influxdb_analytics_bucket,
+        )
 
         # Subscribe to orchestrator commands via NATS
         self._force_cycle = asyncio.Event()
@@ -566,6 +592,70 @@ class SmartEVChargingService(BaseService):
 
         # 2) Decide target power
         decision = strategy.decide(ctx)
+
+        # --- S1 Decision Journal — only on meaningful change ---
+        # Filter: target_power Δ ≥ threshold, mode change, drain start/stop, or error.
+        # Keeps record count to ~50/day instead of one per 30s tick.
+        if self.journal is not None:
+            last = self._journal_last
+            mode_str = ctx.mode.value if ctx.mode else None
+            drain_active_now = decision.drain_boost_w > 0
+            target_changed = (
+                last["target_power_w"] is None
+                or abs(decision.target_power_w - int(last["target_power_w"]))
+                >= self.settings.journal_target_power_delta_w
+            )
+            mode_changed = last["mode"] != mode_str
+            drain_changed = last["drain_active"] != drain_active_now
+
+            if target_changed or mode_changed or drain_changed:
+                if drain_active_now and decision.target_power_w > 0:
+                    journal_outcome_class = "drain_battery"
+                elif decision.target_power_w > 0:
+                    journal_outcome_class = "charge"
+                else:
+                    journal_outcome_class = "hold"
+
+                await self.journal.write(
+                    decision_kind="target_power_set",
+                    outcome=f"{mode_str}: {decision.target_power_w} W",
+                    reason=decision.reason[:300] if decision.reason else "no reason",
+                    outcome_class=journal_outcome_class,
+                    trace_id=self._current_trace_id or None,
+                    current_soc_pct=ctx.ev_soc_pct,
+                    target_soc_pct=ctx.ev_target_soc_pct,
+                    target_power_w=decision.target_power_w,
+                    pv_available_w=int(decision.pv_surplus_w),
+                    home_battery_soc_pct=int(ctx.battery_soc_pct)
+                    if ctx.battery_soc_pct is not None
+                    else None,
+                    mode=mode_str,
+                    inputs={
+                        "grid_power_w": ctx.grid_power_w,
+                        "pv_power_w": ctx.pv_power_w,
+                        "battery_power_w": ctx.battery_power_w,
+                        "battery_assist_w": decision.battery_assist_w,
+                        "battery_assist_reason": decision.battery_assist_reason[:200]
+                        if decision.battery_assist_reason
+                        else "",
+                        "drain_boost_w": decision.drain_boost_w,
+                        "drain_boost_reason": decision.drain_boost_reason[:200]
+                        if decision.drain_boost_reason
+                        else "",
+                        "deadline_active": decision.deadline_active,
+                        "deadline_hours_left": decision.deadline_hours_left,
+                        "deadline_required_w": decision.deadline_required_w,
+                        "vehicle_connected": ctx.wallbox.vehicle_connected
+                        if ctx.wallbox
+                        else False,
+                        "energy_needed_kwh": ctx.energy_needed_kwh,
+                    },
+                )
+                self._journal_last = {
+                    "target_power_w": decision.target_power_w,
+                    "mode": mode_str,
+                    "drain_active": drain_active_now,
+                }
 
         # Update grid charging flag for next cycle's tracking
         # Grid charging = charging at night or during grid fallback (not PV surplus)

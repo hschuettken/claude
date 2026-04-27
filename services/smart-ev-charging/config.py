@@ -102,3 +102,11 @@ class EVChargingSettings(BaseSettings):
     watchdog_timeout_seconds: int = 300  # 5 minutes without cycle completion = alert
     watchdog_check_interval_seconds: int = 30
     watchdog_restart_on_freeze: bool = True  # exit process on freeze (Docker restarts)
+
+    # --- Decision Journal (S1) ---
+    # Admin token can write the analytics bucket; falls back to influxdb_token if empty.
+    influxdb_all_access_token: str = ""
+    influxdb_analytics_bucket: str = "analytics"
+    # Threshold for "meaningful change" — only journal control-loop ticks when
+    # target_power changes by at least this much (W), or mode/drain state flips.
+    journal_target_power_delta_w: int = 200
