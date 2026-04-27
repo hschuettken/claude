@@ -88,6 +88,7 @@ class EVForecastService:
                     "energy.ev.forecast.clarification_needed",
                     "energy.ev.decision.plan",  # S1: Decision Journal
                     "energy.pv.forecast.hourly",  # S2: subscribed for greedy scheduler
+                    "energy.demand.ev",  # S3b: published for Energy Allocator
                     "heartbeat.ev-forecast",
                     "orchestrator.command.ev-forecast",
                     "orchestrator.knowledge-update",
@@ -603,6 +604,43 @@ class EVForecastService:
             plan_payload["pv_hourly_run_iso"] = self._pv_hourly_run_iso
             if self.nats and self.nats.connected:
                 await self.nats.publish("energy.ev.forecast.plan", plan_payload)
+
+            # S3b: Publish demand for the Energy Allocator (advisory).
+            # Tomorrow takes priority over today; falls back to today if tomorrow's
+            # demand is zero. Allocator may be down — never raises.
+            if self.nats and self.nats.connected and plan.days:
+                try:
+                    today_day = plan.days[0]
+                    tomorrow_day = plan.days[1] if len(plan.days) > 1 else None
+                    demand_target = (
+                        tomorrow_day
+                        if tomorrow_day is not None
+                        and tomorrow_day.energy_to_charge_kwh > 0
+                        else today_day
+                    )
+                    deadline_iso: str | None = None
+                    if demand_target.departure_time is not None:
+                        deadline_local = datetime.combine(
+                            demand_target.date,
+                            demand_target.departure_time,
+                            tzinfo=self._tz,
+                        )
+                        deadline_iso = deadline_local.astimezone(
+                            timezone.utc
+                        ).isoformat()
+                    await self.nats.publish(
+                        "energy.demand.ev",
+                        {
+                            "kwh_needed": round(demand_target.energy_to_charge_kwh, 3),
+                            "deadline_iso": deadline_iso,
+                            # 25 ct/kWh employer reimbursement minus 7 ct/kWh feed-in
+                            # = 18 ct/kWh net value of PV → EV vs. PV → grid.
+                            "value_per_kwh_eur": 0.18,
+                            "trace_id": plan.trace_id,
+                        },
+                    )
+                except Exception:
+                    logger.exception("publish_demand_ev_failed")
 
             # Publish plan to NATS event bus
             if self.nats and self.nats.connected:
