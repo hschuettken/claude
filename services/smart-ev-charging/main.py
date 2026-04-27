@@ -20,6 +20,7 @@ import time
 from collections import deque
 from datetime import datetime, time as dt_time, timedelta
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -57,6 +58,11 @@ class SmartEVChargingService(BaseService):
                     "heartbeat.smart-ev-charging",
                     "orchestrator.command.smart-ev-charging",
                     "energy.ev.weekly_plan",
+                    "energy.pv.forecast_updated",  # subscribed for sunset hour
+                    "energy.pv.accuracy_checked",  # subscribed for forecast accuracy
+                    "energy.pv.hourly_forecast",  # subscribed for Tier 0 PV harvest
+                    "energy.ev.plan_updated",  # subscribed for forecast needed
+                    "energy.allocation.ev",  # S3b: subscribed for advisory cap
                 ],
                 "source_paths": [
                     {"repo": "claude", "paths": ["services/smart-ev-charging/"]},
@@ -129,6 +135,12 @@ class SmartEVChargingService(BaseService):
         # --- PV hourly forecast (from energy.pv.hourly_forecast NATS) ---
         self._pv_hourly_forecast: list[dict] | None = None  # today
         self._pv_hourly_forecast_tomorrow: list[dict] | None = None  # tomorrow
+        # S3b: advisory PV-allocation hints from the orchestrator's EnergyAllocator
+        self._allocation_cache: dict[str, Any] = {
+            "received_at": None,
+            "slots": [],
+            "stale_seconds": 600,
+        }
 
         # --- Strategy reference (set in run()) ---
         self._strategy: ChargingStrategy | None = None
@@ -242,6 +254,10 @@ class SmartEVChargingService(BaseService):
             )
             await self.nats.subscribe_json(
                 "energy.pv.hourly_forecast", self._on_pv_hourly_forecast_nats
+            )
+            # S3b: advisory PV-allocation hint from the orchestrator's allocator.
+            await self.nats.subscribe_json(
+                "energy.allocation.ev", self._on_allocation_ev_nats
             )
 
         self.logger.info(
@@ -596,6 +612,29 @@ class SmartEVChargingService(BaseService):
         # 2) Decide target power
         decision = strategy.decide(ctx)
 
+        # --- S3b: advisory soft cap from EnergyAllocator (orchestrator) ---
+        # When a non-stale hint is available for the current hour, clamp the
+        # target to the allocator's allowed_kwh. Falls back to the strategy's
+        # decision unchanged when the hint is missing — never blocks.
+        allocator_followed = False
+        allocation_hint_w = self._allocation_hint_w()
+        if (
+            allocation_hint_w is not None
+            and decision.target_power_w > allocation_hint_w > 0
+        ):
+            self.logger.info(
+                "allocator_cap_applied",
+                pre_cap_w=decision.target_power_w,
+                hint_w=allocation_hint_w,
+            )
+            decision.reason = (
+                f"{decision.reason} | allocator cap: {allocation_hint_w} W"
+            )
+            decision.target_power_w = allocation_hint_w
+            decision.allocated_w = allocation_hint_w
+            allocator_followed = True
+        self._allocator_followed = allocator_followed
+
         # --- S1 Decision Journal — only on meaningful change ---
         # Filter: target_power Δ ≥ threshold, mode change, drain start/stop, or error.
         # Keeps record count to ~50/day instead of one per 30s tick.
@@ -652,6 +691,10 @@ class SmartEVChargingService(BaseService):
                         if ctx.wallbox
                         else False,
                         "energy_needed_kwh": ctx.energy_needed_kwh,
+                        # S3b: was the allocator's hint applied this tick?
+                        "allocator_followed": getattr(
+                            self, "_allocator_followed", False
+                        ),
                     },
                 )
                 self._journal_last = {
@@ -1555,6 +1598,47 @@ class SmartEVChargingService(BaseService):
                 days=len(days),
                 first_day=days[0].get("date") if days else None,
             )
+
+    async def _on_allocation_ev_nats(self, subject: str, payload: dict) -> None:
+        """Handle energy.allocation.ev from NATS (S3b, advisory).
+
+        Caches per-slot allowed_kwh from the orchestrator's EnergyAllocator.
+        Hints older than ``stale_seconds`` are ignored.
+        """
+        try:
+            self._allocation_cache = {
+                "received_at": datetime.now(timezone.utc),
+                "slots": list(payload.get("slots", [])),
+                "stale_seconds": int(payload.get("stale_after_seconds", 600)),
+            }
+            self.logger.debug(
+                "allocation_ev_cached", slots=len(self._allocation_cache["slots"])
+            )
+        except Exception:
+            self.logger.warning("allocation_ev_parse_failed", exc_info=True)
+
+    def _allocation_hint_w(self) -> int | None:
+        """Return current-hour allocation hint (W) or None if missing/stale."""
+        cache = self._allocation_cache
+        received_at = cache.get("received_at")
+        if received_at is None:
+            return None
+        age = (datetime.now(timezone.utc) - received_at).total_seconds()
+        if age >= cache.get("stale_seconds", 600):
+            return None
+        now_hour_iso = (
+            datetime.now(timezone.utc)
+            .replace(minute=0, second=0, microsecond=0)
+            .isoformat()
+        )
+        for slot in cache.get("slots", []):
+            slot_iso = str(slot.get("slot_iso", ""))
+            if slot_iso[:13] == now_hour_iso[:13]:
+                try:
+                    return int(float(slot.get("allowed_kwh", 0.0)) * 1000.0)
+                except (TypeError, ValueError):
+                    return None
+        return None
 
     async def _on_pv_hourly_forecast_nats(self, subject: str, payload: dict) -> None:
         """Handle energy.pv.hourly_forecast from NATS — cache today + tomorrow slots."""
