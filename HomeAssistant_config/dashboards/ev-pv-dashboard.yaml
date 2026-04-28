@@ -99,6 +99,17 @@ views:
                 name: "Manual Target SoC"
                 icon: mdi:battery-charging-80
 
+          # --- Ready-By Override (S4) — set deadline + target, replans automatically ---
+          - type: entities
+            title: "Ready By (Override)"
+            entities:
+              - entity: input_datetime.ev_ready_by_deadline
+                name: "Ready By Deadline"
+                icon: mdi:clock-alert-outline
+              - entity: input_number.ev_ready_by_target_soc
+                name: "Ready By Target SoC"
+                icon: mdi:battery-clock
+
           # --- Smart Charging Status ---
           - type: entities
             title: "Smart Charging"
@@ -167,6 +178,53 @@ views:
               - entity: sensor.amtron_firmware_version_full_tpl
                 name: "Firmware"
                 icon: mdi:chip
+
+      # =====================================================================
+      # SECTION 2b: Decision Journal & Plan Narration (S1 + S4 + S5)
+      # =====================================================================
+      - type: grid
+        title: "🧠 Plan & Reasoning"
+        cards:
+          # --- LLM-narrated plan summary (S4 narrator → NATS → MQTT) ---
+          - type: markdown
+            title: "Plan Narration"
+            content: >-
+              {{ state_attr('sensor.ev_forecast_plan_narration', 'narration')
+                 or 'No narration yet' }}
+
+          # --- Latest decision journal entry (S1 + S5) ---
+          - type: entities
+            title: "Latest Decision"
+            entities:
+              - entity: sensor.ev_forecast_decision_journal_latest
+                name: "Decision Kind"
+              - type: attribute
+                entity: sensor.ev_forecast_decision_journal_latest
+                attribute: outcome
+                name: "Outcome"
+              - type: attribute
+                entity: sensor.ev_forecast_decision_journal_latest
+                attribute: reason
+                name: "Reason"
+              - type: attribute
+                entity: sensor.ev_forecast_decision_journal_latest
+                attribute: outcome_class
+                name: "Class"
+
+          # --- Decision timeline (24h) — surfaces every plan/override/replan ---
+          - type: history-graph
+            title: "Decision Timeline (24h)"
+            hours_to_show: 24
+            entities:
+              - entity: sensor.ev_forecast_decision_journal_latest
+                name: "Decisions"
+
+          # --- Full plan reasoning (legacy structured) ---
+          - type: markdown
+            title: "Full Reasoning"
+            content: >-
+              {{ state_attr('sensor.ev_forecast_plan_reasoning', 'full_reasoning')
+                 or 'No plan reasoning available' }}
 
       # =====================================================================
       # SECTION 3: PV & Battery

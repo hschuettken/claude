@@ -881,6 +881,10 @@ input_boolean:
     name: EV Drain PV Battery
     icon: mdi:battery-arrow-down
     initial: false
+  nicole_wfh_today:
+    name: Nicole WFH Today
+    icon: mdi:home-account
+    initial: false
 
 input_datetime:
   ev_departure_time:

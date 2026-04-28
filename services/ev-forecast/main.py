@@ -1674,7 +1674,48 @@ class EVForecastService:
             },
         )
 
-        logger.info("ha_discovery_registered", entity_count=14)
+        # S5: Narration sensor — LLM-generated plan summary (orchestrator → NATS → MQTT)
+        await self._publish_ha_discovery(
+            "sensor",
+            "plan_narration",
+            node_id=node,
+            config={
+                "name": "Plan Narration",
+                "device": device,
+                "state_topic": "homelab/ev-forecast/narration/latest",
+                "value_template": "{{ value_json.narration | default('') | truncate(255, true) }}",
+                "json_attributes_topic": "homelab/ev-forecast/narration/latest",
+                "json_attributes_template": (
+                    '{{ {"narration": value_json.narration | default(""), '
+                    '"trace_id": value_json.trace_id | default("")} | tojson }}'
+                ),
+                "icon": "mdi:comment-text-outline",
+            },
+        )
+
+        # S5: Decision Journal latest entry — surfaces journal to HA timeline card
+        await self._publish_ha_discovery(
+            "sensor",
+            "decision_journal_latest",
+            node_id=node,
+            config={
+                "name": "Decision Journal Latest",
+                "device": device,
+                "state_topic": "homelab/ev-forecast/decision/latest",
+                "value_template": "{{ value_json.decision_kind | default('unknown') }}",
+                "json_attributes_topic": "homelab/ev-forecast/decision/latest",
+                "json_attributes_template": (
+                    '{{ {"decision_kind": value_json.decision_kind | default(""), '
+                    '"outcome": value_json.outcome | default(""), '
+                    '"reason": value_json.reason | default(""), '
+                    '"outcome_class": value_json.outcome_class | default(""), '
+                    '"trace_id": value_json.trace_id | default("")} | tojson }}'
+                ),
+                "icon": "mdi:notebook-outline",
+            },
+        )
+
+        logger.info("ha_discovery_registered", entity_count=16)
 
     # ------------------------------------------------------------------
     # Reasoning
