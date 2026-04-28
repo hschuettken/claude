@@ -137,7 +137,7 @@ class OrchestratorService(BaseService):
                     "heartbeat.orchestrator",
                     "services.orchestrator.activity",
                     "heartbeat.>",
-                    "services.>.updated",
+                    "services.*.updated",
                     "energy.ev.forecast.plan",
                     "energy.ev.forecast.clarification_needed",
                     # S3b: Energy Allocator (advisory PV-surplus arbitration)
@@ -224,7 +224,7 @@ class OrchestratorService(BaseService):
         tool_executor._activity_tracker = self._activity
 
         await self.nats.subscribe_json("heartbeat.>", self._on_service_heartbeat)
-        await self.nats.subscribe_json("services.>.updated", self._on_service_update)
+        await self.nats.subscribe_json("services.*.updated", self._on_service_update)
         await self.nats.subscribe_json("energy.ev.forecast.plan", self._on_ev_plan)
         await self.nats.subscribe_json(
             "energy.ev.forecast.clarification_needed", self._on_ev_clarification
