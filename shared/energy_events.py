@@ -99,6 +99,25 @@ class PVForecastHourly(BaseModel):
     hourly: list[PVForecastHourlySlot]
 
 
+class PVForecastAdjusted(BaseModel):
+    """energy.pv.forecast.adjusted — 5-min reactive recalibration (FR #3066).
+
+    Published when actual PV power deviates significantly from the current
+    hour's forecast. Consumers may use the ratio to scale near-term forecast
+    slots (next 1-2 hours), falling back to the unadjusted forecast for
+    later slots.
+    """
+
+    timestamp: str  # ISO format, UTC
+    hour_utc: int  # current UTC hour (0-23)
+    actual_5min_kwh: float
+    expected_5min_kwh: float
+    ratio: float  # actual/expected, clamped to [0.0, 3.0]
+    forecast_today_remaining_kwh: float  # original
+    adjusted_today_remaining_kwh: float  # ratio applied to current+next hour only
+    pv_power_w: float
+
+
 class PVForecastAccuracyResult(BaseModel):
     """Published after accuracy check, subject: energy.pv.accuracy_checked"""
 

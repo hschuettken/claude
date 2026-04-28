@@ -21,7 +21,9 @@ Output sensors in Home Assistant:
 import asyncio
 import threading
 import time
+from datetime import datetime, timezone  # noqa: F401  (used in _intra_day_recalibrate)
 from pathlib import Path
+from typing import Any  # noqa: F401  (used as type annotation on _last_forecast_obj)
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -30,6 +32,7 @@ from shared.energy_events import (
     PVAnomalyDetected,
     PVDriftDetected,
     PVForecastAccuracyResult,
+    PVForecastAdjusted,  # noqa: F401  (used at runtime in _intra_day_recalibrate)
     PVForecastHourly,  # noqa: F401  (used at runtime in _forecast() to publish energy.pv.forecast.hourly)
     PVForecastHourlySlot,  # noqa: F401  (used at runtime in _build_hourly_iso_list)
     PVForecastUpdated,
@@ -69,6 +72,7 @@ class PVForecastService:
                     "energy.pv.forecast.updated",
                     "energy.pv.forecast.model_trained",
                     "energy.pv.forecast.hourly",
+                    "energy.pv.forecast.adjusted",  # FR #3066: 5-min reactive recalibration
                     "energy.daylight.window",
                     "heartbeat.pv-forecast",
                     "orchestrator.command.pv-forecast",
@@ -137,6 +141,9 @@ class PVForecastService:
         # --- Sunrise/sunset ---
         self._sunrise_hhmm: str | None = None
         self._sunset_hhmm: str | None = None
+
+        # --- Intra-day recalibration cache (FR #3066) ---
+        self._last_forecast_obj: Any = None  # FullForecast from engine.forecast()
 
     async def _resolve_location(self) -> None:
         """Get lat/lon from HA config if not explicitly set."""
@@ -261,6 +268,16 @@ class PVForecastService:
             hour=6,
             minute=0,
             id="log_actuals_archive",
+        )
+        # FR #3066 — every 5 min during daylight, recalibrate the current
+        # hour's forecast from actual PV power and publish on
+        # energy.pv.forecast.adjusted so downstream schedulers can react
+        # within minutes instead of waiting for the next hourly cycle.
+        self.scheduler.add_job(
+            self._intra_day_recalibrate,
+            "interval",
+            minutes=5,
+            id="intra_day_recalibrate",
         )
         self.scheduler.start()
 
@@ -413,6 +430,7 @@ class PVForecastService:
         """Generate and publish forecast."""
         try:
             forecast = await self.engine.forecast()
+            self._last_forecast_obj = forecast  # FR #3066: cache for intra-day cron
             await self.publisher.publish(forecast)
 
             self._last_forecast_time = time.strftime(
@@ -585,6 +603,108 @@ class PVForecastService:
             await self.history.log_forecast_solar_state()
         except Exception:
             logger.warning("history_log_forecast_solar_failed", exc_info=True)
+
+    async def _intra_day_recalibrate(self) -> None:
+        """5-min reactive recalibration of the current-hour forecast (FR #3066).
+
+        Reads live PV power, compares against the cached hourly forecast for
+        the current UTC hour, and publishes `energy.pv.forecast.adjusted`
+        with a ratio + adjusted today_remaining_kwh. Consumers may scale
+        near-term slots; later slots fall back to the unadjusted forecast.
+
+        Skips outside daylight (between sunset and sunrise) to avoid noisy
+        zero/zero ratios.
+        """
+        try:
+            forecast = self._last_forecast_obj
+            if forecast is None:
+                return  # no forecast yet, nothing to recalibrate against
+
+            # Skip outside daylight — avoids divide-by-near-zero and noise.
+            now_utc = datetime.now(timezone.utc)
+            sr_str = self._sunrise_hhmm or ""
+            ss_str = self._sunset_hhmm or ""
+            if sr_str and ss_str:
+                try:
+                    sr_h, sr_m = (int(x) for x in sr_str.split(":"))
+                    ss_h, ss_m = (int(x) for x in ss_str.split(":"))
+                    sr_min = sr_h * 60 + sr_m
+                    ss_min = ss_h * 60 + ss_m
+                    cur_min = now_utc.hour * 60 + now_utc.minute
+                    if cur_min < sr_min or cur_min > ss_min:
+                        return
+                except (ValueError, AttributeError):
+                    pass
+
+            # Read current PV power (sum of east + west, instantaneous W)
+            pv_state = await self.ha.get_state("sensor.inverter_input_power")
+            try:
+                pv_w = float(pv_state.get("state", 0) or 0)
+            except (TypeError, ValueError):
+                return
+            if pv_w < 0:
+                pv_w = 0.0  # negatives are a sensor glitch — clamp
+
+            # Look up the current-hour forecast slot from the cached forecast
+            # (today.hourly: list of {hour, kwh, ...} from _build_hourly_list)
+            today_hourly = self._build_hourly_list(forecast, "today")
+            current_hour = now_utc.hour
+            cur_slot = next(
+                (h for h in today_hourly if h.get("hour") == current_hour),
+                None,
+            )
+            if cur_slot is None:
+                return
+            expected_hour_kwh = float(cur_slot.get("kwh", 0.0))
+            expected_5min_kwh = expected_hour_kwh / 12.0
+            actual_5min_kwh = pv_w * (5.0 / 60.0) / 1000.0
+
+            # Compute ratio. When expectation is small (cloudy hour), don't
+            # let a tiny denominator inflate ratios; clamp [0, 3].
+            if expected_5min_kwh < 0.05:  # < 0.05 kWh/5min ≈ < 600 W avg
+                ratio = 1.0
+            else:
+                ratio = max(0.0, min(3.0, actual_5min_kwh / expected_5min_kwh))
+
+            # Adjust the rest of the current hour + scale down the
+            # today_remaining accordingly. Later hours unchanged (those
+            # depend on weather forecast, not now-conditions).
+            forecast_today_remaining = float(forecast.today_remaining_kwh)
+            minutes_left_in_hour = 60 - now_utc.minute
+            current_hour_remaining_kwh = expected_hour_kwh * minutes_left_in_hour / 60.0
+            adjusted_current_hour_remaining = current_hour_remaining_kwh * ratio
+            adjusted_today_remaining = (
+                forecast_today_remaining
+                - current_hour_remaining_kwh
+                + adjusted_current_hour_remaining
+            )
+            adjusted_today_remaining = max(0.0, adjusted_today_remaining)
+
+            event = PVForecastAdjusted(
+                timestamp=now_utc.isoformat(),
+                hour_utc=current_hour,
+                actual_5min_kwh=round(actual_5min_kwh, 4),
+                expected_5min_kwh=round(expected_5min_kwh, 4),
+                ratio=round(ratio, 3),
+                forecast_today_remaining_kwh=round(forecast_today_remaining, 3),
+                adjusted_today_remaining_kwh=round(adjusted_today_remaining, 3),
+                pv_power_w=round(pv_w, 1),
+            )
+            if self.nats and self.nats.connected:
+                await self.nats.publish(
+                    "energy.pv.forecast.adjusted", event.model_dump()
+                )
+            # Only log when ratio deviates meaningfully — avoid log spam
+            if abs(ratio - 1.0) > 0.15:
+                logger.info(
+                    "pv_intraday_recalibrated",
+                    ratio=round(ratio, 3),
+                    pv_w=round(pv_w, 1),
+                    expected_kwh=round(expected_5min_kwh, 3),
+                    adjusted_remaining=round(adjusted_today_remaining, 2),
+                )
+        except Exception:
+            logger.exception("intra_day_recalibrate_failed")
 
     async def _log_actuals_archive(self) -> None:
         """Daily 06:00 UTC: log D-2 hourly actuals from Open-Meteo's archive."""

@@ -89,6 +89,7 @@ class EVForecastService:
                     "energy.ev.forecast.clarification_needed",
                     "energy.ev.decision.plan",  # S1: Decision Journal
                     "energy.pv.forecast.hourly",  # S2: subscribed for greedy scheduler
+                    "energy.pv.forecast.adjusted",  # FR #3066: subscribed reactive recalibration
                     "energy.demand.ev",  # S3b: published for Energy Allocator
                     "energy.ev.command.set_ready_by",  # S4.2: subscribed override
                     "energy.ev.command.acknowledged",  # S4.2: published ack
@@ -232,6 +233,10 @@ class EVForecastService:
         self._pv_hourly_cache: dict[str, dict[str, float]] = {}
         self._pv_hourly_run_iso: str | None = None
 
+        # FR #3066: latest 5-min reactive PV adjustment
+        self._pv_adjustment: dict[str, Any] | None = None
+        self._pv_adjustment_received_at: datetime | None = None
+
     async def start(self) -> None:
         """Initialize and start the service."""
         logger.info(
@@ -326,6 +331,13 @@ class EVForecastService:
             await self.nats.subscribe_json(
                 "energy.pv.forecast.hourly",
                 self._on_pv_forecast_hourly,
+            )
+
+            # FR #3066: 5-min reactive recalibration — scales the current hour
+            # slot in _build_hourly_pv when the adjustment is fresh (< 10 min)
+            await self.nats.subscribe_json(
+                "energy.pv.forecast.adjusted",
+                self._on_pv_forecast_adjusted,
             )
 
             # S4.2: manual Ready-By override from the orchestrator
@@ -1192,6 +1204,22 @@ class EVForecastService:
             logger.exception("ev_command_set_ready_by_failed", trace_id=trace_id)
             await _ack(status="failed", error=str(exc))
 
+    async def _on_pv_forecast_adjusted(self, subject: str, payload: dict) -> None:
+        """Cache the latest 5-min reactive recalibration (FR #3066)."""
+        try:
+            self._pv_adjustment = payload
+            self._pv_adjustment_received_at = datetime.now(timezone.utc)
+            ratio = float(payload.get("ratio", 1.0))
+            if abs(ratio - 1.0) > 0.15:
+                logger.info(
+                    "pv_adjustment_received",
+                    ratio=ratio,
+                    hour_utc=payload.get("hour_utc"),
+                    pv_w=payload.get("pv_power_w"),
+                )
+        except Exception:
+            logger.warning("pv_adjustment_handler_failed", exc_info=True)
+
     async def _on_pv_forecast_hourly(self, subject: str, payload: dict) -> None:
         """Cache the flat 72h hourly PV forecast for the charge scheduler (S2)."""
         try:
@@ -1213,14 +1241,28 @@ class EVForecastService:
             logger.exception("pv_hourly_cache_update_failed")
 
     def _build_hourly_pv(self) -> list[HourlyPV]:
-        """Convert the NATS-fed hourly cache into HourlyPV input for the scheduler (S2)."""
+        """Convert the NATS-fed hourly cache into HourlyPV input for the scheduler (S2).
+
+        FR #3066: when a fresh (<10 min) intra-day adjustment is available,
+        scale the current UTC hour's slot by `ratio`. Later slots fall back
+        to the unadjusted forecast (those depend on weather forecast, not
+        now-conditions, so they shouldn't be perturbed by a 5-min sample).
+        """
         out: list[HourlyPV] = []
+        ratio, adjust_hour = self._fresh_pv_adjustment()
         for t_iso, vals in self._pv_hourly_cache.items():
             try:
                 t = datetime.fromisoformat(t_iso.replace("Z", "+00:00"))
             except ValueError:
                 continue
             kwh = vals.get("kwh", 0.0)
+            if (
+                ratio is not None
+                and adjust_hour is not None
+                and t.hour == adjust_hour
+                and t.date() == datetime.now(timezone.utc).date()
+            ):
+                kwh = kwh * ratio
             out.append(
                 HourlyPV(
                     time=t,
@@ -1231,6 +1273,22 @@ class EVForecastService:
             )
         out.sort(key=lambda s: s.time)
         return out
+
+    def _fresh_pv_adjustment(self) -> tuple[float | None, int | None]:
+        """Return (ratio, hour_utc) if an adjustment is fresh (<10 min), else (None, None)."""
+        if self._pv_adjustment is None or self._pv_adjustment_received_at is None:
+            return None, None
+        age = datetime.now(timezone.utc) - self._pv_adjustment_received_at
+        if age.total_seconds() > 600:  # 10 minutes
+            return None, None
+        try:
+            ratio = float(self._pv_adjustment.get("ratio", 1.0))
+            hour_utc = int(self._pv_adjustment.get("hour_utc", -1))
+        except (TypeError, ValueError):
+            return None, None
+        if hour_utc < 0 or hour_utc > 23:
+            return None, None
+        return ratio, hour_utc
 
     # ------------------------------------------------------------------
     # Home location resolution
