@@ -522,6 +522,27 @@ async def test_upsert_model_create(test_client):
 
 
 @pytest.mark.asyncio
+async def test_upsert_model_update(test_client):
+    """PUT with an existing model should call UPDATE path, not INSERT."""
+    existing = _make_model_row()
+    updated = _make_model_row(monthly_income=8000.0, current_net_worth=200000.0)
+    async with test_client as client:
+        with patch("life_nav.main.db") as mock_db:
+            # First fetchrow = existing model found, second = updated row returned
+            mock_db.fetchrow = AsyncMock(side_effect=[existing, updated])
+            resp = await client.put("/api/v1/model", json={
+                "monthly_income": 8000,
+                "current_net_worth": 200000,
+            })
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["monthly_income"] == 8000.0
+            assert data["current_net_worth"] == 200000.0
+            # Verify UPDATE was attempted (fetchrow called twice: get + update)
+            assert mock_db.fetchrow.call_count == 2
+
+
+@pytest.mark.asyncio
 async def test_goals_list_empty(test_client):
     async with test_client as client:
         with patch("life_nav.main.db") as mock_db:

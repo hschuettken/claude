@@ -327,20 +327,20 @@ async def upsert_life_model(data: LifeModelUpdate):
         row = await db.fetchrow(
             """
             UPDATE ln_life_model SET
-                birth_year = $2,
-                target_retirement_age = $3,
-                current_net_worth = $4,
-                monthly_income = $5,
-                monthly_expenses = $6,
-                monthly_savings_rate = $7,
-                investment_return_pct = $8,
-                passive_income_monthly = $9,
-                target_fi_monthly_expense = $10,
-                withdrawal_rate = $11,
-                income_growth_pct = $12,
-                notes = $13,
-                updated_at = $14
-            WHERE id = $15
+                birth_year = $1,
+                target_retirement_age = $2,
+                current_net_worth = $3,
+                monthly_income = $4,
+                monthly_expenses = $5,
+                monthly_savings_rate = $6,
+                investment_return_pct = $7,
+                passive_income_monthly = $8,
+                target_fi_monthly_expense = $9,
+                withdrawal_rate = $10,
+                income_growth_pct = $11,
+                notes = $12,
+                updated_at = $13
+            WHERE id = $14
             RETURNING *
             """,
             _f("birth_year", existing["birth_year"]),
