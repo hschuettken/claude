@@ -155,6 +155,7 @@ REST endpoints:
 | `GET` | `/_health` | Healthcheck (no auth) |
 | `GET` | `/api/v1/status` | Service status + activity |
 | `GET` | `/api/v1/tools` | List all tools with schemas |
+| `GET` | `/api/v1/vision` | NB9OS Home Brain vision + live area status |
 | `POST` | `/api/v1/tools/execute` | Execute a tool directly (bypasses LLM) |
 | `POST` | `/api/v1/chat` | Full Brain reasoning loop |
 

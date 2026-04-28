@@ -85,3 +85,21 @@ class ToolInfo(BaseModel):
 class ToolListResponse(BaseModel):
     tools: list[ToolInfo]
     count: int
+
+
+# --- Vision ---
+
+
+class VisionArea(BaseModel):
+    id: int
+    title: str
+    description: str
+    service: str | None = None
+    status: str = "unknown"
+
+
+class VisionSummary(BaseModel):
+    north_star: str
+    areas: list[VisionArea]
+    areas_total: int
+    services_online: int

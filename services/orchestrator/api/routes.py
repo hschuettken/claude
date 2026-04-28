@@ -26,6 +26,8 @@ from api.models import (
     ToolListResponse,
     ToolRequest,
     ToolResponse,
+    VisionArea,
+    VisionSummary,
 )
 from tools import TOOL_DEFINITIONS
 
@@ -140,3 +142,156 @@ async def chat(request: ChatRequest) -> ChatResponse:
         user_name=request.user_name,
     )
     return ChatResponse(response=response, chat_id=request.chat_id)
+
+
+# ---------------------------------------------------------------------------
+# Vision areas — static manifest derived from NB9OS Cortex master spec
+# ---------------------------------------------------------------------------
+
+_VISION_AREAS: list[dict] = [
+    {
+        "id": 1,
+        "title": "Cognitive Layer (External Brain v2)",
+        "description": (
+            "Memora (pages, meetings, semantic search), Orbit (tasks, goals, routines), "
+            "Daily Briefing (LLM-generated morning summary)."
+        ),
+        "service": "cognitive-layer",
+    },
+    {
+        "id": 2,
+        "title": "Autonomous Agent Economy",
+        "description": (
+            "OpenClaw agents (architect, dev, QA, devops), team-lead orchestration, "
+            "spec retro agent, backlog agent."
+        ),
+        "service": "agent-economy",
+    },
+    {
+        "id": 3,
+        "title": "Digital Twin (House + Energy + Life)",
+        "description": (
+            "HEMS thermal control, orchestrator HA integration, PV/battery/grid monitoring, "
+            "smart EV charging, simulation engine."
+        ),
+        "service": "digital-twin",
+    },
+    {
+        "id": 4,
+        "title": "Self-Optimizing Infrastructure",
+        "description": (
+            "L0/L1/L2 monitors, bootstrap bridge (22 nodes), ops-bridge (deploy/logs/config), "
+            "Proxmox VM lifecycle, infra evolution engine."
+        ),
+        "service": "self-optimizing-infra",
+    },
+    {
+        "id": 5,
+        "title": "Life Navigation System",
+        "description": (
+            "Orbit Goals (milestones, life areas), weekly review, training AI "
+            "(intervals.icu), cook planner, vacation planner."
+        ),
+        "service": "life-nav",
+    },
+    {
+        "id": 6,
+        "title": "Family OS (Shared System)",
+        "description": (
+            "Multi-user auth (admin/member), per-user Orbit, shared decision engine, "
+            "Nicole dashboard, household coordination."
+        ),
+        "service": None,
+    },
+    {
+        "id": 7,
+        "title": "Personal AI Model (HenningGPT)",
+        "description": (
+            "Decision memory RAG, preference graph (WHY edges), multi-context persona "
+            "selection, style-consistent drafting. BONUS."
+        ),
+        "service": None,
+    },
+    {
+        "id": 8,
+        "title": "Intent Detection Layer",
+        "description": (
+            "Calendar event patterns, Orbit task creation, Memora search queries, "
+            "home presence (HA), time patterns. BONUS."
+        ),
+        "service": None,
+    },
+    {
+        "id": 9,
+        "title": "Ambient Interface",
+        "description": (
+            "Chime / two-tone / silence audio cues, focus/relax lighting modes, "
+            "house mood engine. BONUS."
+        ),
+        "service": None,
+    },
+    {
+        "id": 10,
+        "title": "AI Firewall & Data Vault",
+        "description": (
+            "Bifrost (JWT auth, rate limiting, audit log), envctl (centralised config), "
+            "Vaultwarden, per-agent access control. BONUS."
+        ),
+        "service": None,
+    },
+    {
+        "id": 11,
+        "title": "Meta-Learning System",
+        "description": (
+            "Spec retro agent (implementation vs intent), agent reputation scoring, "
+            "backlog curator, meta-learning journal. BONUS."
+        ),
+        "service": None,
+    },
+    {
+        "id": 12,
+        "title": "Autonomous Saturday Mode",
+        "description": (
+            "Cook Planner + Vacation Planner + HEMS + energy optimisation + weather API + "
+            "intent detection + ambient interface — the full vision running together."
+        ),
+        "service": None,
+    },
+]
+
+_NORTH_STAR = (
+    "Build a living cognitive substrate that turns information into knowledge, "
+    "knowledge into judgment, judgment into action, action into coherence, "
+    "and coherence into a better-lived life — across home, work, body, and meaning."
+)
+
+
+@router.get("/vision", response_model=VisionSummary)
+async def get_vision() -> VisionSummary:
+    """Return the NB9OS Home Brain vision and live status of each area."""
+    areas = []
+    online_count = 0
+    for raw in _VISION_AREAS:
+        svc = raw.get("service")
+        if svc is None:
+            status = "planned"
+        else:
+            state = _service_states.get(svc, {})
+            status = state.get("status", "unknown")
+            if status == "online":
+                online_count += 1
+
+        areas.append(VisionArea(
+            id=raw["id"],
+            title=raw["title"],
+            description=raw["description"],
+            service=svc,
+            status=status,
+        ))
+
+    return VisionSummary(
+        north_star=_NORTH_STAR,
+        areas=areas,
+        areas_total=len(areas),
+        services_online=online_count,
+    )
