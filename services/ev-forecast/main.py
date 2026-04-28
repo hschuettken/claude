@@ -92,6 +92,9 @@ class EVForecastService:
                     "energy.ev.command.set_ready_by",  # S4.2: subscribed override
                     "energy.ev.command.acknowledged",  # S4.2: published ack
                     "orchestrator.telegram.send",  # S2.5: published nightly accuracy digest
+                    "presence.user.henning.>",  # S6c: subscribed (fallback-tolerant)
+                    "presence.user.nicole.>",  # S6c: subscribed (fallback-tolerant)
+                    "energy.calendar.interpreted",  # S6a: published per high-confidence interp
                     "heartbeat.ev-forecast",
                     "orchestrator.command.ev-forecast",
                     "orchestrator.knowledge-update",
@@ -203,6 +206,9 @@ class EVForecastService:
 
         # Decision Journal — wired in start() once NATS is connected.
         self.journal: DecisionJournal | None = None
+
+        # S6a — Calendar interpreter (LLM-cached, file-persistent)
+        self.calendar_interpreter = self._build_calendar_interpreter()
 
         # Track previous mileage to compute km_delta for InfluxDB writes
         self._prev_mileage_km: float | None = None
@@ -327,6 +333,22 @@ class EVForecastService:
                 self._on_ev_command_set_ready_by,
             )
 
+            # S6c: Presence reactor — fires when Henning/Nicole left/arrived.
+            # Wildcard subscription works whether presence service is deployed
+            # or not; activates automatically once presence starts publishing.
+            try:
+                await self.nats.subscribe_json(
+                    "presence.user.henning.>",
+                    self._on_presence_event,
+                )
+                await self.nats.subscribe_json(
+                    "presence.user.nicole.>",
+                    self._on_presence_event,
+                )
+                logger.info("presence_subscriptions_attached")
+            except Exception:
+                logger.warning("presence_subscribe_failed", exc_info=True)
+
         # Initialize Google Calendar
         self._init_google_calendar()
 
@@ -356,6 +378,16 @@ class EVForecastService:
             timezone=self._tz,
             id="ev_evening_reconciliation",
         )
+        # S6b — weekly Nicole commute pattern learning, Sunday 03:00 local
+        self.scheduler.add_job(
+            self._learn_patterns,
+            "cron",
+            day_of_week="sun",
+            hour=3,
+            minute=0,
+            timezone=self._tz,
+            id="weekly_pattern_learning",
+        )
         self.scheduler.start()
 
         # Start heartbeat in a dedicated daemon thread so it can't be
@@ -381,6 +413,141 @@ class EVForecastService:
             pass
         finally:
             await self._shutdown()
+
+    # ------------------------------------------------------------------
+    # Calendar interpreter (S6a)
+    # ------------------------------------------------------------------
+
+    def _build_calendar_interpreter(self) -> CalendarInterpreter | None:
+        if not self.settings.calendar_interpreter_enabled:
+            return None
+        try:
+            return CalendarInterpreter(
+                router_url=self.settings.llm_router_url,
+                cache_path=self.settings.calendar_interpreter_cache_path,
+                model=self.settings.calendar_interpreter_model,
+                confidence_threshold=self.settings.calendar_interpreter_confidence_threshold,
+            )
+        except Exception:
+            logger.exception("calendar_interpreter_init_failed")
+            return None
+
+    async def _enrich_with_interpretations(
+        self, events: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Attach high-confidence LLM interpretations to events as `interp` key.
+
+        Cheap-tier LLM call per event, results cached by content-hash. Failures
+        are non-fatal; events without high-confidence interpretation are passed
+        through unchanged for the prefix-based parser to handle.
+        """
+        if self.calendar_interpreter is None:
+            return events
+        out: list[dict[str, Any]] = []
+        publishable_count = 0
+        for event in events:
+            try:
+                interp = await self.calendar_interpreter.interpret(event)
+            except Exception:
+                logger.warning(
+                    "interpreter_unexpected_error",
+                    event_id=event.get("id", ""),
+                    exc_info=True,
+                )
+                interp = None
+            if interp and self.calendar_interpreter.is_high_confidence(interp):
+                enriched = {**event, "interp": interp}
+                out.append(enriched)
+                publishable_count += 1
+                if self.nats and self.nats.connected:
+                    try:
+                        await self.nats.publish(
+                            "energy.calendar.interpreted",
+                            {
+                                "event_id": event.get("id", ""),
+                                "interpretation": interp,
+                            },
+                        )
+                    except Exception:
+                        logger.warning("interpretation_publish_failed", exc_info=True)
+            else:
+                out.append(event)
+        if publishable_count:
+            logger.info(
+                "calendar_events_interpreted",
+                total=len(events),
+                high_confidence=publishable_count,
+            )
+        return out
+
+    # ------------------------------------------------------------------
+    # Pattern learning + presence reactor (S6b + S6c)
+    # ------------------------------------------------------------------
+
+    async def _learn_patterns(self) -> None:
+        """Update Nicole commute defaults from rolling presence data (Sunday cron)."""
+        from patterns import nicole_commute_pattern
+
+        try:
+            pat = nicole_commute_pattern(
+                self.influx_admin,
+                bucket=self.settings.influxdb_analytics_bucket,
+            )
+            if not pat.get("learned"):
+                logger.info(
+                    "pattern_learning_insufficient_data",
+                    samples_dep=pat.get("samples_dep", 0),
+                    samples_arr=pat.get("samples_arr", 0),
+                )
+                return
+            if self.trips is not None:
+                if pat["median_departure"] is not None:
+                    self.trips._nicole_departure = pat["median_departure"]
+                if pat["median_arrival"] is not None:
+                    self.trips._nicole_arrival = pat["median_arrival"]
+            logger.info(
+                "nicole_pattern_learned",
+                median_departure=pat["median_departure"].isoformat()
+                if pat["median_departure"]
+                else None,
+                median_arrival=pat["median_arrival"].isoformat()
+                if pat["median_arrival"]
+                else None,
+                samples_dep=pat["samples_dep"],
+                samples_arr=pat["samples_arr"],
+            )
+            await self._update_plan()
+        except Exception:
+            logger.exception("pattern_learning_failed")
+
+    async def _on_presence_event(self, subject: str, payload: dict) -> None:
+        """Handle presence events — replan + journal on significant transitions."""
+        try:
+            user = (payload.get("user") or "").lower()
+            kind = (payload.get("event_kind") or "").lower()
+            if user not in ("henning", "nicole"):
+                return
+            if kind not in ("left", "arrived"):
+                return
+            logger.info("presence_event_received", user=user, kind=kind)
+            if self.journal:
+                try:
+                    await self.journal.write(
+                        decision_kind="presence_reactor_triggered",
+                        outcome=f"{user} {kind}",
+                        reason="presence event",
+                        outcome_class="hold",
+                        inputs={
+                            "user": user,
+                            "kind": kind,
+                            "ts": payload.get("timestamp"),
+                        },
+                    )
+                except Exception:
+                    logger.warning("presence_journal_write_failed", exc_info=True)
+            await self._update_plan()
+        except Exception:
+            logger.exception("presence_handler_failed")
 
     # ------------------------------------------------------------------
     # Plan-vs-actual reconciliation (S2.5)
@@ -515,6 +682,11 @@ class EVForecastService:
 
             # Get calendar events
             events = await self._get_calendar_events()
+
+            # S6a — enrich each event with LLM-derived interpretation when
+            # confidence is high. Best-effort; falls back to prefix parsing.
+            if self.calendar_interpreter is not None:
+                events = await self._enrich_with_interpretations(events)
 
             # Predict trips (async for geocoding of unknown destinations)
             day_plans = await self.trips.predict_trips(

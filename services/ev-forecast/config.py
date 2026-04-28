@@ -149,3 +149,10 @@ class EVForecastSettings(BaseSettings):
     # Admin token can write the analytics bucket; falls back to influxdb_token if empty.
     influxdb_all_access_token: str = ""
     influxdb_analytics_bucket: str = "analytics"
+
+    # --- LLM calendar interpreter (S6a) ---
+    llm_router_url: str = "http://192.168.0.50:8070"
+    calendar_interpreter_enabled: bool = True
+    calendar_interpreter_model: str = "haiku"
+    calendar_interpreter_confidence_threshold: float = 0.8
+    calendar_interpreter_cache_path: str = "/app/data/calendar_interp.json"
