@@ -43,6 +43,7 @@ from shared.influx_client import InfluxClient
 from shared.log import get_logger
 from shared.nats_client import NatsPublisher
 
+from calendar_interpreter import CalendarInterpreter  # noqa: F401  (used at runtime in _build_calendar_interpreter)
 from config import EVForecastSettings
 from learned_destinations import LearnedDestinations
 from planner import ChargingPlan, ChargingPlanner, WeeklyPlanBuilder
