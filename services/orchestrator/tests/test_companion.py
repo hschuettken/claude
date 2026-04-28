@@ -279,7 +279,17 @@ async def test_cost_tracker_record_returns_status():
 
 def test_henninggpt_has_kairos_proxy():
     """Verify HenningGPT router file contains Kairos proxy endpoint code."""
-    path = "/home/hesch/dev/projects/nb9os/services/nb9os/src/backend/app/api/henning_gpt.py"
+    import os
+
+    # Support both developer machine and CI/container environments
+    candidates = [
+        "/home/hesch/dev/projects/nb9os/services/nb9os/src/backend/app/api/henning_gpt.py",
+        "/repos/nb9os/services/nb9os/src/backend/app/api/henning_gpt.py",
+    ]
+    path = next((p for p in candidates if os.path.exists(p)), None)
+    if path is None:
+        pytest.skip("henning_gpt.py not found in any expected location")
+
     with open(path) as fh:
         content = fh.read()
     assert "kairos" in content.lower(), "henning_gpt.py must reference 'kairos'"
