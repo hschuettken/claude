@@ -103,3 +103,22 @@ class VisionSummary(BaseModel):
     areas: list[VisionArea]
     areas_total: int
     services_online: int
+
+
+# --- Family OS ---
+
+
+class FamilyVoteItem(BaseModel):
+    """A shared item (vacation, purchase, project) with per-user votes."""
+    id: str
+    title: str
+    type: str = "vacation"
+    votes: dict[str, Any] = Field(default_factory=dict)
+    alignment_score: float | None = None
+    alignment_label: str = "needs votes"
+
+
+class FamilyVoteListResponse(BaseModel):
+    items: list[FamilyVoteItem]
+    count: int
+    formula: str

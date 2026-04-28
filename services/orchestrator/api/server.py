@@ -21,7 +21,7 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
 from shared.log import get_logger
 
-from api import routes, mcp_server
+from api import routes, mcp_server, family as family_routes
 from api.auth import APIKeyMiddleware
 
 logger = get_logger("api.server")
@@ -74,6 +74,16 @@ def create_app(
         start_time=start_time,
     )
     app.include_router(routes.router)
+
+    # --- Family OS router ---
+    family_routes.configure(
+        ha=getattr(tool_executor, "ha", None),
+        gcal=getattr(tool_executor, "gcal", None),
+        orbit_tools=getattr(tool_executor, "_orbit_tools", None),
+        energy_tools=getattr(tool_executor, "_energy_tools", None),
+        settings=settings,
+    )
+    app.include_router(family_routes.router)
 
     # --- Companion router (Kairos) ---
     if companion_chat_engine is not None or companion_dispatch_manager is not None:
