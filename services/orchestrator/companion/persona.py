@@ -6,7 +6,11 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from companion.intent_detector import IntentDetector
+
 logger = logging.getLogger(__name__)
+
+_intent_detector = IntentDetector()
 
 
 def build_system_prompt(
@@ -106,6 +110,12 @@ def build_system_prompt(
             if next_event:
                 lines.append(f"- **Calendar**: {next_event}")
 
+        lines.append("")
+
+    # 3b. Detected intent context (injected between home state and user profile)
+    intent_section = _intent_detector.format_for_prompt(hot_state=hot_state)
+    if intent_section:
+        lines.append(intent_section)
         lines.append("")
 
     # 4. User profile

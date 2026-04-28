@@ -71,6 +71,7 @@ class HotStateSubscriber:
             await self.nc.subscribe(
                 "hestia.presence.updated", cb=self._handle_hestia_presence
             )
+            await self.nc.subscribe("memora.search.*", cb=self._handle_memora_search)
             logger.info("nats_subscriptions_started")
         except Exception as e:
             logger.error("nats_subscribe_failed", error=str(e))
@@ -238,6 +239,44 @@ class HotStateSubscriber:
             logger.warning("calendar_message_not_json", subject=msg.subject)
         except Exception as e:
             logger.error("handle_calendar_failed", subject=msg.subject, error=str(e))
+
+    async def _handle_memora_search(self, msg: nats.msg.Msg) -> None:
+        """Handle memora.search.* events — maintain rolling list of queries."""
+        try:
+            payload = json.loads(msg.data.decode())
+            user_id = payload.get("user_id", "default")
+            query = payload.get("query", "")
+            await self._append_memora_query(user_id, query)
+        except json.JSONDecodeError:
+            logger.warning("memora_search_message_not_json", subject=msg.subject)
+        except Exception as e:
+            logger.error("handle_memora_search_failed", subject=msg.subject, error=str(e))
+
+    async def _append_memora_query(self, user_id: str, query: str) -> None:
+        """Append a Memora search query to the rolling list (max 20, newest last)."""
+        if not self.redis_client:
+            return
+
+        key = f"kairos:hot_state:{user_id}"
+        try:
+            data = await self.redis_client.get(key)
+            state = json.loads(data) if data else {}
+
+            memora = state.get("memora", {})
+            queries: list[dict] = memora.get("recent_queries", [])
+            queries.append({
+                "query": query,
+                "at": datetime.now(timezone.utc).isoformat(),
+            })
+            queries = queries[-20:]  # keep newest 20
+
+            state["memora"] = {"recent_queries": queries}
+            state["last_updated"] = datetime.now(timezone.utc).isoformat()
+
+            await self.redis_client.setex(key, 86400, json.dumps(state))
+            logger.debug("memora_query_appended", user_id=user_id, query=query[:60])
+        except Exception as e:
+            logger.error("append_memora_query_failed", user_id=user_id, error=str(e))
 
     async def _handle_hestia_presence(self, msg: nats.msg.Msg) -> None:
         """Handle hestia.presence.updated — merge presence block into hot_state for each resident."""
