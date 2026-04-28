@@ -713,6 +713,35 @@ class PVForecastService:
                             "pv_power_w": round(pv_w, 1),
                         },
                     )
+
+                    # Live running total = inverter_daily_yield + adjusted_remaining
+                    yield_today = await self._read_daily_yield_kwh()
+                    forecast_today_total = float(forecast.today_total_kwh or 0.0)
+                    if yield_today is not None:
+                        live_total = round(yield_today + adjusted_today_remaining, 2)
+                        vs_forecast_pct = (
+                            round(100.0 * (live_total / forecast_today_total - 1.0), 1)
+                            if forecast_today_total > 0
+                            else 0.0
+                        )
+                        await self.publisher._set_state(
+                            f"{self.settings.ha_sensor_prefix}_today_total_live_kwh",
+                            str(live_total),
+                            {
+                                "unit_of_measurement": "kWh",
+                                "device_class": "energy",
+                                "friendly_name": "PV AI Forecast Today Total (Live)",
+                                "icon": "mdi:chart-line",
+                                "last_updated": now_utc.isoformat(),
+                                "yield_so_far_kwh": round(yield_today, 2),
+                                "adjusted_remaining_kwh": round(
+                                    adjusted_today_remaining, 2
+                                ),
+                                "forecast_today_kwh": round(forecast_today_total, 2),
+                                "vs_forecast_pct": vs_forecast_pct,
+                                "intra_day_ratio": round(ratio, 3),
+                            },
+                        )
                 except Exception:
                     logger.warning("ha_today_remaining_update_failed", exc_info=True)
             # Only log when ratio deviates meaningfully — avoid log spam
@@ -726,6 +755,20 @@ class PVForecastService:
                 )
         except Exception:
             logger.exception("intra_day_recalibrate_failed")
+
+    async def _read_daily_yield_kwh(self) -> float | None:
+        """Read sensor.inverter_daily_yield (today's actual PV production, kWh)."""
+        try:
+            state = await self.ha.get_state("sensor.inverter_daily_yield")
+            if state is None:
+                return None
+            raw = state.get("state", "")
+            if raw in ("unknown", "unavailable", "", None):
+                return None
+            return float(raw)
+        except Exception:
+            logger.warning("daily_yield_read_failed", exc_info=True)
+            return None
 
     async def _log_actuals_archive(self) -> None:
         """Daily 06:00 UTC: log D-2 hourly actuals from Open-Meteo's archive."""
