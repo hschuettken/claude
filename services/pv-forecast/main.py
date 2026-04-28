@@ -1061,10 +1061,12 @@ class PVForecastService:
             return
         if "unique_id" not in config:
             config["unique_id"] = f"{node_id}_{object_id}" if node_id else object_id
+        # Convention: ha.discovery.{component}.{node}.{object_id}.config
+        # Bridge translates dots → slashes so HA sees homeassistant/{component}/{node}/{object_id}/config
         if node_id:
-            subject = f"ha.discovery.{component}.{node_id}.{object_id}"
+            subject = f"ha.discovery.{component}.{node_id}.{object_id}.config"
         else:
-            subject = f"ha.discovery.{component}.{object_id}"
+            subject = f"ha.discovery.{component}.{object_id}.config"
         await self.nats.publish(subject, config)
 
     async def _register_ha_discovery(self) -> None:
