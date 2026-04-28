@@ -552,3 +552,25 @@ class TestAppEndpoints:
                 data = resp.json()
                 assert "total_agents" in data
                 assert "top_agents" in data
+
+    def test_rate_limit_returns_429(self, client):
+        import time
+        from agent_economy import main
+        # Starlette TestClient sets client host to "testclient"
+        key = "testclient"
+        now = time.monotonic()
+        from agent_economy.config import settings
+        main._rate_buckets[key] = [now] * settings.rate_limit_rpm
+        try:
+            resp = client.get("/health")
+            assert resp.status_code == 429
+            assert resp.headers.get("Retry-After") == "60"
+        finally:
+            main._rate_buckets[key] = []
+
+    def test_rate_limit_allows_normal_traffic(self, client):
+        from agent_economy import main
+        # Ensure bucket is clear so the request goes through
+        main._rate_buckets["testclient"] = []
+        resp = client.get("/health")
+        assert resp.status_code == 200

@@ -23,7 +23,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -62,6 +64,25 @@ logger = logging.getLogger(__name__)
 
 _nats = None
 _nats_sub_task: Optional[asyncio.Task] = None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# In-memory rate limiter (sliding 60-second window, per agent_id or IP)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_rate_buckets: dict[str, list[float]] = defaultdict(list)
+_rate_lock = asyncio.Lock()
+
+
+async def _is_rate_limited(key: str) -> bool:
+    """Return True if the key has exceeded rate_limit_rpm in the last 60s."""
+    now = time.monotonic()
+    cutoff = now - 60.0
+    async with _rate_lock:
+        _rate_buckets[key] = [t for t in _rate_buckets[key] if t > cutoff]
+        if len(_rate_buckets[key]) >= settings.rate_limit_rpm:
+            return True
+        _rate_buckets[key].append(now)
+        return False
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NATS helpers
@@ -218,6 +239,28 @@ async def audit_middleware(request: Request, call_next):
     except Exception:
         pass
     return response
+
+
+# Rate-limit middleware (runs before audit so 429s are cheap)
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    from fastapi.responses import JSONResponse
+    from .auth import decode_token as _dt
+
+    key = request.client.host if request.client else "unknown"
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        payload = _dt(auth_header[7:])
+        if payload and payload.get("sub"):
+            key = f"agent:{payload['sub']}"
+
+    if await _is_rate_limited(key):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded"},
+            headers={"Retry-After": "60"},
+        )
+    return await call_next(request)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
