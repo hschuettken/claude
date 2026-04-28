@@ -20,8 +20,8 @@ from typing import Any
 
 import httpx
 
-
 from shared.log import get_logger
+from shared.retry import async_retry  # noqa: F401  (used as decorator on get_solar_forecast / get_historical_weather; linter strips top-level imports referenced only in method decorators)
 
 logger = get_logger("open-meteo")
 
