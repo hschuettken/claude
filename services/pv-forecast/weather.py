@@ -20,6 +20,7 @@ from typing import Any
 
 import httpx
 
+
 from shared.log import get_logger
 
 logger = get_logger("open-meteo")
@@ -65,8 +66,20 @@ class OpenMeteoClient:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
 
+    @async_retry(
+        max_retries=4,
+        base_delay=2.0,
+        max_delay=30.0,
+        exceptions=(httpx.HTTPStatusError, httpx.RequestError),
+    )
     async def get_solar_forecast(self, forecast_days: int = 3) -> list[dict[str, Any]]:
         """Get hourly solar radiation and weather forecast.
+
+        Retries up to 4× with exponential backoff (2/4/8/16s) on Open-Meteo
+        upstream 5xx (502/503/504) and connection errors. Without retry, a
+        single 502 makes the entire hourly forecast cycle a no-op and
+        downstream consumers (HA sensor, ev-forecast greedy scheduler)
+        go stale until the next hourly cron — observed 2026-04-28.
 
         Returns a list of hourly records, each containing:
             time, shortwave_radiation, direct_radiation, diffuse_radiation,
@@ -86,10 +99,19 @@ class OpenMeteoClient:
         data = resp.json()
         return self._parse_hourly(data)
 
+    @async_retry(
+        max_retries=4,
+        base_delay=2.0,
+        max_delay=30.0,
+        exceptions=(httpx.HTTPStatusError, httpx.RequestError),
+    )
     async def get_historical_weather(
         self, start_date: str | date, end_date: str | date
     ) -> list[dict[str, Any]]:
         """Get historical hourly weather data for model training.
+
+        Same retry policy as get_solar_forecast — Open-Meteo's archive
+        endpoint shares the same upstream and is equally prone to 5xx.
 
         Args:
             start_date: Start date (YYYY-MM-DD or date object).
