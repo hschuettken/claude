@@ -91,6 +91,7 @@ class EVForecastService:
                     "energy.demand.ev",  # S3b: published for Energy Allocator
                     "energy.ev.command.set_ready_by",  # S4.2: subscribed override
                     "energy.ev.command.acknowledged",  # S4.2: published ack
+                    "orchestrator.telegram.send",  # S2.5: published nightly accuracy digest
                     "heartbeat.ev-forecast",
                     "orchestrator.command.ev-forecast",
                     "orchestrator.knowledge-update",
@@ -346,6 +347,15 @@ class EVForecastService:
             minutes=self.settings.plan_update_minutes,
             id="plan_update",
         )
+        # S2.5 — nightly plan-vs-actual reconciliation at 21:00 local time
+        self.scheduler.add_job(
+            self._reconcile_yesterday,
+            "cron",
+            hour=21,
+            minute=0,
+            timezone=self._tz,
+            id="ev_evening_reconciliation",
+        )
         self.scheduler.start()
 
         # Start heartbeat in a dedicated daemon thread so it can't be
@@ -371,6 +381,54 @@ class EVForecastService:
             pass
         finally:
             await self._shutdown()
+
+    # ------------------------------------------------------------------
+    # Plan-vs-actual reconciliation (S2.5)
+    # ------------------------------------------------------------------
+
+    async def _reconcile_yesterday(self) -> None:
+        """Reconcile predicted vs actual EV demand for yesterday and digest to Telegram."""
+        from accuracy import compute_accuracy_for_date, write_accuracy_row
+
+        try:
+            target = datetime.now(self._tz).date() - timedelta(days=1)
+            row = await compute_accuracy_for_date(
+                target,
+                self.influx_admin,
+                self.influx,
+                consumption_kwh_per_100km=self.consumption_tracker.consumption_kwh_per_100km,
+                analytics_bucket=self.settings.influxdb_analytics_bucket,
+                hass_bucket=self.settings.influxdb_bucket,
+            )
+            if row is None:
+                logger.info("reconciliation_skipped_no_data", date=target.isoformat())
+                return
+            write_accuracy_row(
+                row,
+                self.influx_admin,
+                bucket=self.settings.influxdb_analytics_bucket,
+            )
+            if self.nats and self.nats.connected:
+                text = (
+                    f"🔋 EV reconciliation {target.isoformat()}\n"
+                    f"Predicted {row.predicted_demand_kwh:.1f} kWh, "
+                    f"actual {row.actual_demand_kwh:.1f} kWh.\n"
+                    f"PV: predicted {row.predicted_pv_kwh:.1f} / actual {row.actual_pv_kwh:.1f}.\n"
+                    f"Grid: predicted {row.predicted_grid_kwh:.1f} / actual {row.actual_grid_kwh:.1f}.\n"
+                    f"MAE {row.mae_kwh:.1f} kWh, bias {row.bias_kwh:+.1f} kWh."
+                )
+                await self.nats.publish(
+                    "orchestrator.telegram.send",
+                    {"text": text, "chat": "default"},
+                )
+            logger.info(
+                "reconciliation_written",
+                date=target.isoformat(),
+                mae=row.mae_kwh,
+                bias=row.bias_kwh,
+            )
+        except Exception:
+            logger.exception("reconciliation_failed")
 
     # ------------------------------------------------------------------
     # Vehicle monitoring
