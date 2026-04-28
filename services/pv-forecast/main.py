@@ -694,6 +694,27 @@ class PVForecastService:
                 await self.nats.publish(
                     "energy.pv.forecast.adjusted", event.model_dump()
                 )
+            # Also push the adjusted today_remaining to HA so the sensor
+            # reflects clouds/recovery within 5 min instead of waiting for
+            # the hourly forecast cycle. Same sensor as the hourly publisher
+            # writes, plus an intra_day_ratio attribute for visibility.
+            if self.publisher is not None:
+                try:
+                    await self.publisher._set_state(
+                        f"{self.settings.ha_sensor_prefix}_today_remaining_kwh",
+                        str(round(adjusted_today_remaining, 2)),
+                        {
+                            "unit_of_measurement": "kWh",
+                            "device_class": "energy",
+                            "friendly_name": "PV AI Forecast Today Remaining",
+                            "icon": "mdi:solar-power-variant",
+                            "last_updated": now_utc.isoformat(),
+                            "intra_day_ratio": round(ratio, 3),
+                            "pv_power_w": round(pv_w, 1),
+                        },
+                    )
+                except Exception:
+                    logger.warning("ha_today_remaining_update_failed", exc_info=True)
             # Only log when ratio deviates meaningfully — avoid log spam
             if abs(ratio - 1.0) > 0.15:
                 logger.info(
