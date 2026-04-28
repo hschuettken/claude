@@ -244,7 +244,7 @@ async def reject_decision(
         """
         UPDATE soi_decisions
         SET status='rejected', approved_by=$1, result=$2, approved_at=NOW()
-        WHERE id=$2 AND status IN ('pending', 'approved')
+        WHERE id=$3 AND status IN ('pending', 'approved')
         RETURNING *
         """,
         rejected_by, f"rejected: {reason}", decision_id,

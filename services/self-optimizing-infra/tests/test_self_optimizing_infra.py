@@ -436,6 +436,30 @@ async def test_seed_default_rules_skips_when_populated():
 
 
 @pytest.mark.asyncio
+async def test_reject_decision_uses_correct_param_index():
+    """Regression: reject_decision must use $3 for id (not $2 which is the reason string)."""
+    from self_optimizing_infra import decision_engine as de
+    row = _make_decision_row(
+        status="rejected",
+        approved_by="human",
+        result="rejected: testing",
+        approved_at=_ts(),
+    )
+    with patch("self_optimizing_infra.decision_engine.db") as mock_db:
+        mock_db.fetchrow = AsyncMock(return_value=row)
+        d = await de.reject_decision(uuid.uuid4(), "human", "testing")
+        assert d is not None
+        assert d.status == "rejected"
+        assert d.approved_by == "human"
+        # Verify the SQL sends 3 positional params and references $3 for the id
+        call_args = mock_db.fetchrow.call_args
+        query: str = call_args[0][0]
+        params = call_args[0][1:]
+        assert "$3" in query, "WHERE id must use $3 (decision_id), not $2 (reason string)"
+        assert len(params) == 3, "Expected (rejected_by, reason, decision_id)"
+
+
+@pytest.mark.asyncio
 async def test_evaluate_rules_no_db():
     """evaluate_rules returns empty list when DB is unavailable."""
     from self_optimizing_infra import decision_engine as de
