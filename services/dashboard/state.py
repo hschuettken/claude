@@ -41,6 +41,11 @@ class DashboardState:
         self.chat_pending: bool = False
         self.chat_pending_id: str = ""
 
+        # Digital Twin
+        self.digital_twin_simulation: dict[str, Any] = {}
+        self.digital_twin_house_state: dict[str, Any] = {}
+        self.digital_twin_recommendation: dict[str, Any] = {}
+
         # Timestamps
         self.last_mqtt_update: float = 0
         self.last_ha_update: float = 0
@@ -85,6 +90,21 @@ class DashboardState:
     def update_health(self, data: dict[str, Any]) -> None:
         with self._lock:
             self.health_status = data
+            self.last_mqtt_update = time.time()
+
+    def update_digital_twin_simulation(self, data: dict[str, Any]) -> None:
+        with self._lock:
+            self.digital_twin_simulation = data
+            self.last_mqtt_update = time.time()
+
+    def update_digital_twin_house_state(self, data: dict[str, Any]) -> None:
+        with self._lock:
+            self.digital_twin_house_state = data
+            self.last_mqtt_update = time.time()
+
+    def update_digital_twin_recommendation(self, data: dict[str, Any]) -> None:
+        with self._lock:
+            self.digital_twin_recommendation = data
             self.last_mqtt_update = time.time()
 
     # ------------------------------------------------------------------

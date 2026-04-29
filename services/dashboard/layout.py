@@ -47,6 +47,7 @@ NAV_ITEMS = [
     ("/", "dashboard", "Dashboard"),
     ("/services", "dns", "Services"),
     ("/controls", "tune", "Controls"),
+    ("/digital-twin", "hub", "Digital Twin"),
     ("/chat", "chat", "Chat"),
 ]
 

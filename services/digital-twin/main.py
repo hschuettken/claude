@@ -42,6 +42,7 @@ from .models import (
     SimulationRequest,
     SCENARIO_LABELS,
 )
+from .optimizer import build_recommendation, get_latest_recommendation, run_optimizer_loop
 from .simulation import run_simulation
 from .state_ingestion import HAStateIngester, PVForecastIngester
 
@@ -137,28 +138,14 @@ async def _run_auto_simulation() -> None:
     if _ingester is None or _pv_ingester is None:
         return
     try:
-        energy = (
-            _latest_house_state.energy
-            if _latest_house_state
-            else await _ingester.fetch_energy_state()
-        )
-        pv_forecast = await _pv_ingester.fetch_24h_kwh(
-            current_pv_w=energy.pv_total_power_w
-        )
+        energy = await _get_current_energy()
+        pv_forecast = await _get_pv_forecast(energy.pv_total_power_w)
         request = SimulationRequest()
         _latest_simulation = run_simulation(
             request=request,
             energy_state=energy,
             pv_forecast_kwh=pv_forecast,
-            battery_cap_kwh=settings.battery_capacity_kwh,
-            battery_max_kw=settings.battery_max_power_kw,
-            ev_cap_kwh=settings.ev_capacity_kwh,
-            ev_min_power_kw=settings.ev_min_charge_power_kw,
-            ev_max_power_kw=settings.ev_max_charge_power_kw,
-            tariff_import_ct=settings.tariff_import_ct,
-            tariff_export_ct=settings.tariff_export_ct,
-            preheat_power_kw=settings.preheat_power_kw,
-            preheat_hours=settings.preheat_hours,
+            **_sim_kwargs(),
         )
         logger.info(
             "simulation_done scenarios=%d best_cost=%s savings_eur=%s",
@@ -187,6 +174,35 @@ async def _periodic_refresh() -> None:
         await _refresh_state()
 
 
+def _sim_kwargs() -> dict:
+    return dict(
+        battery_cap_kwh=settings.battery_capacity_kwh,
+        battery_max_kw=settings.battery_max_power_kw,
+        ev_cap_kwh=settings.ev_capacity_kwh,
+        ev_min_power_kw=settings.ev_min_charge_power_kw,
+        ev_max_power_kw=settings.ev_max_charge_power_kw,
+        tariff_import_ct=settings.tariff_import_ct,
+        tariff_export_ct=settings.tariff_export_ct,
+        preheat_power_kw=settings.preheat_power_kw,
+        preheat_hours=settings.preheat_hours,
+    )
+
+
+async def _get_current_energy() -> EnergyState:
+    if _latest_house_state:
+        return _latest_house_state.energy
+    if _ingester:
+        return await _ingester.fetch_energy_state()
+    return EnergyState()
+
+
+async def _get_pv_forecast(current_pv_w: float) -> list[float]:
+    if _pv_ingester:
+        return await _pv_ingester.fetch_24h_kwh(current_pv_w=current_pv_w)
+    from .state_ingestion import _shape_forecast
+    return _shape_forecast(5.0)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Oracle registration
 # ─────────────────────────────────────────────────────────────────────────────
@@ -211,13 +227,17 @@ async def _register_with_oracle() -> None:
             {"method": "DELETE","path": "/api/v1/rooms/{room_id}",     "purpose": "Delete a room"},
             {"method": "GET",  "path": "/api/v1/scenarios",            "purpose": "List available scenarios"},
             {"method": "POST", "path": "/api/v1/simulate",             "purpose": "Run scenario simulation"},
-            {"method": "GET",  "path": "/api/v1/simulate/latest",      "purpose": "Latest simulation report"},
+            {"method": "GET",  "path": "/api/v1/simulate/latest",              "purpose": "Latest simulation report"},
+            {"method": "GET",  "path": "/api/v1/optimize/recommendation",       "purpose": "Latest auto-optimization recommendation"},
+            {"method": "POST", "path": "/api/v1/optimize/apply/{scenario_id}",  "purpose": "Apply and confirm a recommendation"},
         ],
         "nats_subjects": [
-            {"subject": "digital.twin.state.updated",         "direction": "publish",   "purpose": "New HouseState snapshot"},
-            {"subject": "digital.twin.simulation.done",       "direction": "publish",   "purpose": "New SimulationReport"},
-            {"subject": "orchestrator.command.digital-twin",  "direction": "subscribe", "purpose": "refresh / simulate commands"},
-            {"subject": "energy.pv.forecast_updated",         "direction": "subscribe", "purpose": "Re-trigger simulation on new PV forecast"},
+            {"subject": "digital.twin.state.updated",           "direction": "publish",   "purpose": "New HouseState snapshot"},
+            {"subject": "digital.twin.simulation.done",         "direction": "publish",   "purpose": "New SimulationReport"},
+            {"subject": "digital.twin.recommendation",          "direction": "publish",   "purpose": "Auto-optimization recommendation (hourly)"},
+            {"subject": "digital.twin.recommendation.approved", "direction": "publish",   "purpose": "Approved recommendation — services should act"},
+            {"subject": "orchestrator.command.digital-twin",    "direction": "subscribe", "purpose": "refresh / simulate commands"},
+            {"subject": "energy.pv.forecast_updated",           "direction": "subscribe", "purpose": "Re-trigger simulation on new PV forecast"},
         ],
         "source_paths": [{"repo": "claude", "paths": ["services/digital-twin/"]}],
     }
@@ -250,6 +270,14 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_refresh_state())
     asyncio.create_task(_run_auto_simulation())
     asyncio.create_task(_periodic_refresh())
+    asyncio.create_task(
+        run_optimizer_loop(
+            get_energy_state=_get_current_energy,
+            get_pv_forecast=_get_pv_forecast,
+            publish=_nats_publish,
+            **_sim_kwargs(),
+        )
+    )
 
     # Oracle
     asyncio.create_task(_register_with_oracle())
@@ -384,15 +412,7 @@ async def simulate(request: SimulationRequest):
         request=request,
         energy_state=energy,
         pv_forecast_kwh=pv_forecast,
-        battery_cap_kwh=settings.battery_capacity_kwh,
-        battery_max_kw=settings.battery_max_power_kw,
-        ev_cap_kwh=settings.ev_capacity_kwh,
-        ev_min_power_kw=settings.ev_min_charge_power_kw,
-        ev_max_power_kw=settings.ev_max_charge_power_kw,
-        tariff_import_ct=settings.tariff_import_ct,
-        tariff_export_ct=settings.tariff_export_ct,
-        preheat_power_kw=settings.preheat_power_kw,
-        preheat_hours=settings.preheat_hours,
+        **_sim_kwargs(),
     )
 
     # Cache result
@@ -406,6 +426,39 @@ async def get_latest_simulation():
     if _latest_simulation is None:
         raise HTTPException(status_code=404, detail="No simulation has run yet")
     return _latest_simulation
+
+
+# --- Optimization ---
+
+@app.get("/api/v1/optimize/recommendation")
+async def get_recommendation():
+    """Return the latest auto-optimization recommendation, or 404 if none available."""
+    rec = get_latest_recommendation()
+    if rec is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No recommendation available — optimizer has not yet found a better scenario",
+        )
+    return rec.to_dict()
+
+
+@app.post("/api/v1/optimize/apply/{scenario_id}", status_code=202)
+async def apply_recommendation(scenario_id: str):
+    """Accept a recommendation and trigger the corresponding actions via NATS."""
+    rec = get_latest_recommendation()
+    if rec is None:
+        raise HTTPException(status_code=404, detail="No pending recommendation")
+    if rec.scenario_id != scenario_id.upper():
+        raise HTTPException(
+            status_code=409,
+            detail=f"Pending recommendation is for scenario {rec.scenario_id}, not {scenario_id}",
+        )
+    await _nats_publish(
+        "digital.twin.recommendation.approved",
+        {"scenario_id": scenario_id.upper(), "actions": rec.actions},
+    )
+    logger.info("recommendation_applied scenario=%s", scenario_id)
+    return {"status": "accepted", "scenario_id": scenario_id.upper()}
 
 
 if __name__ == "__main__":

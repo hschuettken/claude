@@ -216,3 +216,79 @@ class TestRoomsEndpoints:
     def test_get_nonexistent_room_returns_404(self, client):
         resp = client.get("/api/v1/rooms/nonexistent_xyz")
         assert resp.status_code == 404
+
+
+class TestOptimizationEndpoints:
+    @pytest.fixture
+    def client(self):
+        from digital_twin.main import app
+        with TestClient(app, raise_server_exceptions=True) as c:
+            yield c
+
+    def test_recommendation_404_when_none(self, client):
+        """No pending recommendation → 404."""
+        import digital_twin.optimizer as opt
+        opt._latest_recommendation = None
+        resp = client.get("/api/v1/optimize/recommendation")
+        assert resp.status_code == 404
+
+    def test_recommendation_returns_pending(self, client):
+        """When a recommendation exists, endpoint returns it."""
+        from digital_twin.optimizer import Recommendation
+        import digital_twin.optimizer as opt
+        opt._latest_recommendation = Recommendation(
+            scenario_id="C",
+            scenario_name="EV PV-Only",
+            savings_eur=0.20,
+            best_sufficiency_pct=70.0,
+            baseline_cost_eur=1.00,
+            best_cost_eur=0.80,
+            actions=[],
+        )
+        resp = client.get("/api/v1/optimize/recommendation")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["scenario_id"] == "C"
+        assert data["savings_eur"] == pytest.approx(0.20)
+        opt._latest_recommendation = None
+
+    def test_apply_recommendation_202(self, client):
+        """Applying the current recommendation returns 202."""
+        from digital_twin.optimizer import Recommendation
+        import digital_twin.optimizer as opt
+        opt._latest_recommendation = Recommendation(
+            scenario_id="B",
+            scenario_name="Aggressive Battery",
+            savings_eur=0.15,
+            best_sufficiency_pct=80.0,
+            baseline_cost_eur=1.00,
+            best_cost_eur=0.85,
+            actions=[],
+        )
+        resp = client.post("/api/v1/optimize/apply/B")
+        assert resp.status_code == 202
+        assert resp.json()["scenario_id"] == "B"
+        opt._latest_recommendation = None
+
+    def test_apply_wrong_scenario_returns_409(self, client):
+        """Applying a different scenario than pending returns 409."""
+        from digital_twin.optimizer import Recommendation
+        import digital_twin.optimizer as opt
+        opt._latest_recommendation = Recommendation(
+            scenario_id="C",
+            scenario_name="EV PV-Only",
+            savings_eur=0.20,
+            best_sufficiency_pct=70.0,
+            baseline_cost_eur=1.00,
+            best_cost_eur=0.80,
+            actions=[],
+        )
+        resp = client.post("/api/v1/optimize/apply/B")
+        assert resp.status_code == 409
+        opt._latest_recommendation = None
+
+    def test_apply_no_recommendation_returns_404(self, client):
+        import digital_twin.optimizer as opt
+        opt._latest_recommendation = None
+        resp = client.post("/api/v1/optimize/apply/A")
+        assert resp.status_code == 404

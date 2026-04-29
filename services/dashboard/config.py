@@ -45,3 +45,6 @@ class DashboardSettings(BaseSettings):
     # --- Update intervals (seconds) ---
     ha_poll_interval: int = 10
     ui_refresh_interval: int = 3
+
+    # --- Digital Twin API ---
+    digital_twin_url: str = "http://digital-twin:8238"

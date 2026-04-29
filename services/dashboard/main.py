@@ -13,6 +13,7 @@ import asyncio
 import time
 from typing import Any
 
+import httpx
 from nicegui import app, ui
 
 from shared.ha_client import HomeAssistantClient
@@ -82,6 +83,21 @@ async def _on_chat_response_nats(subject: str, payload: dict[str, Any]) -> None:
     if response:
         state.receive_chat_response(request_id, response)
         logger.info("chat_response_received", request_id=request_id)
+
+
+async def _on_dt_simulation_nats(subject: str, payload: dict[str, Any]) -> None:
+    state.update_digital_twin_simulation(payload)
+    logger.debug("digital_twin_simulation_updated")
+
+
+async def _on_dt_state_nats(subject: str, payload: dict[str, Any]) -> None:
+    state.update_digital_twin_house_state(payload)
+    logger.debug("digital_twin_state_updated")
+
+
+async def _on_dt_recommendation_nats(subject: str, payload: dict[str, Any]) -> None:
+    state.update_digital_twin_recommendation(payload)
+    logger.info("digital_twin_recommendation_received", scenario=payload.get("scenario_id"))
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +206,11 @@ async def _register_with_oracle() -> None:
                     "path": "/chat",
                     "purpose": "Chat with orchestrator page",
                 },
+                {
+                    "method": "GET",
+                    "path": "/digital-twin",
+                    "purpose": "Digital Twin scenario comparison + thermal map page",
+                },
             ],
             "nats_subjects": [
                 "heartbeat.dashboard",
@@ -201,6 +222,9 @@ async def _register_with_oracle() -> None:
                 "services.orchestrator.activity",
                 "services.health-monitor.status",
                 "services.dashboard.chat_response",
+                "digital.twin.simulation.done",
+                "digital.twin.state.updated",
+                "digital.twin.recommendation",
             ],
             "source_paths": [
                 {"repo": "claude", "paths": ["services/dashboard/"]},
@@ -283,6 +307,9 @@ async def on_startup() -> None:
     await nats.subscribe_json(
         "services.dashboard.chat_response", _on_chat_response_nats
     )
+    await nats.subscribe_json("digital.twin.simulation.done", _on_dt_simulation_nats)
+    await nats.subscribe_json("digital.twin.state.updated", _on_dt_state_nats)
+    await nats.subscribe_json("digital.twin.recommendation", _on_dt_recommendation_nats)
 
     await _register_ha_discovery()
     asyncio.create_task(_ha_poll_loop())
@@ -322,12 +349,14 @@ def health_endpoint() -> dict[str, str]:
 
 import page_chat  # noqa: E402
 import page_controls  # noqa: E402
+import page_digital_twin  # noqa: E402
 import page_home  # noqa: E402
 import page_services  # noqa: E402
 
 page_home.setup(state, settings)
 page_services.setup(state, settings)
 page_controls.setup(state, settings, ha, nats)
+page_digital_twin.setup(state, settings)
 page_chat.setup(state, settings, nats)
 
 # ---------------------------------------------------------------------------
