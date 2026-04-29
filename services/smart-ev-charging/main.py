@@ -34,6 +34,7 @@ from strategy import (
     ChargeMode,
     ChargingContext,
     ChargingDecision,
+    ChargingSlot,  # noqa: F401  (used at runtime in _publish_charging_timeline; linter strips it)
     ChargingStrategy,
 )
 
