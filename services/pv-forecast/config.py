@@ -33,7 +33,7 @@ class PVForecastSettings(BaseSettings):
     # --- Model ---
     model_min_days: int = 14  # Minimum days of data before ML model is used
     model_retrain_hour: int = 1  # Hour of day (UTC) to retrain
-    forecast_update_minutes: int = 60  # How often to update forecast (minutes)
+    forecast_update_minutes: int = 10  # How often to re-run the full model forecast (Open-Meteo + ML inference). Was 60 — bumped 2026-04-29 so Total Estimated reacts to upstream weather updates faster. Open-Meteo free tier (10k calls/day) easily absorbs 6/h.
     model_dir: str = "/app/data/models"  # Where to persist trained models
 
     # --- ML hyperparameters (Gradient Boosting) ---
