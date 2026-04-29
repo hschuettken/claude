@@ -48,3 +48,6 @@ class DashboardSettings(BaseSettings):
 
     # --- Digital Twin API ---
     digital_twin_url: str = "http://digital-twin:8238"
+
+    # --- Life Navigation API ---
+    life_nav_url: str = "http://life-nav:8243"
