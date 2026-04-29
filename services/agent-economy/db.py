@@ -1,6 +1,7 @@
 """Async PostgreSQL connection pool — graceful no-op when DB unavailable."""
 from __future__ import annotations
 
+import json as _json
 import logging
 import pathlib
 from typing import Any, Optional
@@ -18,6 +19,16 @@ from .config import settings
 _pool: Optional[Any] = None
 
 
+async def _init_conn(conn: Any) -> None:
+    """Register JSONB codec so Python dicts are accepted as JSONB parameters."""
+    await conn.set_type_codec(
+        "jsonb",
+        encoder=_json.dumps,
+        decoder=_json.loads,
+        schema="pg_catalog",
+    )
+
+
 async def init_pool() -> None:
     global _pool
     if not _ASYNCPG_AVAILABLE:
@@ -27,7 +38,7 @@ async def init_pool() -> None:
         logger.info("AGENT_ECONOMY_DB_URL not set — running without persistent storage")
         return
     try:
-        _pool = await asyncpg.create_pool(settings.db_url, min_size=2, max_size=10)
+        _pool = await asyncpg.create_pool(settings.db_url, min_size=2, max_size=10, init=_init_conn)
         logger.info("agent_economy db_pool_created dsn=%s", settings.db_url.split("@")[-1])
         await _run_migrations()
     except Exception as exc:

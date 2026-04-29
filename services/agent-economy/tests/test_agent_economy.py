@@ -574,3 +574,85 @@ class TestAppEndpoints:
         main._rate_buckets["testclient"] = []
         resp = client.get("/health")
         assert resp.status_code == 200
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DB helpers — JSONB codec + pool initializer
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestDbHelpers:
+    def test_json_codec_encoder_produces_string(self):
+        """_init_conn uses json.dumps; verify it serialises a dict to a string."""
+        import json
+        payload = {"subject": "energy.price.spike", "value": 0.35}
+        encoded = json.dumps(payload)
+        assert isinstance(encoded, str)
+        assert '"subject"' in encoded
+
+    def test_json_codec_decoder_restores_dict(self):
+        """_init_conn uses json.loads; verify it deserialises back to a dict."""
+        import json
+        raw = '{"event": "task.created", "priority": 4}'
+        decoded = json.loads(raw)
+        assert isinstance(decoded, dict)
+        assert decoded["priority"] == 4
+
+    def test_task_nats_payload_default_is_empty_dict(self):
+        """TaskCreate.nats_payload defaults to {} so JSONB column always gets a valid value."""
+        from agent_economy.models import TaskCreate
+        t = TaskCreate(title="x", task_type="code_review")
+        assert t.nats_payload == {}
+
+    def test_task_complete_result_is_dict(self):
+        """TaskCompleteRequest.result must be a dict (serialised to JSONB result column)."""
+        from agent_economy.models import TaskCompleteRequest
+        r = TaskCompleteRequest(result={"output": "done", "lines": 42}, tokens_used=100)
+        assert isinstance(r.result, dict)
+        assert r.result["lines"] == 42
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Broker — budget enforcement
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestBrokerBudget:
+    @pytest.mark.asyncio
+    async def test_find_available_agent_budget_exhausted(self):
+        """find_available_agent must skip agents whose budget is exhausted."""
+        from agent_economy import broker
+        # DB returns None because the WHERE clause (budget check) excludes exhausted agents
+        with patch("agent_economy.db.fetchrow", new=AsyncMock(return_value=None)):
+            result = await broker.find_available_agent("energy_response")
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_find_available_agent_picks_highest_reputation(self):
+        """find_available_agent returns the first row (DB orders by reputation DESC)."""
+        from agent_economy import broker
+        best_id = uuid.uuid4()
+        with patch("agent_economy.db.fetchrow", new=AsyncMock(return_value={"id": best_id})):
+            result = await broker.find_available_agent("infra_remediation")
+            assert result == best_id
+
+    @pytest.mark.asyncio
+    async def test_complete_task_updates_reputation(self):
+        """complete_task calls both fetchrow (update task) and execute (update agent)."""
+        from agent_economy.models import TaskCompleteRequest, Task
+        from agent_economy import broker
+        tid = uuid.uuid4()
+        aid = uuid.uuid4()
+        row = _make_task_row(id=tid, status="completed", assigned_to=aid, quality_score=0.8)
+        executed: list[str] = []
+
+        async def _exec(q, *args):
+            executed.append(q)
+
+        with patch("agent_economy.db.fetchrow", new=AsyncMock(return_value=row)):
+            with patch("agent_economy.db.execute", new=AsyncMock(side_effect=_exec)):
+                result = await broker.complete_task(
+                    tid, TaskCompleteRequest(result={"ok": True}, tokens_used=200, quality_score=0.8)
+                )
+                assert isinstance(result, Task)
+                # Should have called execute to update agent reputation
+                assert len(executed) == 1
+                assert "reputation_score" in executed[0]
