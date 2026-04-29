@@ -55,3 +55,6 @@ class DashboardSettings(BaseSettings):
     # --- Orchestrator API (Family OS, direct HTTP) ---
     orchestrator_url: str = "http://orchestrator:8100"
     orchestrator_api_key: str = ""
+
+    # --- Cognitive Layer API ---
+    cognitive_layer_url: str = "http://cognitive-layer:8230"

@@ -348,6 +348,7 @@ def health_endpoint() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 import page_chat  # noqa: E402
+import page_cognitive  # noqa: E402
 import page_controls  # noqa: E402
 import page_digital_twin  # noqa: E402
 import page_family  # noqa: E402
@@ -361,6 +362,7 @@ page_controls.setup(state, settings, ha, nats)
 page_digital_twin.setup(state, settings)
 page_life_nav.setup(state, settings)
 page_family.setup(state, settings)
+page_cognitive.setup(state, settings)
 page_chat.setup(state, settings, nats)
 
 # ---------------------------------------------------------------------------
