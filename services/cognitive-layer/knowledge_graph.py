@@ -12,6 +12,15 @@ from typing import Any, Optional
 from . import db
 from .models import Edge, EdgeCreate, GraphNeighbours, Node, NodeCreate, NodeUpdate
 
+# Optional NATS publisher — set by main.py after NATS connects.
+# When present, `cognitive.node.created` is published on every new/upserted node.
+_nats_publisher: Any = None
+
+
+def set_nats(publisher: Any) -> None:
+    global _nats_publisher
+    _nats_publisher = publisher
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Node operations
@@ -36,7 +45,16 @@ async def create_node(data: NodeCreate) -> Optional[Node]:
         data.source,
         data.source_id,
     )
-    return _row_to_node(row) if row else None
+    node = _row_to_node(row) if row else None
+    if node is not None and _nats_publisher is not None:
+        try:
+            await _nats_publisher.publish(
+                "cognitive.node.created",
+                {"id": str(node.id), "type": node.node_type, "label": node.label},
+            )
+        except Exception:
+            pass  # NATS publish failure must never break KG writes
+    return node
 
 
 async def get_node(node_id: uuid.UUID) -> Optional[Node]:

@@ -564,3 +564,331 @@ class TestConfig:
         assert s.port == 8230
         assert s.llm_model == "qwen2.5:3b"
         assert s.open_threads_weight + s.overdue_tasks_weight + s.unprocessed_events_weight == 1.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Calendar Ingestion
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestCalendarIngestion:
+    @pytest.mark.asyncio
+    async def test_ingest_calendar_events(self):
+        """Calendar events → calendar_event and meeting nodes."""
+        from cognitive_layer.ingestion.calendar import ingest_calendar
+
+        mock_events = [
+            {
+                "id": "ev-solo",
+                "summary": "Focus: architecture",
+                "start": {"dateTime": "2026-04-27T10:00:00Z"},
+                "end": {"dateTime": "2026-04-27T11:00:00Z"},
+                "attendees": [],
+            },
+            {
+                "id": "ev-meeting",
+                "summary": "Sprint review",
+                "start": {"dateTime": "2026-04-27T14:00:00Z"},
+                "end": {"dateTime": "2026-04-27T15:00:00Z"},
+                "attendees": [{"email": "a@x.de"}, {"email": "b@x.de"}],
+            },
+        ]
+
+        with patch("cognitive_layer.ingestion.calendar.httpx.AsyncClient") as mock_cls, \
+             patch("cognitive_layer.ingestion.calendar.kg") as mock_kg:
+
+            solo_node = MagicMock(); solo_node.id = uuid.uuid4()
+            meeting_node = MagicMock(); meeting_node.id = uuid.uuid4()
+            mock_kg.create_node = AsyncMock(side_effect=[solo_node, meeting_node])
+            mock_kg.create_edge = AsyncMock(return_value=MagicMock())
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json = MagicMock(return_value=mock_events)
+            mock_resp.raise_for_status = MagicMock()
+
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_resp)
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await ingest_calendar(days_ahead=7, days_behind=7)
+
+        assert result.source == "calendar"
+        assert result.nodes_created == 2
+        # Events share the same day → one RELATES_TO edge
+        assert result.edges_created == 1
+
+    @pytest.mark.asyncio
+    async def test_ingest_calendar_proxy_404(self):
+        """When the Orbit proxy returns 404, ingestion completes with 0 nodes."""
+        from cognitive_layer.ingestion.calendar import ingest_calendar
+
+        with patch("cognitive_layer.ingestion.calendar.httpx.AsyncClient") as mock_cls, \
+             patch("cognitive_layer.ingestion.calendar.kg"):
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 404
+
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_resp)
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await ingest_calendar()
+
+        assert result.nodes_created == 0
+        assert result.errors == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Orbit Ingestion
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestOrbitIngestion:
+    @pytest.mark.asyncio
+    async def test_ingest_orbit_tasks_and_goals(self):
+        """Tasks linked to goals → PART_OF edges."""
+        from cognitive_layer.ingestion.orbit import ingest_orbit
+
+        goal_id = str(uuid.uuid4())
+        mock_tasks = [
+            {"id": "t1", "title": "Write tests", "status": "completed", "goal_id": goal_id},
+        ]
+        mock_goals = [
+            {"id": goal_id, "title": "Ship cognitive layer", "status": "active", "progress": 60},
+        ]
+
+        with patch("cognitive_layer.ingestion.orbit.httpx.AsyncClient") as mock_cls, \
+             patch("cognitive_layer.ingestion.orbit.kg") as mock_kg:
+
+            goal_node = MagicMock(); goal_node.id = uuid.uuid4()
+            task_node = MagicMock(); task_node.id = uuid.uuid4()
+            mock_kg.create_node = AsyncMock(side_effect=[goal_node, task_node])
+            mock_kg.create_edge = AsyncMock(return_value=MagicMock())
+
+            def _mock_resp(data):
+                r = MagicMock()
+                r.status_code = 200
+                r.json = MagicMock(return_value=data)
+                r.raise_for_status = MagicMock()
+                return r
+
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=[
+                _mock_resp(mock_tasks),  # tasks endpoint
+                _mock_resp(mock_goals),  # goals endpoint
+            ])
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await ingest_orbit(days=7)
+
+        assert result.source == "orbit"
+        assert result.nodes_created == 2   # 1 goal + 1 task
+        assert result.edges_created == 1   # task → goal
+
+    @pytest.mark.asyncio
+    async def test_ingest_orbit_api_unavailable(self):
+        """When Orbit API fails, IngestResult carries an error."""
+        from cognitive_layer.ingestion.orbit import ingest_orbit
+
+        with patch("cognitive_layer.ingestion.orbit.httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=Exception("connection refused"))
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await ingest_orbit()
+
+        assert len(result.errors) > 0
+        assert result.nodes_created == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reflection (weekly / monthly)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestReflectionExtended:
+    @pytest.mark.asyncio
+    async def test_weekly_reflection_no_db(self):
+        import cognitive_layer.db as db_module
+        import cognitive_layer.reflection as refl
+        orig = db_module._pool
+        db_module._pool = None
+        try:
+            with patch("cognitive_layer.reflection.httpx.AsyncClient") as mock_http:
+                mock_http.side_effect = Exception("no LLM")
+                report = await refl.get_or_generate_weekly()
+            assert report.period_type == "weekly"
+            assert len(report.content) > 0
+        finally:
+            db_module._pool = orig
+
+    @pytest.mark.asyncio
+    async def test_monthly_reflection_no_db(self):
+        import cognitive_layer.db as db_module
+        import cognitive_layer.reflection as refl
+        orig = db_module._pool
+        db_module._pool = None
+        try:
+            with patch("cognitive_layer.reflection.httpx.AsyncClient") as mock_http:
+                mock_http.side_effect = Exception("no LLM")
+                report = await refl.get_or_generate_monthly(2026, 4)
+            assert report.period_type == "monthly"
+            assert report.period_start.month == 4
+        finally:
+            db_module._pool = orig
+
+    @pytest.mark.asyncio
+    async def test_list_reports_no_db(self):
+        import cognitive_layer.db as db_module
+        import cognitive_layer.reflection as refl
+        orig = db_module._pool
+        db_module._pool = None
+        try:
+            reports = await refl.list_reports(period_type="daily")
+            assert reports == []
+        finally:
+            db_module._pool = orig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scheduler
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestScheduler:
+    @pytest.mark.asyncio
+    async def test_scheduler_fires_briefing_at_06(self):
+        """At 06:00 the scheduler should spawn a briefing task."""
+        from cognitive_layer.scheduler import CognitiveScheduler
+        from datetime import datetime
+
+        sched = CognitiveScheduler()
+        fired_jobs: list[str] = []
+
+        async def fake_run(job_key: str) -> None:
+            fired_jobs.append(job_key)
+
+        sched._run = fake_run  # type: ignore[method-assign]
+
+        with patch("cognitive_layer.scheduler.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 27, 6, 0, 0)
+            await sched._tick()
+        # Yield to the event loop so create_task coroutines execute
+        await asyncio.sleep(0)
+
+        assert "briefing" in fired_jobs
+
+    @pytest.mark.asyncio
+    async def test_scheduler_does_not_double_fire(self):
+        """Same job does not fire twice within the same minute."""
+        from cognitive_layer.scheduler import CognitiveScheduler
+        from datetime import datetime
+
+        sched = CognitiveScheduler()
+        fired_jobs: list[str] = []
+
+        async def fake_run(job_key: str) -> None:
+            fired_jobs.append(job_key)
+
+        sched._run = fake_run  # type: ignore[method-assign]
+
+        with patch("cognitive_layer.scheduler.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 27, 6, 0, 0)
+            await sched._tick()
+            await sched._tick()  # second call same minute
+        await asyncio.sleep(0)
+
+        assert fired_jobs.count("briefing") == 1
+
+    @pytest.mark.asyncio
+    async def test_scheduler_fires_weekly_on_monday(self):
+        from cognitive_layer.scheduler import CognitiveScheduler
+        from datetime import datetime  # 2026-04-27 is a Monday
+
+        sched = CognitiveScheduler()
+        fired_jobs: list[str] = []
+
+        async def fake_run(job_key: str) -> None:
+            fired_jobs.append(job_key)
+
+        sched._run = fake_run  # type: ignore[method-assign]
+
+        with patch("cognitive_layer.scheduler.datetime") as mock_dt:
+            monday = datetime(2026, 4, 27, 7, 0, 0)  # weekday() == 0
+            mock_dt.now.return_value = monday
+            await sched._tick()
+        await asyncio.sleep(0)
+
+        assert "weekly_reflection" in fired_jobs
+
+    @pytest.mark.asyncio
+    async def test_scheduler_fires_monthly_on_1st(self):
+        from cognitive_layer.scheduler import CognitiveScheduler
+        from datetime import datetime  # 2026-04-01 is a Wednesday
+
+        sched = CognitiveScheduler()
+        fired_jobs: list[str] = []
+
+        async def fake_run(job_key: str) -> None:
+            fired_jobs.append(job_key)
+
+        sched._run = fake_run  # type: ignore[method-assign]
+
+        with patch("cognitive_layer.scheduler.datetime") as mock_dt:
+            first = datetime(2026, 4, 1, 7, 0, 0)
+            mock_dt.now.return_value = first
+            await sched._tick()
+        await asyncio.sleep(0)
+
+        assert "monthly_reflection" in fired_jobs
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NATS publish on node create
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestNatsPublishOnNodeCreate:
+    @pytest.mark.asyncio
+    async def test_nats_publish_called_on_create(self):
+        """When a NATS publisher is wired, cognitive.node.created is published."""
+        from cognitive_layer.models import NodeCreate
+        import cognitive_layer.knowledge_graph as kg_mod
+
+        row = _make_node_row(node_type="concept", label="test-nats")
+        mock_nats = AsyncMock()
+        mock_nats.publish = AsyncMock()
+
+        original = kg_mod._nats_publisher
+        kg_mod._nats_publisher = mock_nats
+        try:
+            with patch("cognitive_layer.knowledge_graph.db") as mock_db:
+                mock_db.fetchrow = AsyncMock(return_value=row)
+                node = await kg_mod.create_node(NodeCreate(node_type="concept", label="test-nats"))
+            assert node is not None
+            mock_nats.publish.assert_awaited_once()
+            call_args = mock_nats.publish.call_args
+            assert call_args[0][0] == "cognitive.node.created"
+            assert call_args[0][1]["type"] == "concept"
+        finally:
+            kg_mod._nats_publisher = original
+
+    @pytest.mark.asyncio
+    async def test_nats_failure_does_not_break_create(self):
+        """NATS publish failure must not raise — KG write must still succeed."""
+        from cognitive_layer.models import NodeCreate
+        import cognitive_layer.knowledge_graph as kg_mod
+
+        row = _make_node_row(node_type="chat", label="resilience-test")
+        mock_nats = AsyncMock()
+        mock_nats.publish = AsyncMock(side_effect=Exception("NATS down"))
+
+        original = kg_mod._nats_publisher
+        kg_mod._nats_publisher = mock_nats
+        try:
+            with patch("cognitive_layer.knowledge_graph.db") as mock_db:
+                mock_db.fetchrow = AsyncMock(return_value=row)
+                node = await kg_mod.create_node(NodeCreate(node_type="chat", label="resilience-test"))
+            assert node is not None  # node returned despite NATS error
+        finally:
+            kg_mod._nats_publisher = original

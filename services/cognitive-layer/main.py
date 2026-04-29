@@ -45,12 +45,14 @@ from . import knowledge_graph as kg
 from . import continuity, cognitive_load, briefing, reflection
 from .ingestion import git_activity, calendar as cal_ingest, orbit as orbit_ingest
 from .ingestion.ha_events import HaEventsIngester
+from .scheduler import CognitiveScheduler
 
 logging.basicConfig(level=settings.log_level)
 logger = logging.getLogger(__name__)
 
 _ha_ingester: Optional[HaEventsIngester] = None
 _nats = None
+_scheduler = CognitiveScheduler()
 
 
 @asynccontextmanager
@@ -59,21 +61,24 @@ async def lifespan(app: FastAPI):
 
     await db.init_pool()
 
-    # NATS connection for HA event ingestion
+    # NATS connection for HA event ingestion and node-created events
     try:
         from shared.nats_client import NatsPublisher  # type: ignore[import]
         _nats = NatsPublisher(url=settings.nats_url)
         await _nats.connect()
+        kg.set_nats(_nats)
         _ha_ingester = HaEventsIngester(_nats)
         await _ha_ingester.start()
     except Exception as exc:
         logger.warning("nats_unavailable error=%s — HA event ingestion disabled", exc)
 
+    _scheduler.start()
     asyncio.create_task(_register_with_oracle())
 
     logger.info("cognitive_layer_started port=%d", settings.port)
     yield
 
+    await _scheduler.stop()
     if _nats is not None:
         await _nats.close()
     await db.close_pool()
