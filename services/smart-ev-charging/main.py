@@ -1400,7 +1400,7 @@ class SmartEVChargingService(BaseService):
         if total_kwh < 0.01:
             return
         try:
-            self.influx.write_point(
+            self._influx_admin.write_point(
                 bucket="ev_analytics",
                 measurement="ev_session_cost",
                 fields={
@@ -1735,7 +1735,7 @@ class SmartEVChargingService(BaseService):
     ) -> None:
         """Write EV charging session to InfluxDB for analytics."""
         try:
-            self.influx.write_point(
+            self._influx_admin.write_point(
                 bucket="ev_analytics",
                 measurement="ev_charging_session",
                 fields={
@@ -1785,7 +1785,7 @@ class SmartEVChargingService(BaseService):
     ) -> None:
         """Write control decision to InfluxDB (every ~5 min)."""
         try:
-            self.influx.write_point(
+            self._influx_admin.write_point(
                 bucket="ev_analytics",
                 measurement="ev_control_decision",
                 fields={
