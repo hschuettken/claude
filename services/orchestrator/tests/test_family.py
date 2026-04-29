@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from datetime import date
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -212,7 +213,7 @@ async def test_nicole_view_has_date(app_client):
     with patch("api.family._fetch_todays_meals", new=AsyncMock(return_value={})):
         resp = app_client.get("/api/v1/family/nicole")
     data = resp.json()
-    assert data["date"] == "2026-04-28"  # current test date
+    assert data["date"] == date.today().isoformat()
 
 
 @pytest.mark.asyncio

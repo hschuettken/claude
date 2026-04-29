@@ -51,3 +51,7 @@ class DashboardSettings(BaseSettings):
 
     # --- Life Navigation API ---
     life_nav_url: str = "http://life-nav:8243"
+
+    # --- Orchestrator API (Family OS, direct HTTP) ---
+    orchestrator_url: str = "http://orchestrator:8100"
+    orchestrator_api_key: str = ""

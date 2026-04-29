@@ -49,6 +49,7 @@ NAV_ITEMS = [
     ("/controls", "tune", "Controls"),
     ("/digital-twin", "hub", "Digital Twin"),
     ("/life-nav", "explore", "Life"),
+    ("/family", "family_restroom", "Family"),
     ("/chat", "chat", "Chat"),
 ]
 
