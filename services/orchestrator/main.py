@@ -412,6 +412,28 @@ class OrchestratorService(BaseService):
             )
             self.logger.info("companion_router_wired")
 
+            # HenningGPT — Personal AI Model (FR #42)
+            from companion.decision_memory import DecisionMemory
+            from companion.preference_graph import PreferenceGraph
+            from companion.learning import LearningLoop
+            from companion.delegation import DelegationEngine
+            from companion.henninggpt_router import init_henninggpt_router
+
+            henning_decision_memory = DecisionMemory(pool=companion_pool)
+            henning_preference_graph = PreferenceGraph(pool=companion_pool)
+            henning_learning_loop = LearningLoop(
+                pool=companion_pool,
+                preference_graph=henning_preference_graph,
+            )
+            henning_delegation_engine = DelegationEngine()
+            init_henninggpt_router(
+                decision_memory=henning_decision_memory,
+                preference_graph=henning_preference_graph,
+                learning_loop=henning_learning_loop,
+                delegation_engine=henning_delegation_engine,
+            )
+            self.logger.info("henninggpt_router_wired")
+
         except Exception as exc:
             self.logger.warning("companion_init_failed", error=str(exc))
 

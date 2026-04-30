@@ -95,6 +95,15 @@ def create_app(
         except Exception as exc:
             logger.warning("companion_router_register_failed", error=str(exc))
 
+    # --- HenningGPT router ---
+    try:
+        from companion.henninggpt_router import router as henninggpt_router
+
+        app.include_router(henninggpt_router)
+        logger.info("henninggpt_router_registered", prefix="/companion/henninggpt")
+    except Exception as exc:
+        logger.warning("henninggpt_router_register_failed", error=str(exc))
+
     # --- Health endpoint (exempt from auth) ---
     @app.get("/_health", tags=["health"])
     async def health() -> dict[str, str]:

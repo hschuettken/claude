@@ -216,6 +216,11 @@ async def _register_with_oracle() -> None:
                     "path": "/agent-economy",
                     "purpose": "Agent Economy registry, tasks, budget, and spawn requests page",
                 },
+                {
+                    "method": "GET",
+                    "path": "/henning-gpt",
+                    "purpose": "HenningGPT personal AI model — decision memory, preference graph, delegation",
+                },
             ],
             "nats_subjects": [
                 "heartbeat.dashboard",
@@ -358,6 +363,7 @@ import page_cognitive  # noqa: E402
 import page_controls  # noqa: E402
 import page_digital_twin  # noqa: E402
 import page_family  # noqa: E402
+import page_henning_gpt  # noqa: E402
 import page_home  # noqa: E402
 import page_infra  # noqa: E402
 import page_life_nav  # noqa: E402
@@ -372,6 +378,7 @@ page_family.setup(state, settings)
 page_cognitive.setup(state, settings)
 page_agent_economy.setup(state, settings)
 page_infra.setup(state, settings)
+page_henning_gpt.setup(state, settings)
 page_chat.setup(state, settings, nats)
 
 # ---------------------------------------------------------------------------

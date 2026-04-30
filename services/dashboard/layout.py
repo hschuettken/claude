@@ -53,6 +53,7 @@ NAV_ITEMS = [
     ("/cognitive", "psychology", "Brain"),
     ("/agent-economy", "smart_toy", "Agents"),
     ("/infra", "monitor_heart", "Infra"),
+    ("/henning-gpt", "person", "HenningGPT"),
     ("/chat", "chat", "Chat"),
 ]
 
