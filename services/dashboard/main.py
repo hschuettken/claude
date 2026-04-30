@@ -211,6 +211,11 @@ async def _register_with_oracle() -> None:
                     "path": "/digital-twin",
                     "purpose": "Digital Twin scenario comparison + thermal map page",
                 },
+                {
+                    "method": "GET",
+                    "path": "/agent-economy",
+                    "purpose": "Agent Economy registry, tasks, budget, and spawn requests page",
+                },
             ],
             "nats_subjects": [
                 "heartbeat.dashboard",
@@ -347,6 +352,7 @@ def health_endpoint() -> dict[str, str]:
 # Register page modules
 # ---------------------------------------------------------------------------
 
+import page_agent_economy  # noqa: E402
 import page_chat  # noqa: E402
 import page_cognitive  # noqa: E402
 import page_controls  # noqa: E402
@@ -363,6 +369,7 @@ page_digital_twin.setup(state, settings)
 page_life_nav.setup(state, settings)
 page_family.setup(state, settings)
 page_cognitive.setup(state, settings)
+page_agent_economy.setup(state, settings)
 page_chat.setup(state, settings, nats)
 
 # ---------------------------------------------------------------------------

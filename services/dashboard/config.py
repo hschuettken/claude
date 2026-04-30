@@ -58,3 +58,6 @@ class DashboardSettings(BaseSettings):
 
     # --- Cognitive Layer API ---
     cognitive_layer_url: str = "http://cognitive-layer:8230"
+
+    # --- Agent Economy API ---
+    agent_economy_url: str = "http://agent-economy:8240"
