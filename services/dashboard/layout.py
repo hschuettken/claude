@@ -52,6 +52,7 @@ NAV_ITEMS = [
     ("/family", "family_restroom", "Family"),
     ("/cognitive", "psychology", "Brain"),
     ("/agent-economy", "smart_toy", "Agents"),
+    ("/infra", "monitor_heart", "Infra"),
     ("/chat", "chat", "Chat"),
 ]
 

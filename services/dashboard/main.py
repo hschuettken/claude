@@ -359,6 +359,7 @@ import page_controls  # noqa: E402
 import page_digital_twin  # noqa: E402
 import page_family  # noqa: E402
 import page_home  # noqa: E402
+import page_infra  # noqa: E402
 import page_life_nav  # noqa: E402
 import page_services  # noqa: E402
 
@@ -370,6 +371,7 @@ page_life_nav.setup(state, settings)
 page_family.setup(state, settings)
 page_cognitive.setup(state, settings)
 page_agent_economy.setup(state, settings)
+page_infra.setup(state, settings)
 page_chat.setup(state, settings, nats)
 
 # ---------------------------------------------------------------------------

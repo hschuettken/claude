@@ -61,3 +61,6 @@ class DashboardSettings(BaseSettings):
 
     # --- Agent Economy API ---
     agent_economy_url: str = "http://agent-economy:8240"
+
+    # --- Self-Optimizing Infrastructure API ---
+    self_optimizing_infra_url: str = "http://self-optimizing-infra:8242"
