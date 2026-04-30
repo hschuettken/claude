@@ -103,10 +103,14 @@ def setup(state: "DashboardState", settings: "DashboardSettings") -> None:
             pass
         return None
 
-    async def _post(path: str, payload: dict) -> Any:
+    async def _post(path: str, payload: dict | None, params: dict | None = None) -> Any:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.post(f"{base}{path}", json=payload)
+                r = await client.post(
+                    f"{base}{path}",
+                    json=payload,
+                    params=params,
+                )
                 if r.status_code in (200, 201):
                     return r.json()
         except Exception:
@@ -147,6 +151,8 @@ def setup(state: "DashboardState", settings: "DashboardSettings") -> None:
             "health_history": [],
             "career": [],
             "opportunities": [],
+            "meal_plans": [],
+            "optimizer_result": {},
         }
 
         async def _load_data() -> None:
@@ -158,6 +164,7 @@ def setup(state: "DashboardState", settings: "DashboardSettings") -> None:
                 _get("/api/v1/health-metrics"),
                 _get("/api/v1/career"),
                 _get("/api/v1/opportunities"),
+                _get("/api/v1/meal-plans"),
             )
             cache["dashboard"] = results[0] or {}
             cache["goals"] = results[1] or []
@@ -166,6 +173,7 @@ def setup(state: "DashboardState", settings: "DashboardSettings") -> None:
             cache["health_history"] = results[4] or []
             cache["career"] = results[5] or []
             cache["opportunities"] = results[6] or []
+            cache["meal_plans"] = results[7] or []
 
         # _on_refresh is defined before the refreshables — Python resolves
         # the refreshable names in the enclosing scope at call time, not here.
@@ -178,6 +186,8 @@ def setup(state: "DashboardState", settings: "DashboardSettings") -> None:
             render_career.refresh()
             render_weekly_review.refresh()
             render_opportunities.refresh()
+            render_meal_plans.refresh()
+            render_optimizer.refresh()
 
         await _load_data()
 
@@ -657,13 +667,32 @@ def setup(state: "DashboardState", settings: "DashboardSettings") -> None:
                     ui.label(f"{len(opps)} items").classes("text-sm").style(
                         "color: #94a3b8"
                     )
-                    ui.button(
-                        "Add",
-                        icon="add",
-                        on_click=lambda: _open_opp_dialog(),
-                    ).props("flat no-caps").style(
-                        "color: #eab308; font-size: 0.75rem"
-                    )
+                    with ui.row().classes("gap-1"):
+                        async def _refresh_radar() -> None:
+                            await _post(
+                                "/api/v1/opportunities/refresh",
+                                None,
+                                params={"categories": ["job", "investment", "travel"]},
+                            )
+                            cache["opportunities"] = (
+                                await _get("/api/v1/opportunities") or []
+                            )
+                            render_opportunities.refresh()
+
+                        ui.button(
+                            "Radar",
+                            icon="radar",
+                            on_click=_refresh_radar,
+                        ).props("flat no-caps").style(
+                            "color: #6366f1; font-size: 0.75rem"
+                        )
+                        ui.button(
+                            "Add",
+                            icon="add",
+                            on_click=lambda: _open_opp_dialog(),
+                        ).props("flat no-caps").style(
+                            "color: #eab308; font-size: 0.75rem"
+                        )
 
                 if not opps:
                     _empty_state(
@@ -720,6 +749,151 @@ def setup(state: "DashboardState", settings: "DashboardSettings") -> None:
                                 ).props("flat dense round").style("color: #64748b")
 
             render_opportunities()
+
+            # ── Cook Planner ───────────────────────────────────────────────
+            @ui.refreshable
+            def render_meal_plans() -> None:
+                section_title("Cook Planner")
+                plans = cache["meal_plans"]
+
+                with ui.row().classes("w-full items-center justify-between mb-2"):
+                    ui.label(f"{len(plans)} plans").classes("text-sm").style(
+                        "color: #94a3b8"
+                    )
+                    ui.button(
+                        "Add Plan",
+                        icon="add",
+                        on_click=lambda: _open_meal_plan_dialog(),
+                    ).props("flat no-caps").style(
+                        "color: #22c55e; font-size: 0.75rem"
+                    )
+
+                if not plans:
+                    _empty_state("restaurant", "No meal plans — add today's meals")
+                    return
+
+                with ui.column().classes("w-full gap-3"):
+                    for plan in plans[:7]:
+                        plan_date = plan.get("plan_date", "")
+                        cals = plan.get("calories_target")
+                        protein = plan.get("protein_g_target")
+                        with ui.card().classes("w-full p-4").style(
+                            "border-left: 4px solid #22c55e !important"
+                        ):
+                            with ui.row().classes("items-center justify-between w-full"):
+                                with ui.row().classes("items-center gap-2"):
+                                    ui.icon("calendar_today").style("color: #22c55e")
+                                    ui.label(plan_date).classes(
+                                        "text-sm font-semibold"
+                                    ).style("color: #e2e8f0")
+                                with ui.row().classes("gap-4"):
+                                    if cals:
+                                        ui.label(f"{cals} kcal").classes(
+                                            "text-xs"
+                                        ).style("color: #eab308")
+                                    if protein:
+                                        ui.label(f"{protein:.0f}g protein").classes(
+                                            "text-xs"
+                                        ).style("color: #3b82f6")
+                            with ui.column().classes("gap-1 mt-2"):
+                                for label, key in [
+                                    ("Breakfast", "breakfast"),
+                                    ("Lunch", "lunch"),
+                                    ("Dinner", "dinner"),
+                                ]:
+                                    val = plan.get(key, "")
+                                    if val:
+                                        with ui.row().classes("gap-2 items-center"):
+                                            ui.label(label).classes(
+                                                "text-xs font-semibold"
+                                            ).style(
+                                                "color: #64748b; min-width: 60px"
+                                            )
+                                            ui.label(val).classes("text-xs").style(
+                                                "color: #94a3b8"
+                                            )
+
+            render_meal_plans()
+
+            # ── Multi-objective Optimizer ──────────────────────────────────
+            @ui.refreshable
+            def render_optimizer() -> None:
+                section_title("Life Optimizer")
+                result = cache["optimizer_result"]
+
+                with ui.row().classes("w-full items-center justify-between mb-2"):
+                    dominant = result.get("dominant_objective", "—")
+                    ui.label(f"Focus: {dominant}").classes("text-sm").style(
+                        "color: #94a3b8"
+                    )
+                    ui.button(
+                        "Optimise",
+                        icon="auto_fix_high",
+                        on_click=lambda: _open_optimizer_dialog(),
+                    ).props("flat no-caps").style(
+                        "color: #6366f1; font-size: 0.75rem"
+                    )
+
+                recs = result.get("recommendations", [])
+                if not recs:
+                    _empty_state(
+                        "auto_fix_high",
+                        "Run the optimizer to get personalised action recommendations",
+                    )
+                    return
+
+                tradeoff = result.get("trade_off_summary", "")
+                if tradeoff:
+                    with ui.card().classes("w-full p-3 mb-2").style(
+                        "background: #1a1a2e; border: 1px solid #2d2d4a"
+                    ):
+                        ui.label(tradeoff).classes("text-xs").style(
+                            "color: #94a3b8"
+                        )
+
+                with ui.column().classes("w-full gap-3"):
+                    for i, rec in enumerate(recs[:6]):
+                        area = rec.get("life_area", "other")
+                        color = _AREA_COLOR.get(area, "#94a3b8")
+                        priority = float(rec.get("priority_score", 0.0))
+                        effort = float(rec.get("effort_score", 0.5))
+                        with ui.card().classes("w-full p-4").style(
+                            f"border-left: 4px solid {color} !important"
+                        ):
+                            with ui.row().classes("items-start gap-3 w-full"):
+                                with ui.element("div").classes(
+                                    "rounded-full flex items-center justify-center"
+                                ).style(
+                                    f"background: {color}22; width: 28px; height: 28px; "
+                                    f"min-width: 28px; color: {color}; font-weight: bold; "
+                                    "font-size: 0.75rem; text-align: center; line-height: 28px"
+                                ):
+                                    ui.label(str(i + 1))
+                                with ui.column().classes("flex-1 gap-1"):
+                                    ui.label(rec["title"]).classes(
+                                        "text-sm font-semibold"
+                                    ).style("color: #e2e8f0")
+                                    desc = rec.get("description", "")
+                                    if desc:
+                                        ui.label(desc).classes("text-xs").style(
+                                            "color: #94a3b8"
+                                        )
+                                    with ui.row().classes("gap-4 mt-1"):
+                                        ui.label(
+                                            f"Priority: {priority*100:.0f}%"
+                                        ).classes("text-xs").style(
+                                            f"color: {color}"
+                                        )
+                                        effort_label = (
+                                            "low effort"
+                                            if effort < 0.33
+                                            else ("medium" if effort < 0.66 else "high effort")
+                                        )
+                                        ui.label(effort_label).classes(
+                                            "text-xs"
+                                        ).style("color: #64748b")
+
+            render_optimizer()
 
             # ── Auto-refresh every 60 s ────────────────────────────────────
             ui.timer(60.0, _on_refresh)
@@ -1065,5 +1239,110 @@ def setup(state: "DashboardState", settings: "DashboardSettings") -> None:
                     )
                     ui.button("Add", on_click=_save).props("no-caps").style(
                         "background: #eab308; color: #0a0a14"
+                    )
+            dlg.open()
+
+        def _open_meal_plan_dialog() -> None:
+            today_iso = date.today().isoformat()
+            with ui.dialog() as dlg, ui.card().classes("p-6").style(
+                "min-width: 520px; background: #1a1a2e; gap: 16px"
+            ):
+                ui.label("Meal Plan").classes("text-lg font-bold").style(
+                    "color: #e2e8f0"
+                )
+                date_inp = ui.input(label="Date (YYYY-MM-DD)", value=today_iso).classes(
+                    "w-full"
+                )
+                breakfast_inp = ui.input(label="Breakfast").classes("w-full")
+                lunch_inp = ui.input(label="Lunch").classes("w-full")
+                dinner_inp = ui.input(label="Dinner").classes("w-full")
+                snacks_inp = ui.input(label="Snacks (optional)").classes("w-full")
+                with ui.row().classes("w-full gap-4"):
+                    cals_inp = ui.number(label="Calories target", value=None).classes(
+                        "flex-1"
+                    )
+                    protein_inp = ui.number(
+                        label="Protein (g)", value=None
+                    ).classes("flex-1")
+                notes_inp = ui.input(label="Notes (optional)").classes("w-full")
+
+                async def _save() -> None:
+                    if not date_inp.value:
+                        return
+                    payload: dict[str, Any] = {
+                        "plan_date": date_inp.value.strip(),
+                        "breakfast": (breakfast_inp.value or "").strip(),
+                        "lunch": (lunch_inp.value or "").strip(),
+                        "dinner": (dinner_inp.value or "").strip(),
+                        "snacks": (snacks_inp.value or "").strip(),
+                        "notes": (notes_inp.value or "").strip(),
+                    }
+                    if cals_inp.value:
+                        payload["calories_target"] = int(cals_inp.value)
+                    if protein_inp.value:
+                        payload["protein_g_target"] = float(protein_inp.value)
+                    await _post("/api/v1/meal-plans", payload)
+                    cache["meal_plans"] = await _get("/api/v1/meal-plans") or []
+                    render_meal_plans.refresh()
+                    dlg.close()
+
+                with ui.row().classes("gap-2 justify-end mt-2"):
+                    ui.button("Cancel", on_click=dlg.close).props("flat no-caps").style(
+                        "color: #94a3b8"
+                    )
+                    ui.button("Save", on_click=_save).props("no-caps").style(
+                        "background: #22c55e; color: white"
+                    )
+            dlg.open()
+
+        def _open_optimizer_dialog() -> None:
+            with ui.dialog() as dlg, ui.card().classes("p-6").style(
+                "min-width: 480px; background: #1a1a2e; gap: 16px"
+            ):
+                ui.label("Life Optimizer").classes("text-lg font-bold").style(
+                    "color: #e2e8f0"
+                )
+                ui.label(
+                    "Set objective weights (will be normalised to 100%)"
+                ).classes("text-xs").style("color: #94a3b8")
+
+                def _weight_row(label: str, default: int) -> Any:
+                    with ui.row().classes("w-full items-center gap-3"):
+                        ui.label(label).classes("text-sm").style(
+                            "color: #e2e8f0; min-width: 120px"
+                        )
+                        sl = ui.slider(min=0, max=100, step=5, value=default).classes(
+                            "flex-1"
+                        )
+                    return sl
+
+                career_sl = _weight_row("Career", 25)
+                finance_sl = _weight_row("Finance", 25)
+                health_sl = _weight_row("Health", 25)
+                rel_sl = _weight_row("Relationships", 25)
+                horizon_inp = ui.number(
+                    label="Time horizon (years)", value=5, min=1, max=30
+                ).classes("w-full")
+
+                async def _run() -> None:
+                    payload = {
+                        "career_weight": career_sl.value / 100.0,
+                        "finance_weight": finance_sl.value / 100.0,
+                        "health_weight": health_sl.value / 100.0,
+                        "relationships_weight": rel_sl.value / 100.0,
+                        "time_horizon_years": int(horizon_inp.value or 5),
+                    }
+                    result = await _post("/api/v1/optimize", payload)
+                    if result:
+                        cache["optimizer_result"] = result
+                        render_optimizer.refresh()
+                    dlg.close()
+
+                with ui.row().classes("gap-2 justify-end mt-2"):
+                    ui.button("Cancel", on_click=dlg.close).props("flat no-caps").style(
+                        "color: #94a3b8"
+                    )
+                    ui.button("Run", on_click=_run).props("no-caps").style(
+                        "background: #6366f1; color: white"
                     )
             dlg.open()

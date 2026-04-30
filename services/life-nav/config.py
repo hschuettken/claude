@@ -28,5 +28,9 @@ class Settings:
     # Default user (single-user homelab)
     default_user: str = os.getenv("LIFE_NAV_USER", "henning")
 
+    # intervals.icu integration (Phase 3 — Training AI)
+    intervals_api_key: str | None = os.getenv("INTERVALS_ICU_API_KEY")
+    intervals_athlete_id: str | None = os.getenv("INTERVALS_ICU_ATHLETE_ID")
+
 
 settings = Settings()

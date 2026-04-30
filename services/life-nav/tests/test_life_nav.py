@@ -853,3 +853,449 @@ async def test_get_career_milestone_not_found(test_client):
             mock_db.fetchrow = AsyncMock(return_value=None)
             resp = await client.get(f"/api/v1/career/{uuid.uuid4()}")
             assert resp.status_code == 404
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3 — Opportunity radar
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_opportunity_refresh_no_results(test_client):
+    """Refresh with no external results stores nothing and returns 0 added."""
+    async with test_client as client:
+        with patch("life_nav.main.radar") as mock_radar, \
+             patch("life_nav.main.db") as mock_db:
+            mock_radar.fetch_job_opportunities = AsyncMock(return_value=[])
+            mock_radar.fetch_etf_opportunities = AsyncMock(return_value=[])
+            mock_radar.fetch_travel_opportunities = AsyncMock(return_value=[])
+            mock_db.fetchrow = AsyncMock(return_value=None)
+            resp = await client.post(
+                "/api/v1/opportunities/refresh",
+                params={"categories": ["job", "investment", "travel"]},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["added"] == 0
+            assert set(data["categories_searched"]) == {"job", "investment", "travel"}
+
+
+@pytest.mark.asyncio
+async def test_opportunity_refresh_stores_jobs(test_client):
+    """Refresh with job results stores them and increments added count."""
+    job = {
+        "title": "Senior Python Engineer",
+        "description": "Remote-first role at AI startup",
+        "category": "job",
+        "url": "https://example.com/jobs/1",
+        "relevance_score": 0.8,
+        "source": "web_search",
+        "expires_at": None,
+    }
+    async with test_client as client:
+        with patch("life_nav.main.radar") as mock_radar, \
+             patch("life_nav.main.db") as mock_db:
+            mock_radar.fetch_job_opportunities = AsyncMock(return_value=[job])
+            mock_radar.fetch_etf_opportunities = AsyncMock(return_value=[])
+            mock_radar.fetch_travel_opportunities = AsyncMock(return_value=[])
+            # fetchrow returns a row (INSERT succeeded)
+            mock_db.fetchrow = AsyncMock(return_value={"id": uuid.uuid4()})
+            resp = await client.post(
+                "/api/v1/opportunities/refresh",
+                params={"categories": ["job"], "job_keywords": ["python", "engineer"]},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["added"] == 1
+
+
+@pytest.mark.asyncio
+async def test_opportunity_refresh_etf_and_travel(test_client):
+    """Investment and travel categories are fetched and stored."""
+    etf = {
+        "title": "Vanguard Total Market ETF (VTI)",
+        "description": "$220.10 (+1.2% today)",
+        "category": "investment",
+        "url": "https://finance.yahoo.com/quote/VTI",
+        "relevance_score": 0.7,
+        "source": "yahoo_finance",
+        "expires_at": None,
+    }
+    travel = {
+        "title": "Flight deal: Berlin → NYC €350",
+        "description": "Limited seats available",
+        "category": "travel",
+        "url": "https://deals.example.com/1",
+        "relevance_score": 0.75,
+        "source": "rss_feed",
+        "expires_at": None,
+    }
+    async with test_client as client:
+        with patch("life_nav.main.radar") as mock_radar, \
+             patch("life_nav.main.db") as mock_db:
+            mock_radar.fetch_job_opportunities = AsyncMock(return_value=[])
+            mock_radar.fetch_etf_opportunities = AsyncMock(return_value=[etf])
+            mock_radar.fetch_travel_opportunities = AsyncMock(return_value=[travel])
+            mock_db.fetchrow = AsyncMock(return_value={"id": uuid.uuid4()})
+            resp = await client.post(
+                "/api/v1/opportunities/refresh",
+                params={"categories": ["investment", "travel"]},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["added"] == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3 — Cook Planner
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_meal_plan_row(**kwargs) -> dict:
+    defaults = {
+        "id": uuid.uuid4(),
+        "user_id": "henning",
+        "plan_date": date(2026, 4, 28),
+        "breakfast": "Oatmeal with berries",
+        "lunch": "Chicken salad",
+        "dinner": "Salmon with veggies",
+        "snacks": "Apple, nuts",
+        "notes": "High protein day",
+        "calories_target": 2200,
+        "protein_g_target": 180.0,
+        "carbs_g_target": 220.0,
+        "fat_g_target": 70.0,
+        "created_at": _ts(),
+        "updated_at": _ts(),
+    }
+    defaults.update(kwargs)
+    return defaults
+
+
+@pytest.mark.asyncio
+async def test_list_meal_plans_empty(test_client):
+    async with test_client as client:
+        with patch("life_nav.main.db") as mock_db:
+            mock_db.fetch = AsyncMock(return_value=[])
+            resp = await client.get("/api/v1/meal-plans")
+            assert resp.status_code == 200
+            assert resp.json() == []
+
+
+@pytest.mark.asyncio
+async def test_create_meal_plan(test_client):
+    row = _make_meal_plan_row()
+    async with test_client as client:
+        with patch("life_nav.main.db") as mock_db:
+            mock_db.fetchrow = AsyncMock(return_value=row)
+            resp = await client.post("/api/v1/meal-plans", json={
+                "plan_date": "2026-04-28",
+                "breakfast": "Oatmeal with berries",
+                "lunch": "Chicken salad",
+                "dinner": "Salmon with veggies",
+                "calories_target": 2200,
+                "protein_g_target": 180.0,
+            })
+            assert resp.status_code == 201
+            data = resp.json()
+            assert data["breakfast"] == "Oatmeal with berries"
+            assert data["calories_target"] == 2200
+            assert data["protein_g_target"] == pytest.approx(180.0)
+
+
+@pytest.mark.asyncio
+async def test_get_meal_plan_not_found(test_client):
+    async with test_client as client:
+        with patch("life_nav.main.db") as mock_db:
+            mock_db.fetchrow = AsyncMock(return_value=None)
+            resp = await client.get(f"/api/v1/meal-plans/{uuid.uuid4()}")
+            assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_meal_plan(test_client):
+    row = _make_meal_plan_row()
+    async with test_client as client:
+        with patch("life_nav.main.db") as mock_db:
+            mock_db.fetchrow = AsyncMock(return_value=row)
+            mock_db.execute = AsyncMock()
+            resp = await client.delete(f"/api/v1/meal-plans/{row['id']}")
+            assert resp.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_delete_meal_plan_not_found(test_client):
+    async with test_client as client:
+        with patch("life_nav.main.db") as mock_db:
+            mock_db.fetchrow = AsyncMock(return_value=None)
+            resp = await client.delete(f"/api/v1/meal-plans/{uuid.uuid4()}")
+            assert resp.status_code == 404
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3 — intervals.icu sync
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_intervals_sync_not_configured(test_client):
+    """Returns 422 when intervals.icu is not configured."""
+    async with test_client as client:
+        with patch("life_nav.main.settings") as mock_settings:
+            mock_settings.intervals_api_key = None
+            mock_settings.intervals_athlete_id = None
+            resp = await client.post("/api/v1/health-metrics/sync/intervals-icu")
+            assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_intervals_sync_success(test_client):
+    """Syncs activities from intervals.icu and stores health metrics."""
+    activities = [
+        {
+            "start_date_local": "2026-04-27T08:00:00",
+            "moving_time": 3600,
+            "icu_vo2max": 48.5,
+        },
+        {
+            "start_date_local": "2026-04-25T07:30:00",
+            "moving_time": 5400,
+            "icu_vo2max": None,
+        },
+    ]
+    async with test_client as client:
+        with patch("life_nav.main.settings") as mock_settings, \
+             patch("life_nav.main.db") as mock_db, \
+             patch("httpx.AsyncClient") as mock_http:
+            mock_settings.intervals_api_key = "test-key"
+            mock_settings.intervals_athlete_id = "i12345"
+            # Mock HTTP response
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = activities
+            mock_resp.raise_for_status = MagicMock()
+            mock_http.return_value.__aenter__ = AsyncMock(return_value=MagicMock(
+                get=AsyncMock(return_value=mock_resp)
+            ))
+            mock_http.return_value.__aexit__ = AsyncMock(return_value=None)
+            # DB returns a row for each insert (both succeed)
+            mock_db.fetchrow = AsyncMock(return_value={"id": uuid.uuid4()})
+            resp = await client.post("/api/v1/health-metrics/sync/intervals-icu")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["synced"] == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 4 — Multi-objective optimizer
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_optimize_no_data(test_client):
+    """Optimizer returns a result even with no goals or health data."""
+    async with test_client as client:
+        with patch("life_nav.main.db") as mock_db:
+            mock_db.fetch = AsyncMock(return_value=[])
+            mock_db.fetchrow = AsyncMock(return_value=None)
+            resp = await client.post("/api/v1/optimize", json={
+                "finance_weight": 0.5,
+                "health_weight": 0.3,
+                "career_weight": 0.1,
+                "relationships_weight": 0.1,
+            })
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "recommendations" in data
+            assert data["dominant_objective"] == "finance"
+            assert "trade_off_summary" in data
+
+
+@pytest.mark.asyncio
+async def test_optimize_with_goals(test_client):
+    """Optimizer scores active goals and returns them as recommendations."""
+    goals = [
+        _make_goal_row(title="Get promoted", life_area="career", progress_pct=30.0),
+        _make_goal_row(title="Run marathon", life_area="health", progress_pct=50.0),
+        _make_goal_row(title="Save €50k", life_area="finance", progress_pct=10.0),
+    ]
+    async with test_client as client:
+        with patch("life_nav.main.db") as mock_db:
+            mock_db.fetch = AsyncMock(side_effect=[
+                goals,     # active goals query
+                [],        # career milestones query
+            ])
+            mock_db.fetchrow = AsyncMock(return_value=None)  # no life model, no health
+            resp = await client.post("/api/v1/optimize", json={
+                "career_weight": 0.4,
+                "finance_weight": 0.3,
+                "health_weight": 0.2,
+                "relationships_weight": 0.1,
+            })
+            assert resp.status_code == 200
+            data = resp.json()
+            assert len(data["recommendations"]) > 0
+            assert data["dominant_objective"] == "career"
+            # All recommendations should have priority_score in [0, 1]
+            for rec in data["recommendations"]:
+                assert 0.0 <= rec["priority_score"] <= 1.0
+                assert 0.0 <= rec["impact_score"] <= 1.0
+
+
+@pytest.mark.asyncio
+async def test_optimize_weights_normalised(test_client):
+    """Optimizer normalises weights that don't sum to 1."""
+    async with test_client as client:
+        with patch("life_nav.main.db") as mock_db:
+            mock_db.fetch = AsyncMock(return_value=[])
+            mock_db.fetchrow = AsyncMock(return_value=None)
+            resp = await client.post("/api/v1/optimize", json={
+                "career_weight": 1.0,
+                "finance_weight": 1.0,
+                "health_weight": 1.0,
+                "relationships_weight": 1.0,
+            })
+            assert resp.status_code == 200
+            data = resp.json()
+            total_w = sum(data["weights_used"].values())
+            assert abs(total_w - 1.0) < 0.01
+
+
+@pytest.mark.asyncio
+async def test_optimize_finance_heavy_generates_recommendation(test_client):
+    """Finance-heavy optimization generates savings-rate recommendation."""
+    model = _make_model_row(
+        monthly_income=6000.0,
+        monthly_expenses=5000.0,  # high expense ratio
+        current_net_worth=50000.0,
+        target_fi_monthly_expense=3000.0,
+        withdrawal_rate=0.04,
+    )
+    async with test_client as client:
+        with patch("life_nav.main.db") as mock_db:
+            mock_db.fetch = AsyncMock(side_effect=[
+                [],   # goals
+                [],   # career milestones
+            ])
+            mock_db.fetchrow = AsyncMock(side_effect=[
+                model,  # get_life_model_row
+                None,   # health metrics
+            ])
+            resp = await client.post("/api/v1/optimize", json={
+                "finance_weight": 0.7,
+                "career_weight": 0.1,
+                "health_weight": 0.1,
+                "relationships_weight": 0.1,
+            })
+            assert resp.status_code == 200
+            data = resp.json()
+            areas = [r["life_area"] for r in data["recommendations"]]
+            assert "finance" in areas
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3 — opportunity radar unit tests (no HTTP)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_radar_fetch_jobs_http_error():
+    """fetch_job_opportunities returns [] on HTTP error."""
+    from life_nav import opportunity_radar as radar
+    with patch("httpx.AsyncClient") as mock_http:
+        mock_http.return_value.__aenter__ = AsyncMock(side_effect=Exception("timeout"))
+        mock_http.return_value.__aexit__ = AsyncMock(return_value=None)
+        result = await radar.fetch_job_opportunities(["python"])
+        assert result == []
+
+
+@pytest.mark.asyncio
+async def test_radar_fetch_etf_http_error():
+    """fetch_etf_opportunities returns [] on HTTP error."""
+    from life_nav import opportunity_radar as radar
+    with patch("httpx.AsyncClient") as mock_http:
+        mock_http.return_value.__aenter__ = AsyncMock(side_effect=Exception("timeout"))
+        mock_http.return_value.__aexit__ = AsyncMock(return_value=None)
+        result = await radar.fetch_etf_opportunities()
+        assert result == []
+
+
+@pytest.mark.asyncio
+async def test_radar_fetch_travel_http_error():
+    """fetch_travel_opportunities returns [] on HTTP error."""
+    from life_nav import opportunity_radar as radar
+    with patch("httpx.AsyncClient") as mock_http:
+        mock_http.return_value.__aenter__ = AsyncMock(side_effect=Exception("timeout"))
+        mock_http.return_value.__aexit__ = AsyncMock(return_value=None)
+        result = await radar.fetch_travel_opportunities()
+        assert result == []
+
+
+@pytest.mark.asyncio
+async def test_radar_fetch_etf_parses_response():
+    """fetch_etf_opportunities correctly maps Yahoo Finance quote response."""
+    from life_nav import opportunity_radar as radar
+    yahoo_response = {
+        "quoteResponse": {
+            "result": [
+                {
+                    "symbol": "VTI",
+                    "longName": "Vanguard Total Stock Market ETF",
+                    "regularMarketPrice": 220.5,
+                    "regularMarketChangePercent": 1.2,
+                }
+            ]
+        }
+    }
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = yahoo_response
+    mock_resp.raise_for_status = MagicMock()
+    with patch("httpx.AsyncClient") as mock_http:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_http.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_http.return_value.__aexit__ = AsyncMock(return_value=None)
+        result = await radar.fetch_etf_opportunities(symbols=["VTI"])
+    assert len(result) == 1
+    assert result[0]["category"] == "investment"
+    assert "VTI" in result[0]["title"]
+    assert result[0]["relevance_score"] > 0.5
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3 — model validation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_meal_plan_create():
+    from life_nav.models import MealPlanCreate
+    m = MealPlanCreate(plan_date=date(2026, 4, 28), breakfast="Oats", dinner="Salmon")
+    assert m.lunch == ""
+    assert m.calories_target is None
+
+
+def test_optimize_request_defaults():
+    from life_nav.models import OptimizeRequest
+    req = OptimizeRequest()
+    assert req.career_weight == 0.25
+    assert req.time_horizon_years == 5
+
+
+def test_optimize_request_validation():
+    from life_nav.models import OptimizeRequest
+    import pydantic
+    with pytest.raises((ValueError, pydantic.ValidationError)):
+        OptimizeRequest(career_weight=1.5)  # > 1.0
+
+
+def test_action_recommendation():
+    from life_nav.models import ActionRecommendation
+    rec = ActionRecommendation(
+        title="Do X",
+        description="Because Y",
+        life_area="health",
+        priority_score=0.8,
+        impact_score=0.7,
+    )
+    assert rec.effort_score == 0.5
+    assert rec.source == "optimizer"
+
+
+def test_opportunity_refresh_result():
+    from life_nav.models import OpportunityRefreshResult
+    r = OpportunityRefreshResult(added=3, skipped=1, categories_searched=["job"])
+    assert r.added == 3
+    assert r.errors == []

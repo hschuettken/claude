@@ -23,7 +23,7 @@ import json
 import logging
 import uuid
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 import httpx
@@ -33,7 +33,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import db
 from . import monte_carlo as mc
 from .config import settings
+from . import opportunity_radar as radar
 from .models import (
+    ActionRecommendation,
     CareerMilestone,
     CareerMilestoneCreate,
     CareerMilestoneUpdate,
@@ -42,11 +44,17 @@ from .models import (
     GoalUpdate,
     HealthMetric,
     HealthMetricCreate,
+    IntervalsSyncResult,
     LifeModel,
     LifeModelUpdate,
     LifeNavDashboard,
+    MealPlan,
+    MealPlanCreate,
     Opportunity,
     OpportunityCreate,
+    OpportunityRefreshResult,
+    OptimizeRequest,
+    OptimizeResult,
     SimulationParams,
     SimulationResult,
     WeeklyReview,
@@ -879,6 +887,447 @@ async def delete_opportunity(opportunity_id: uuid.UUID):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Opportunity Radar — Phase 3: automated data source connections
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/v1/opportunities/refresh", response_model=OpportunityRefreshResult)
+async def refresh_opportunities(
+    categories: list[str] = Query(default=["job", "investment", "travel"]),
+    job_keywords: list[str] = Query(default=["software", "engineer", "python"]),
+    etf_symbols: list[str] = Query(default=[]),
+):
+    """Fetch fresh opportunities from web search, Yahoo Finance, and travel RSS feeds."""
+    result = OpportunityRefreshResult(categories_searched=list(categories))
+    now = datetime.now(timezone.utc)
+
+    fetched: list[dict[str, Any]] = []
+
+    if "job" in categories:
+        try:
+            jobs = await radar.fetch_job_opportunities(keywords=job_keywords)
+            fetched.extend(jobs)
+        except Exception as exc:
+            result.errors.append(f"job: {exc}")
+
+    if "investment" in categories:
+        try:
+            etfs = await radar.fetch_etf_opportunities(
+                symbols=etf_symbols if etf_symbols else None
+            )
+            fetched.extend(etfs)
+        except Exception as exc:
+            result.errors.append(f"investment: {exc}")
+
+    if "travel" in categories:
+        try:
+            travel = await radar.fetch_travel_opportunities()
+            fetched.extend(travel)
+        except Exception as exc:
+            result.errors.append(f"travel: {exc}")
+
+    for item in fetched:
+        try:
+            opp_row = await db.fetchrow(
+                """
+                INSERT INTO ln_opportunities (
+                    id, user_id, title, description, category,
+                    url, relevance_score, source, expires_at, created_at
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                ON CONFLICT DO NOTHING
+                RETURNING id
+                """,
+                uuid.uuid4(), _uid(),
+                item["title"][:255],
+                item.get("description", "")[:500],
+                item.get("category", "other"),
+                item.get("url"),
+                item.get("relevance_score", 0.5),
+                item.get("source", "web_search"),
+                item.get("expires_at"),
+                now,
+            )
+            if opp_row is not None:
+                result.added += 1
+            else:
+                result.skipped += 1
+        except Exception as exc:
+            result.skipped += 1
+            logger.debug("life_nav opportunity_insert_failed error=%s", exc)
+
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cook Planner — Phase 3
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _row_to_meal_plan(row: Any) -> MealPlan:
+    return MealPlan(
+        id=row["id"],
+        user_id=row["user_id"],
+        plan_date=row["plan_date"],
+        breakfast=row["breakfast"] or "",
+        lunch=row["lunch"] or "",
+        dinner=row["dinner"] or "",
+        snacks=row["snacks"] or "",
+        notes=row["notes"] or "",
+        calories_target=row["calories_target"],
+        protein_g_target=float(row["protein_g_target"]) if row["protein_g_target"] is not None else None,
+        carbs_g_target=float(row["carbs_g_target"]) if row["carbs_g_target"] is not None else None,
+        fat_g_target=float(row["fat_g_target"]) if row["fat_g_target"] is not None else None,
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+@app.get("/api/v1/meal-plans", response_model=list[MealPlan])
+async def list_meal_plans(
+    limit: int = Query(14, le=90),
+    offset: int = Query(0),
+):
+    rows = await db.fetch(
+        "SELECT * FROM ln_meal_plans WHERE user_id = $1 ORDER BY plan_date DESC LIMIT $2 OFFSET $3",
+        _uid(), limit, offset,
+    )
+    return [_row_to_meal_plan(r) for r in rows]
+
+
+@app.post("/api/v1/meal-plans", response_model=MealPlan, status_code=201)
+async def create_meal_plan(data: MealPlanCreate):
+    now = datetime.now(timezone.utc)
+    row = await db.fetchrow(
+        """
+        INSERT INTO ln_meal_plans (
+            id, user_id, plan_date, breakfast, lunch, dinner, snacks, notes,
+            calories_target, protein_g_target, carbs_g_target, fat_g_target,
+            created_at, updated_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)
+        ON CONFLICT (user_id, plan_date) DO UPDATE SET
+            breakfast = EXCLUDED.breakfast,
+            lunch = EXCLUDED.lunch,
+            dinner = EXCLUDED.dinner,
+            snacks = EXCLUDED.snacks,
+            notes = EXCLUDED.notes,
+            calories_target = EXCLUDED.calories_target,
+            protein_g_target = EXCLUDED.protein_g_target,
+            carbs_g_target = EXCLUDED.carbs_g_target,
+            fat_g_target = EXCLUDED.fat_g_target,
+            updated_at = EXCLUDED.updated_at
+        RETURNING *
+        """,
+        uuid.uuid4(), _uid(), data.plan_date,
+        data.breakfast, data.lunch, data.dinner, data.snacks, data.notes,
+        data.calories_target, data.protein_g_target, data.carbs_g_target, data.fat_g_target,
+        now,
+    )
+    if not row:
+        raise HTTPException(503, "Database unavailable")
+    return _row_to_meal_plan(row)
+
+
+@app.get("/api/v1/meal-plans/{plan_id}", response_model=MealPlan)
+async def get_meal_plan(plan_id: uuid.UUID):
+    row = await db.fetchrow(
+        "SELECT * FROM ln_meal_plans WHERE id = $1 AND user_id = $2", plan_id, _uid()
+    )
+    if not row:
+        raise HTTPException(404, "Meal plan not found")
+    return _row_to_meal_plan(row)
+
+
+@app.delete("/api/v1/meal-plans/{plan_id}", status_code=204)
+async def delete_meal_plan(plan_id: uuid.UUID):
+    existing = await db.fetchrow(
+        "SELECT id FROM ln_meal_plans WHERE id = $1 AND user_id = $2", plan_id, _uid()
+    )
+    if not existing:
+        raise HTTPException(404, "Meal plan not found")
+    await db.execute("DELETE FROM ln_meal_plans WHERE id = $1", plan_id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# intervals.icu sync — Phase 3: Training AI
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/v1/health-metrics/sync/intervals-icu", response_model=IntervalsSyncResult)
+async def sync_intervals_icu(days_back: int = Query(default=7, ge=1, le=90)):
+    """Sync recent workouts from intervals.icu as health metric entries."""
+    if not settings.intervals_api_key or not settings.intervals_athlete_id:
+        raise HTTPException(
+            422,
+            "intervals.icu not configured — set INTERVALS_ICU_API_KEY and INTERVALS_ICU_ATHLETE_ID",
+        )
+
+    from base64 import b64encode
+    from datetime import date as _date
+
+    athlete_id = settings.intervals_athlete_id
+    api_key = settings.intervals_api_key
+    auth = b64encode(f"API:{api_key}".encode()).decode()
+
+    oldest_date = (datetime.now(timezone.utc) - timedelta(days=days_back)).date()
+    newest_date = datetime.now(timezone.utc).date()
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"https://intervals.icu/api/v1/athlete/{athlete_id}/activities",
+                params={
+                    "oldest": str(oldest_date),
+                    "newest": str(newest_date),
+                },
+                headers={"Authorization": f"Basic {auth}"},
+            )
+            resp.raise_for_status()
+            activities: list[dict[str, Any]] = resp.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(502, f"intervals.icu API error: {exc.response.status_code}")
+    except Exception as exc:
+        raise HTTPException(502, f"intervals.icu unreachable: {exc}")
+
+    synced = 0
+    latest_date: Optional[date] = None
+    now = datetime.now(timezone.utc)
+
+    for act in activities:
+        act_date_str: str = act.get("start_date_local", "")
+        if not act_date_str:
+            continue
+        try:
+            act_dt = datetime.fromisoformat(act_date_str.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+
+        # Map intervals.icu fields to health metrics
+        training_hours: Optional[float] = None
+        moving_time = act.get("moving_time") or act.get("elapsed_time")
+        if moving_time:
+            training_hours = round(moving_time / 3600, 2)
+
+        # icu_training_load can indicate intensity; use icu_vo2max if available
+        vo2max: Optional[float] = act.get("icu_vo2max") or act.get("estimated_vo2max")
+
+        row = await db.fetchrow(
+            """
+            INSERT INTO ln_health_metrics (
+                id, user_id, measured_at, weight_kg, resting_hr,
+                vo2max_estimated, sleep_hours_avg, training_hours_week, source, created_at
+            ) VALUES ($1,$2,$3,NULL,NULL,$4,NULL,$5,'intervals_icu',$6)
+            ON CONFLICT DO NOTHING
+            RETURNING id
+            """,
+            uuid.uuid4(), _uid(), act_dt,
+            vo2max, training_hours, now,
+        )
+        if row is not None:
+            synced += 1
+            act_date = act_dt.date()
+            if latest_date is None or act_date > latest_date:
+                latest_date = act_date
+
+    return IntervalsSyncResult(synced=synced, latest_activity_date=latest_date)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-objective optimizer — Phase 4
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/v1/optimize", response_model=OptimizeResult)
+async def optimize_life(req: OptimizeRequest):
+    """Multi-objective optimizer: rank life actions by weighted career/finance/health/relationships score."""
+    weights = {
+        "career": req.career_weight,
+        "finance": req.finance_weight,
+        "health": req.health_weight,
+        "relationships": req.relationships_weight,
+    }
+    # Normalise weights to sum to 1 (handle zero-sum edge case)
+    total_w = sum(weights.values()) or 1.0
+    weights = {k: v / total_w for k, v in weights.items()}
+
+    dominant = max(weights, key=lambda k: weights[k])
+
+    recommendations: list[ActionRecommendation] = []
+
+    # 1. Score active goals by area weight × incompleteness
+    goal_rows = await db.fetch(
+        "SELECT * FROM ln_goals WHERE user_id = $1 AND status = 'active' ORDER BY created_at",
+        _uid(),
+    )
+    for row in goal_rows:
+        area = row["life_area"]
+        progress = float(row["progress_pct"])
+        area_weight = weights.get(area, weights.get("career", 0.25))  # map 'learning','leisure' → career
+        if area in ("learning", "leisure"):
+            area_weight = weights.get("career", 0.25)
+        if area == "other":
+            area_weight = 0.1
+        incompleteness = 1.0 - progress / 100.0
+        priority = round(area_weight * incompleteness, 3)
+        if priority < 0.01:
+            continue
+        recommendations.append(ActionRecommendation(
+            title=f"Progress: {row['title']}",
+            description=f"Currently at {progress:.0f}% — push toward completion",
+            life_area=area,
+            priority_score=min(1.0, priority * 2),
+            impact_score=min(1.0, area_weight * 2),
+            effort_score=0.5,
+            source="goal",
+        ))
+
+    # 2. Finance-specific recommendations from life model
+    model_row = await _get_life_model_row()
+    if model_row and weights["finance"] > 0.1:
+        current_nw = float(model_row["current_net_worth"])
+        monthly_inc = float(model_row["monthly_income"])
+        monthly_exp = float(model_row["monthly_expenses"])
+        fi_monthly = float(model_row["target_fi_monthly_expense"])
+        wr = float(model_row["withdrawal_rate"])
+        fi_target = (fi_monthly * 12) / max(wr, 0.001)
+        fi_progress_pct = (current_nw / fi_target * 100) if fi_target > 0 else 0
+        monthly_savings = monthly_inc - monthly_exp
+        savings_rate = (monthly_savings / monthly_inc) if monthly_inc > 0 else 0.0
+
+        if fi_progress_pct < 50:
+            priority = round(weights["finance"] * (1 - fi_progress_pct / 100), 3)
+            savings_target = monthly_savings * 1.1
+            recommendations.append(ActionRecommendation(
+                title="Increase monthly savings rate",
+                description=(
+                    f"Currently saving {savings_rate*100:.0f}% (€{monthly_savings:.0f}/mo). "
+                    f"FI progress at {fi_progress_pct:.0f}%. "
+                    f"Raising savings by 10% → €{savings_target:.0f}/mo accelerates FI."
+                ),
+                life_area="finance",
+                priority_score=min(1.0, priority * 2),
+                impact_score=min(1.0, weights["finance"] * 1.5),
+                effort_score=0.3,
+                source="finance",
+            ))
+
+        if monthly_exp > monthly_inc * 0.7:
+            recommendations.append(ActionRecommendation(
+                title="Review expense categories",
+                description=(
+                    f"Expenses are {monthly_exp/monthly_inc*100:.0f}% of income. "
+                    "Identifying 3 discretionary categories to cut can meaningfully extend runway."
+                ),
+                life_area="finance",
+                priority_score=round(weights["finance"] * 0.7, 3),
+                impact_score=round(weights["finance"], 3),
+                effort_score=0.2,
+                source="finance",
+            ))
+
+    # 3. Health recommendations from latest metrics
+    health_row = await db.fetchrow(
+        "SELECT * FROM ln_health_metrics WHERE user_id = $1 ORDER BY measured_at DESC LIMIT 1",
+        _uid(),
+    )
+    if weights["health"] > 0.1:
+        if health_row:
+            vo2max = float(health_row["vo2max_estimated"]) if health_row["vo2max_estimated"] else None
+            training_h = float(health_row["training_hours_week"]) if health_row["training_hours_week"] else None
+            if vo2max is not None and vo2max < 45:
+                recommendations.append(ActionRecommendation(
+                    title="Improve aerobic fitness (VO2max)",
+                    description=(
+                        f"VO2max {vo2max:.1f} ml/kg/min is below optimal. "
+                        "Adding 1-2 zone-2 sessions/week can raise VO2max by 5-10% in 3 months."
+                    ),
+                    life_area="health",
+                    priority_score=round(weights["health"] * 0.9, 3),
+                    impact_score=round(weights["health"], 3),
+                    effort_score=0.4,
+                    source="health",
+                ))
+            if training_h is not None and training_h < 3:
+                recommendations.append(ActionRecommendation(
+                    title="Increase weekly training volume",
+                    description=(
+                        f"Training {training_h:.1f}h/week. "
+                        "Research suggests 5+ hours/week optimises longevity and cognitive health."
+                    ),
+                    life_area="health",
+                    priority_score=round(weights["health"] * 0.8, 3),
+                    impact_score=round(weights["health"], 3),
+                    effort_score=0.4,
+                    source="health",
+                ))
+        else:
+            # No health data — recommend tracking
+            recommendations.append(ActionRecommendation(
+                title="Start tracking health metrics",
+                description="No health data logged yet. Begin tracking weight, VO2max, and training hours weekly.",
+                life_area="health",
+                priority_score=round(weights["health"] * 0.6, 3),
+                impact_score=round(weights["health"], 3),
+                effort_score=0.1,
+                source="health",
+            ))
+
+    # 4. Career milestone recommendations
+    career_rows = await db.fetch(
+        "SELECT * FROM ln_career_milestones WHERE user_id = $1 AND status = 'planned' ORDER BY impact_score DESC LIMIT 3",
+        _uid(),
+    )
+    for ms in career_rows:
+        impact = ms["impact_score"] / 10.0  # normalise 1-10 to 0.1-1.0
+        priority = round(weights["career"] * impact, 3)
+        if priority < 0.01:
+            continue
+        recommendations.append(ActionRecommendation(
+            title=f"Career: {ms['title']}",
+            description=ms["description"] or "High-impact career milestone in planned state.",
+            life_area="career",
+            priority_score=min(1.0, priority * 1.5),
+            impact_score=impact,
+            effort_score=0.6,
+            source="career",
+        ))
+
+    # Sort by priority descending
+    recommendations.sort(key=lambda r: r.priority_score, reverse=True)
+    recommendations = recommendations[:10]  # top 10
+
+    # Tradeoff summary
+    tradeoffs: list[str] = []
+    if weights["finance"] > 0.4 and weights["health"] < 0.2:
+        tradeoffs.append("High finance focus may crowd out health time — consider protecting 30min/day for exercise")
+    if weights["career"] > 0.4 and weights["relationships"] < 0.15:
+        tradeoffs.append("Career intensity can erode relationship quality — schedule non-negotiable social time")
+    if weights["health"] > 0.4 and weights["career"] < 0.2:
+        tradeoffs.append("Heavy health focus is sustainable long-term; ensure career goals remain visible")
+    if not tradeoffs:
+        tradeoffs.append("Weights are balanced — no major tradeoffs detected")
+
+    # FI impact estimate
+    fi_impact: Optional[float] = None
+    if model_row and weights["finance"] > 0.3:
+        monthly_inc = float(model_row["monthly_income"])
+        monthly_exp = float(model_row["monthly_expenses"])
+        if monthly_inc > 0:
+            hypothetical_savings_rate = min(0.6, (monthly_inc - monthly_exp) / monthly_inc + 0.05)
+            fi_monthly = float(model_row["target_fi_monthly_expense"])
+            wr = float(model_row["withdrawal_rate"])
+            fi_target = (fi_monthly * 12) / max(wr, 0.001)
+            current_nw = float(model_row["current_net_worth"])
+            extra_monthly = monthly_inc * 0.05
+            if extra_monthly > 0 and fi_target > current_nw:
+                years_saved = (fi_target - current_nw) / (extra_monthly * 12)
+                fi_impact = round(max(0.1, years_saved * 0.5), 1)
+
+    return OptimizeResult(
+        recommendations=recommendations,
+        dominant_objective=dominant,
+        trade_off_summary=" | ".join(tradeoffs),
+        fi_impact_years=fi_impact,
+        weights_used=weights,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Dashboard
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1032,6 +1481,13 @@ async def _register_with_oracle() -> None:
             {"method": "GET",    "path": "/api/v1/opportunities",                "purpose": "List opportunities"},
             {"method": "POST",   "path": "/api/v1/opportunities",                "purpose": "Add opportunity"},
             {"method": "DELETE", "path": "/api/v1/opportunities/{id}",           "purpose": "Delete opportunity"},
+            {"method": "POST",   "path": "/api/v1/opportunities/refresh",        "purpose": "Radar: auto-fetch opportunities from web/ETF/travel feeds"},
+            {"method": "GET",    "path": "/api/v1/meal-plans",                   "purpose": "List meal plans (cook planner)"},
+            {"method": "POST",   "path": "/api/v1/meal-plans",                   "purpose": "Create/upsert meal plan"},
+            {"method": "GET",    "path": "/api/v1/meal-plans/{id}",              "purpose": "Get meal plan"},
+            {"method": "DELETE", "path": "/api/v1/meal-plans/{id}",              "purpose": "Delete meal plan"},
+            {"method": "POST",   "path": "/api/v1/health-metrics/sync/intervals-icu", "purpose": "Sync workouts from intervals.icu"},
+            {"method": "POST",   "path": "/api/v1/optimize",                     "purpose": "Multi-objective life optimizer"},
             {"method": "GET",    "path": "/api/v1/dashboard",                    "purpose": "Aggregated dashboard card"},
         ],
         "nats_subjects": [

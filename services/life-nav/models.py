@@ -220,6 +220,81 @@ class Opportunity(OpportunityCreate):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Cook Planner — Phase 3
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MealPlanCreate(BaseModel):
+    plan_date: date
+    breakfast: str = ""
+    lunch: str = ""
+    dinner: str = ""
+    snacks: str = ""
+    notes: str = ""
+    calories_target: Optional[int] = None
+    protein_g_target: Optional[float] = None
+    carbs_g_target: Optional[float] = None
+    fat_g_target: Optional[float] = None
+
+
+class MealPlan(MealPlanCreate):
+    id: uuid.UUID
+    user_id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-objective optimizer — Phase 4
+# ─────────────────────────────────────────────────────────────────────────────
+
+class OptimizeRequest(BaseModel):
+    career_weight: float = Field(default=0.25, ge=0.0, le=1.0)
+    finance_weight: float = Field(default=0.25, ge=0.0, le=1.0)
+    health_weight: float = Field(default=0.25, ge=0.0, le=1.0)
+    relationships_weight: float = Field(default=0.25, ge=0.0, le=1.0)
+    time_horizon_years: int = Field(default=5, ge=1, le=30)
+
+
+class ActionRecommendation(BaseModel):
+    title: str
+    description: str
+    life_area: str
+    priority_score: float = Field(ge=0.0, le=1.0)
+    impact_score: float = Field(ge=0.0, le=1.0)
+    effort_score: float = Field(default=0.5, ge=0.0, le=1.0)  # 0=low effort, 1=high
+    source: str = "optimizer"  # goal, finance, health, career
+
+
+class OptimizeResult(BaseModel):
+    recommendations: list[ActionRecommendation]
+    dominant_objective: str       # life area with highest weight
+    trade_off_summary: str        # human-readable tradeoff description
+    fi_impact_years: Optional[float] = None   # how much FI date changes if finance prioritised
+    weights_used: dict[str, float] = Field(default_factory=dict)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Opportunity refresh result — Phase 3
+# ─────────────────────────────────────────────────────────────────────────────
+
+class OpportunityRefreshResult(BaseModel):
+    added: int = 0
+    skipped: int = 0
+    categories_searched: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# intervals.icu sync result — Phase 3
+# ─────────────────────────────────────────────────────────────────────────────
+
+class IntervalsSyncResult(BaseModel):
+    synced: int = 0
+    latest_activity_date: Optional[date] = None
+    error: Optional[str] = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Dashboard
 # ─────────────────────────────────────────────────────────────────────────────
 
