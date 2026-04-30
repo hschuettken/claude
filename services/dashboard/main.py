@@ -221,6 +221,11 @@ async def _register_with_oracle() -> None:
                     "path": "/henning-gpt",
                     "purpose": "HenningGPT personal AI model — decision memory, preference graph, delegation",
                 },
+                {
+                    "method": "GET",
+                    "path": "/vision",
+                    "purpose": "NB9OS Home Brain vision and implementation area status",
+                },
             ],
             "nats_subjects": [
                 "heartbeat.dashboard",
@@ -368,6 +373,7 @@ import page_home  # noqa: E402
 import page_infra  # noqa: E402
 import page_life_nav  # noqa: E402
 import page_services  # noqa: E402
+import page_vision  # noqa: E402
 
 page_home.setup(state, settings)
 page_services.setup(state, settings)
@@ -376,6 +382,7 @@ page_digital_twin.setup(state, settings)
 page_life_nav.setup(state, settings)
 page_family.setup(state, settings)
 page_cognitive.setup(state, settings)
+page_vision.setup(state, settings)
 page_agent_economy.setup(state, settings)
 page_infra.setup(state, settings)
 page_henning_gpt.setup(state, settings)

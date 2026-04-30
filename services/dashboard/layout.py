@@ -51,6 +51,7 @@ NAV_ITEMS = [
     ("/life-nav", "explore", "Life"),
     ("/family", "family_restroom", "Family"),
     ("/cognitive", "psychology", "Brain"),
+    ("/vision", "visibility", "Vision"),
     ("/agent-economy", "smart_toy", "Agents"),
     ("/infra", "monitor_heart", "Infra"),
     ("/henning-gpt", "person", "HenningGPT"),
